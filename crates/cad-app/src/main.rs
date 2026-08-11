@@ -13,6 +13,7 @@ mod jp_font;
 mod render;
 mod selection;
 mod session;
+mod snap;
 mod tools;
 mod viewport;
 

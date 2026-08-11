@@ -17,6 +17,7 @@ pub mod entity;
 pub mod error;
 pub mod geom;
 pub mod layer;
+pub mod snap;
 
 pub use command::{Command, EditCtx, UndoStack};
 pub use document::Document;

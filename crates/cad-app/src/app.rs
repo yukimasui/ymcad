@@ -10,6 +10,7 @@ use crate::input::{self, ViewAction};
 use crate::render;
 use crate::selection::WindowMode;
 use crate::session::Session;
+use crate::snap::SnapState;
 use crate::viewport::Viewport;
 
 /// ZOOM ALL で使う既定の図面範囲（A3 横 420 × 297 mm）。
@@ -87,6 +88,10 @@ pub struct CadApp {
     viewport: Viewport,
     /// コマンドライン・ツール・選択。
     session: Session,
+    /// オブジェクトスナップ。
+    snap: SnapState,
+    /// このフレームで吸着したスナップ候補。
+    snapped: Option<cad_core::snap::SnapCandidate>,
     /// 矩形選択のドラッグ中の状態。
     rect_drag: Option<RectDrag>,
     /// 直近フレームのカーソル位置（モデル座標）。
@@ -107,6 +112,8 @@ impl CadApp {
             doc: Document::new(),
             viewport: Viewport::default(),
             session: Session::new(),
+            snap: SnapState::new(),
+            snapped: None,
             rect_drag: None,
             cursor_model: None,
             font_status,
@@ -161,6 +168,20 @@ impl CadApp {
             ui.separator();
             ui.monospace(format!("選択 {}", self.session.selection.len()));
             ui.separator();
+            if self.snap.is_enabled() {
+                // 吸着中はその種別を出す。マーカーの形と合わせて確認できるように。
+                let label = self.snap.held().map_or_else(
+                    || "OSNAP".to_owned(),
+                    |c| format!("OSNAP:{}", c.kind.label()),
+                );
+                ui.colored_label(
+                    egui::Color32::from_rgb(0xc6, 0xff, 0x00),
+                    egui::RichText::new(label).monospace(),
+                );
+            } else {
+                ui.weak(egui::RichText::new("osnap").monospace());
+            }
+            ui.separator();
             if self.session.has_active_tool() {
                 ui.colored_label(
                     egui::Color32::from_rgb(0xff, 0xc1, 0x07),
@@ -210,9 +231,35 @@ impl CadApp {
             self.apply_view_action(action);
         }
 
-        self.cursor_model = response
+        // F3 で OSNAP を切り替える。コマンドラインより先に取る必要はないが、
+        // TextEdit は F3 を消費しないのでここで拾って問題ない。
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F3)) {
+            self.snap.toggle();
+            let state = if self.snap.is_enabled() { "ON" } else { "OFF" };
+            self.session
+                .cmdline
+                .info(format!("オブジェクトスナップ: {state}"));
+        }
+
+        let raw_cursor = response
             .hover_pos()
             .map(|p| self.viewport.screen_to_model(p));
+
+        // スナップは点の入力を待っているときだけ効かせる。
+        // 選択操作中にマーカーが出ると邪魔になるため。
+        self.snapped = match (raw_cursor, self.session.wants_point()) {
+            (Some(c), true) => {
+                self.snap
+                    .update_px(&self.doc, c, &self.viewport, self.session.last_point())
+            }
+            _ => {
+                self.snap.release();
+                None
+            }
+        };
+
+        // 吸着していればそれを実際のカーソル位置として扱う。
+        self.cursor_model = self.snapped.map(|s| s.point).or(raw_cursor);
 
         let active_drag = self.handle_pointer(&response, ui);
 
@@ -226,6 +273,10 @@ impl CadApp {
 
         let preview = self.session.preview(self.cursor_model, &self.doc);
         render::draw_preview(&painter, &self.viewport, &preview);
+
+        if let Some(candidate) = &self.snapped {
+            render::draw_snap_marker(&painter, &self.viewport, candidate, true);
+        }
 
         if let Some((rect, mode)) = active_drag {
             render::draw_selection_rect(&painter, rect, mode);
@@ -292,9 +343,14 @@ impl CadApp {
         // ---- クリック ----
         if response.clicked_by(egui::PointerButton::Primary) {
             if let Some(pos) = response.interact_pointer_pos() {
-                let model = self.viewport.screen_to_model(pos);
+                // 吸着していればその点を使う。クリック位置そのままではなく
+                // スナップ点が入力されるのが OSNAP の要点。
+                let model = self
+                    .snapped
+                    .map_or_else(|| self.viewport.screen_to_model(pos), |s| s.point);
                 self.session
                     .handle_click(model, shift, pick_tolerance, &mut self.doc);
+                self.snap.release();
             }
         }
 
