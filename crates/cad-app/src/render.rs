@@ -86,6 +86,35 @@ pub fn draw_grid(painter: &egui::Painter, vp: &Viewport, visuals: &egui::Visuals
     }
 }
 
+/// `min`..=`max` の範囲を `step` 刻みで走るモデル座標を返す。
+///
+/// 本数は [`MAX_GRID_LINES`] で頭打ちにする。極端なズームや不正な刻みで
+/// 描画が停止しないことを保証するのが目的で、この上限があるおかげで
+/// グリッド描画のコストはズーム倍率によらず一定に抑えられる。
+///
+/// 添字を f64 で持って毎回 `i * step` を計算するのは、`x += step` の累積加算だと
+/// 誤差が溜まって格子が歪むため。
+fn grid_coords(min: f64, max: f64, step: f64) -> impl Iterator<Item = f64> {
+    let valid = step.is_finite() && step > 0.0 && min.is_finite() && max.is_finite() && min <= max;
+    let first = if valid { (min / step).ceil() } else { 0.0 };
+    // 本数の見積もり。f64 → 整数のキャストを避けるため、上限まで数え上げて決める。
+    // 上限が 2000 本なので数え上げのコストは無視できる。
+    let count = if valid {
+        let span = (max - min) / step;
+        let mut n = 0u32;
+        while f64::from(n) <= span && (n as usize) < MAX_GRID_LINES {
+            n += 1;
+        }
+        n
+    } else {
+        0
+    };
+
+    (0..count)
+        .map(move |k| (first + f64::from(k)) * step)
+        .take_while(move |v| *v <= max)
+}
+
 /// 指定した刻みで縦横のグリッド線を引く。
 fn draw_grid_lines(
     painter: &egui::Painter,
@@ -94,37 +123,26 @@ fn draw_grid_lines(
     color: egui::Color32,
     width: f32,
 ) {
-    if !step.is_finite() || step <= 0.0 {
-        return;
-    }
     let rect = vp.rect();
     let view = vp.visible_model_rect();
     let stroke = egui::Stroke::new(width, color);
 
     // 垂直線（モデル空間の一定 x）
-    let mut i = (view.min.x / step).ceil();
-    let mut drawn = 0;
-    while i * step <= view.max.x && drawn < MAX_GRID_LINES {
-        let x = vp.model_to_screen(Point2::new(i * step, view.min.y)).x;
+    for x in grid_coords(view.min.x, view.max.x, step) {
+        let sx = vp.model_to_screen(Point2::new(x, view.min.y)).x;
         painter.line_segment(
-            [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+            [egui::pos2(sx, rect.top()), egui::pos2(sx, rect.bottom())],
             stroke,
         );
-        i += 1.0;
-        drawn += 1;
     }
 
     // 水平線（モデル空間の一定 y）
-    let mut j = (view.min.y / step).ceil();
-    let mut drawn = 0;
-    while j * step <= view.max.y && drawn < MAX_GRID_LINES {
-        let y = vp.model_to_screen(Point2::new(view.min.x, j * step)).y;
+    for y in grid_coords(view.min.y, view.max.y, step) {
+        let sy = vp.model_to_screen(Point2::new(view.min.x, y)).y;
         painter.line_segment(
-            [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)],
+            [egui::pos2(rect.left(), sy), egui::pos2(rect.right(), sy)],
             stroke,
         );
-        j += 1.0;
-        drawn += 1;
     }
 }
 
@@ -206,6 +224,60 @@ mod tests {
                     .iter()
                     .any(|v: &f64| (mantissa - v).abs() < 1e-9);
                 assert!(ok, "nice_step の仮数 {mantissa} が 1/2/5 系列でない");
+            }
+        }
+    }
+
+    #[test]
+    fn grid_coords_covers_range_and_is_aligned() {
+        let v: Vec<f64> = grid_coords(-3.0, 7.0, 2.0).collect();
+        assert_eq!(v, vec![-2.0, 0.0, 2.0, 4.0, 6.0]);
+        // すべて step の整数倍であること（格子が歪んでいない）。
+        for x in v {
+            assert!((x / 2.0).fract().abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn grid_coords_handles_empty_and_invalid() {
+        assert_eq!(grid_coords(5.0, 1.0, 1.0).count(), 0, "min > max");
+        assert_eq!(grid_coords(0.0, 10.0, 0.0).count(), 0, "step = 0");
+        assert_eq!(grid_coords(0.0, 10.0, -1.0).count(), 0, "step < 0");
+        assert_eq!(grid_coords(0.0, 10.0, f64::NAN).count(), 0, "step = NaN");
+        assert_eq!(grid_coords(f64::NEG_INFINITY, 10.0, 1.0).count(), 0);
+    }
+
+    /// 本数は必ず上限で頭打ちになること。これが無いと極端なズームで描画が停止する。
+    #[test]
+    fn grid_coords_is_bounded() {
+        let v: Vec<f64> = grid_coords(0.0, 1e12, 1.0).collect();
+        assert_eq!(v.len(), MAX_GRID_LINES);
+    }
+
+    /// ズーム倍率 1e-6〜1e6、原点近傍と 1e6 の両方で、
+    /// グリッド線の本数が実用的な範囲に収まること（Phase 2 の受け入れ基準）。
+    #[test]
+    fn grid_line_count_stays_sane_across_zoom_range() {
+        // 800x600 の画面を想定。
+        for exp in -6..=6 {
+            let scale = 10f64.powi(exp);
+            let view_w = 800.0 / scale;
+            let minor = nice_step(12.0 / scale);
+            let major = minor * MAJOR_GRID_RATIO;
+
+            for origin in [0.0, 1e6, -1e6] {
+                let n_minor = grid_coords(origin, origin + view_w, minor).count();
+                let n_major = grid_coords(origin, origin + view_w, major).count();
+
+                assert!(
+                    n_minor <= MAX_GRID_LINES && n_major <= MAX_GRID_LINES,
+                    "scale=1e{exp} origin={origin:e}: 上限を超えた (minor={n_minor}, major={n_major})"
+                );
+                // 目標間隔 12px なので 800px の画面には 70 本前後が妥当。
+                assert!(
+                    n_minor <= 200,
+                    "scale=1e{exp} origin={origin:e}: 細グリッドが多すぎる ({n_minor} 本)"
+                );
             }
         }
     }

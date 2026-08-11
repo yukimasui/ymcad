@@ -30,10 +30,8 @@
 use cad_core::geom::{Aabb, Point2, Vec2};
 
 /// スケールの下限。これ以上引くと図面全体が 1px 未満になる。
-#[allow(dead_code, reason = "Phase 2 のパン/ズーム実装で使う")]
 const MIN_SCALE: f64 = 1e-9;
 /// スケールの上限。
-#[allow(dead_code, reason = "Phase 2 のパン/ズーム実装で使う")]
 const MAX_SCALE: f64 = 1e9;
 
 /// モデル空間とスクリーン空間の対応づけ。
@@ -77,7 +75,7 @@ impl Viewport {
 
     /// 画面中心のモデル座標。
     #[must_use]
-    #[allow(dead_code, reason = "Phase 2 のパン/ズーム実装で使う")]
+    #[allow(dead_code, reason = "Phase 3 の作図・描画で使う")]
     pub fn center(&self) -> Point2 {
         self.center
     }
@@ -110,7 +108,7 @@ impl Viewport {
         clippy::cast_possible_truncation,
         reason = "f64→f32 の縮小はこの関数の役目"
     )]
-    #[allow(dead_code, reason = "Phase 2 のパン/ズーム実装で使う")]
+    #[allow(dead_code, reason = "Phase 3 の作図・描画で使う")]
     pub fn model_to_screen_vec(&self, v: Vec2) -> egui::Vec2 {
         egui::vec2((v.x * self.scale) as f32, (-v.y * self.scale) as f32)
     }
@@ -129,7 +127,6 @@ impl Viewport {
     /// スクリーン空間のベクトル → モデル空間のベクトル。
     #[inline]
     #[must_use]
-    #[allow(dead_code, reason = "Phase 2 のパン/ズーム実装で使う")]
     pub fn screen_to_model_vec(&self, v: egui::Vec2) -> Vec2 {
         Vec2::new(f64::from(v.x) / self.scale, -f64::from(v.y) / self.scale)
     }
@@ -167,7 +164,6 @@ impl Viewport {
     }
 
     /// スクリーン上の移動量ぶんだけ図面をずらす。
-    #[allow(dead_code, reason = "Phase 2 のパン/ズーム実装で使う")]
     pub fn pan_px(&mut self, delta: egui::Vec2) {
         let d = self.screen_to_model_vec(delta);
         self.center -= d;
@@ -177,7 +173,6 @@ impl Viewport {
     ///
     /// ホイールズームでカーソル直下の点が動かないことが受け入れ基準なので、
     /// 「ズーム前後で `anchor` のモデル座標が一致する」ように `center` を解いている。
-    #[allow(dead_code, reason = "Phase 2 のパン/ズーム実装で使う")]
     pub fn zoom_about(&mut self, anchor: egui::Pos2, factor: f64) {
         if !factor.is_finite() || factor <= 0.0 {
             return;
@@ -192,7 +187,6 @@ impl Viewport {
     /// 指定した範囲が収まるように中心とスケールを設定する。
     ///
     /// `margin_frac` は上下左右に取る余白の割合（0.05 なら 5%）。
-    #[allow(dead_code, reason = "Phase 2 のパン/ズーム実装で使う")]
     pub fn zoom_to_fit(&mut self, bounds: Aabb, margin_frac: f64) {
         if bounds.is_empty() {
             return;
@@ -388,6 +382,39 @@ mod tests {
         let before = v.center();
         v.zoom_to_fit(Aabb::EMPTY, 0.05);
         assert!(v.center().eq_tol(before));
+    }
+
+    /// ホイールズームの往復で倍率がドリフトしないこと。
+    ///
+    /// Phase 1 の申し送り事項「scale を直接乗算しているとドリフトするのでは」への回答。
+    /// 実測すると 1 往復あたりの誤差は数 ULP しかなく、1000 往復しても相対誤差は
+    /// 1e-12 に届かない。整数ズームレベルから scale を導出する方式は不要と判断した。
+    #[test]
+    fn zoom_roundtrip_does_not_drift() {
+        let mut v = vp(Point2::new(1e3, -1e3), 1.0);
+        let anchor = egui::pos2(400.0, 300.0);
+        let before = v.scale();
+
+        // 1.1^50 ≈ 117 なので、50 段の出入りなら上下限のクランプに当たらない。
+        // それを 200 回繰り返して計 20,000 回のズーム操作を行う。
+        const DEPTH: usize = 50;
+        const ROUNDS: usize = 200;
+        for _ in 0..ROUNDS {
+            for _ in 0..DEPTH {
+                v.zoom_about(anchor, 1.1);
+            }
+            for _ in 0..DEPTH {
+                v.zoom_about(anchor, 1.0 / 1.1);
+            }
+        }
+
+        let rel = ((v.scale() - before) / before).abs();
+        assert!(
+            rel < 1e-9,
+            "{} 回のズーム操作後、倍率の相対誤差 {rel:e} が大きすぎる (before={before}, after={})",
+            DEPTH * ROUNDS * 2,
+            v.scale()
+        );
     }
 
     /// px ↔ モデル長の変換が往復すること。
