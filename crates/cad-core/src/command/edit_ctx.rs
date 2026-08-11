@@ -115,4 +115,35 @@ impl<'a> EditCtx<'a> {
     pub fn set_current_layer(&mut self, id: LayerId) {
         self.layers.set_current(id);
     }
+
+    /// レイヤを取り除き、中身を返す。Undo で戻せるよう必ず受け取ること。
+    ///
+    /// # Errors
+    ///
+    /// 存在しない ID の場合 [`CadError::LayerNotFound`]。
+    pub fn remove_layer(&mut self, id: LayerId) -> Result<Layer> {
+        self.layers.remove(id)
+    }
+
+    /// **元の `LayerId` のまま**レイヤを戻す。削除の Undo で使う。
+    ///
+    /// # Errors
+    ///
+    /// スロットが埋まっている場合 [`CadError::SlotOccupied`]。
+    pub fn restore_layer(&mut self, id: LayerId, layer: Layer) -> Result<()> {
+        self.layers.restore(id, layer)
+    }
+
+    /// レイヤ名を変更し、変更前の名前を返す。`by_name` の整合性も保たれる。
+    ///
+    /// 新しい名前が別のレイヤと衝突していないかのチェックは呼び出し側（コマンド）の責務。
+    ///
+    /// # Errors
+    ///
+    /// 存在しない ID の場合 [`CadError::LayerNotFound`]。
+    pub fn rename_layer(&mut self, id: LayerId, new_name: impl Into<String>) -> Result<String> {
+        self.layers
+            .rename(id, new_name)
+            .ok_or(CadError::LayerNotFound)
+    }
 }
