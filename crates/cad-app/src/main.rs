@@ -7,6 +7,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod input;
 mod jp_font;
 mod render;
 mod viewport;
