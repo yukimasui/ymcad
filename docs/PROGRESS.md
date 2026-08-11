@@ -3,7 +3,7 @@
 **このファイルは作業を中断・再開するための引き継ぎメモ。** 実装を進めたら都度更新すること。
 設計判断そのものは `docs/DECISIONS.md`（ADR）に、モジュール構成は `docs/ARCHITECTURE.md` に書く。
 
-最終更新: 2026-08-11
+最終更新: 2026-08-11 (Phase 1 実装完了・目視確認待ち)
 
 ---
 
@@ -12,8 +12,8 @@
 | | |
 |---|---|
 | 完了 Phase | **Phase 0（IME 検証スパイク）— 合格** |
-| 進行中 Phase | **Phase 1（基盤）— 着手前** |
-| 現在ブランチ | `develop` |
+| 進行中 Phase | **Phase 1（基盤）— 実装完了、ユーザー目視確認待ち** |
+| 現在ブランチ | `feature/phase-1-foundation` |
 | GitHub push | **未実施**（ローカルのみ。`main` への PR は事前にユーザー確認が必要） |
 
 ### ブランチ運用
@@ -45,53 +45,53 @@
 着手したら `[ ]` → `[x]` を更新すること。ブランチ: `feature/phase-1-foundation`
 
 ### 1-A. ワークスペース土台
-- [ ] ルート `Cargo.toml`（`[workspace]`, `resolver = "3"`, `[workspace.dependencies]`）
-- [ ] `rust-toolchain.toml` / `rustfmt.toml`
-- [ ] `crates/cad-core/Cargo.toml` … **UI 系依存を入れない**旨のコメントを冒頭に書く
-- [ ] `crates/cad-app/Cargo.toml`
+- [x] ルート `Cargo.toml`（`[workspace]`, `resolver = "3"`, `[workspace.dependencies]`）
+- [~] `rust-toolchain.toml` は作らない方針にした（CI の `dtolnay/rust-toolchain@stable` と競合するため）。`rust-version = "1.85"` を `Cargo.toml` に記載
+- [x] `crates/cad-core/Cargo.toml` … **UI 系依存を入れない**旨のコメントを冒頭に書く
+- [x] `crates/cad-app/Cargo.toml`
 
 ### 1-B. `cad-core` ジオメトリ（UI 非依存・f64 のみ）
-- [ ] `geom/tolerance.rs` … `EPS_LEN` / `EPS_ANGLE` と比較ヘルパ
-- [ ] `geom/point.rs` … `Point2`, `Vec2`
-- [ ] `geom/line.rs` … `Line`
-- [ ] `geom/arc.rs` … `Arc`, `Circle`
-- [ ] `geom/aabb.rs` … `Aabb`（`EMPTY` を単位元にした union）
-- [ ] `geom/intersect.rs` … 線分×線分 / 線分×円 / 線分×円弧 / 円×円（Phase 4 で本格使用）
-- [ ] ユニットテスト **20 件以上**（トレランス境界値を必ず含む）
+- [x] `geom/tolerance.rs` … `EPS_LEN` / `EPS_ANGLE` と比較ヘルパ
+- [x] `geom/point.rs` … `Point2`, `Vec2`
+- [x] `geom/line.rs` … `Line`
+- [x] `geom/arc.rs` … `Arc`, `Circle`
+- [x] `geom/aabb.rs` … `Aabb`（`EMPTY` を単位元にした union）
+- [x] `geom/intersect.rs` … 線分×線分 / 線分×円 / 線分×円弧 / 円×円（Phase 4 で本格使用）
+- [x] ユニットテスト **20 件以上**（トレランス境界値を必ず含む）
 
 ### 1-C. `cad-core` エンティティ / レイヤ / ドキュメント
-- [ ] `entity/id.rs` … `EntityId { index: u32, generation: u32 }`
-- [ ] `entity/store.rs` … generational arena。**`restore(id, e)` で ID を保存したまま復元できること**
-- [ ] `entity/kind.rs` … `Geometry` enum, `Entity`
-- [ ] `layer.rs` … `LayerId`, `Layer`, `LayerTable`, `ColorSpec`
-- [ ] `document.rs` … `Document`（フィールドは全て private）
-- [ ] `error.rs` … `CadError`
+- [x] `entity/id.rs` … `EntityId { index: u32, generation: u32 }`
+- [x] `entity/store.rs` … generational arena。**`restore(id, e)` で ID を保存したまま復元できること**
+- [x] `entity/kind.rs` … `Geometry` enum, `Entity`
+- [x] `layer.rs` … `LayerId`, `Layer`, `LayerTable`, `ColorSpec`
+- [x] `document.rs` … `Document`（フィールドは全て private）
+- [x] `error.rs` … `CadError`
 
 ### 1-D. `cad-core` コマンド / Undo
-- [ ] `command/edit_ctx.rs` … `EditCtx`（**エンティティを変更できる唯一の経路**）
-- [ ] `command/mod.rs` … `trait Command { execute / undo / name }`
-- [ ] `command/stack.rs` … Undo/Redo スタック（深さ 256）
-- [ ] Undo/Redo のテスト（特に「削除 → Undo で `EntityId` が一致すること」）
+- [x] `command/edit_ctx.rs` … `EditCtx`（**エンティティを変更できる唯一の経路**）
+- [x] `command/mod.rs` … `trait Command { execute / undo / name }`
+- [x] `command/stack.rs` … Undo/Redo スタック（深さ 256）
+- [x] Undo/Redo のテスト（特に「削除 → Undo で `EntityId` が一致すること」）
 
 ### 1-E. `cad-app`
-- [ ] `jp_font.rs` … `spikes/ime-check/src/jp_font.rs` を移植（**必須**。無いと UI が豆腐になる）
-- [ ] `viewport.rs` … `Viewport`（model↔screen 変換。**f64→f32 narrowing はここだけ**）
-- [ ] `render.rs` … グリッド + 原点マーカー描画
-- [ ] `main.rs` / `app.rs` … eframe 起動
+- [x] `jp_font.rs` … `spikes/ime-check/src/jp_font.rs` を移植（**必須**。無いと UI が豆腐になる）
+- [x] `viewport.rs` … `Viewport`（model↔screen 変換。**f64→f32 narrowing はここだけ**）
+- [x] `render.rs` … グリッド + 原点マーカー描画
+- [x] `main.rs` / `app.rs` … eframe 起動
 
 ### 1-F. CI とドキュメント
-- [ ] `.github/workflows/ci.yml`（fmt / clippy -D warnings / test / build --release）
-- [ ] CI に `cad-core` の UI 依存検査を入れる（**fail-closed** な形。下記「落とし穴」参照）
-- [ ] `README.md`（概要・ビルド手順・Ubuntu 依存パッケージ・キーバインド表）
-- [ ] `docs/ARCHITECTURE.md`
-- [ ] `docs/ROADMAP.md`（非スコープ項目を将来候補として列挙）
+- [x] `.github/workflows/ci.yml`（fmt / clippy -D warnings / test / build --release）
+- [x] CI に `cad-core` の UI 依存検査を入れる（**fail-closed** な形。下記「落とし穴」参照）
+- [x] `README.md`（概要・ビルド手順・Ubuntu 依存パッケージ・キーバインド表）
+- [x] `docs/ARCHITECTURE.md`
+- [x] `docs/ROADMAP.md`（非スコープ項目を将来候補として列挙）
 
 ### Phase 1 受け入れ基準
-- [ ] `cargo build --release` が警告なし
-- [ ] `cargo test` 通過（ジオメトリのユニットテスト 20 件以上）
-- [ ] `cargo clippy --all-targets -- -D warnings` 通過
+- [x] `cargo build --release` が警告なし
+- [x] `cargo test` 通過（156 件。うち cad-core のジオメトリ関連は 106 件）
+- [x] `cargo clippy --workspace --all-targets -- -D warnings` 通過
 - [ ] アプリ起動でグリッドと原点マーカーが表示される（**ユーザー目視**）
-- [ ] `cad-core/Cargo.toml` に UI 系依存が無い
+- [x] `cad-core/Cargo.toml` に UI 系依存が無い（`cargo tree` で `cad-core` 単独を確認）
 
 ---
 

@@ -87,7 +87,9 @@ egui 0.36.1 / egui-winit 0.36.1 / winit 0.30.13 のソースを直接確認し�
 
 日本語は豆腐にならず正しく描画された（Noto Sans CJK JP の明示読み込みによる）。
 
-X11 (`WAYLAND_DISPLAY= cargo run`) での比較は未実施。Wayland ネイティブが本命であり、そちらが全項目 PASS のため Phase 0 の判断には不要と判断した。Phase 1 で `cad-app` が起動できるようになった時点で X11 起動確認を行う（申し送り事項）。
+X11 (`WAYLAND_DISPLAY= cargo run`) での IME 比較は未実施。Wayland ネイティブが本命であり、そちらが全項目 PASS のため Phase 0 の判断には不要と判断した。
+
+Phase 1 で `cad-app` の X11 起動は確認済み（`WAYLAND_DISPLAY= cargo run --release` でプロセスがエラーなく継続動作）。**ただし X11 での IME 挙動と描画の見た目は未検証。** 必要になった時点で比較する。
 
 ### 決定
 
