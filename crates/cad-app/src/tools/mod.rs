@@ -18,6 +18,7 @@ pub mod edit;
 use cad_core::geom::Point2;
 use cad_core::{Command, Document, Geometry, LayerId};
 
+use crate::file_ops::FileAction;
 use crate::input::ViewAction;
 use crate::selection::Selection;
 
@@ -125,6 +126,11 @@ pub fn immediate(input: &str) -> Option<Immediate> {
         "UNDO" | "U" => Some(Immediate::Undo),
         "REDO" => Some(Immediate::Redo),
         "LAYER" | "LA" => Some(Immediate::LayerPanel),
+        "NEW" => Some(Immediate::File(FileAction::New)),
+        "OPEN" => Some(Immediate::File(FileAction::Open)),
+        "SAVE" | "QSAVE" => Some(Immediate::File(FileAction::Save)),
+        "SAVEAS" => Some(Immediate::File(FileAction::SaveAs)),
+        "QUIT" | "EXIT" => Some(Immediate::File(FileAction::Quit)),
         _ => None,
     }
 }
@@ -138,6 +144,8 @@ pub enum Immediate {
     Redo,
     /// レイヤパネルの開閉。
     LayerPanel,
+    /// ファイル操作。
+    File(FileAction),
 }
 
 impl Immediate {
@@ -148,6 +156,7 @@ impl Immediate {
             Self::Undo => "UNDO",
             Self::Redo => "REDO",
             Self::LayerPanel => "LAYER",
+            Self::File(a) => a.command_name(),
         }
     }
 }
@@ -210,6 +219,8 @@ mod tests {
         assert_eq!(immediate("undo"), Some(Immediate::Undo));
         assert_eq!(immediate("REDO"), Some(Immediate::Redo));
         assert_eq!(immediate("LA"), Some(Immediate::LayerPanel));
+        assert_eq!(immediate("save"), Some(Immediate::File(FileAction::Save)));
+        assert_eq!(immediate("OPEN"), Some(Immediate::File(FileAction::Open)));
         assert_eq!(immediate("LINE"), None);
     }
 

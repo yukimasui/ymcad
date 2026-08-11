@@ -26,6 +26,19 @@ pub enum CadError {
 
     /// 操作が許可されていない（ロックされたレイヤ上のエンティティなど）。
     NotEditable(&'static str),
+
+    /// ファイルの読み書きに失敗した（`std::io::Error` はこの型が要求する
+    /// `Eq` を実装しないため、メッセージだけを文字列として保持する）。
+    Io(String),
+
+    /// DXF などの構文として成立しない入力。`line` は 1 始まりの行番号
+    /// （厳密な対応が取れない場合はファイル末尾の行数）。
+    Parse {
+        /// エラー箇所の行番号（1 始まり）。
+        line: usize,
+        /// 人間向けの説明。
+        message: String,
+    },
 }
 
 impl fmt::Display for CadError {
@@ -38,6 +51,8 @@ impl fmt::Display for CadError {
                 write!(f, "ジオメトリとして成立しません: {what}")
             }
             Self::NotEditable(why) => write!(f, "編集できません: {why}"),
+            Self::Io(msg) => write!(f, "入出力エラー: {msg}"),
+            Self::Parse { line, message } => write!(f, "{line} 行目: {message}"),
         }
     }
 }

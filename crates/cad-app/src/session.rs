@@ -17,6 +17,8 @@ use crate::tools::{self, Immediate, StepInput, StepOutcome, Tool, ToolCtx};
 pub enum UiAction {
     /// レイヤパネルの開閉。
     ToggleLayerPanel,
+    /// ファイル操作。
+    File(crate::file_ops::FileAction),
 }
 
 /// 実行中コマンドが無いときのプロンプト。
@@ -245,14 +247,23 @@ impl Session {
     }
 
     fn run_immediate(&mut self, cmd: Immediate, doc: &mut Document) {
-        if cmd == Immediate::LayerPanel {
-            self.ui_actions.push(UiAction::ToggleLayerPanel);
-            return;
+        // 図面の変更ではないものは UI 要求として外へ渡す。
+        match cmd {
+            Immediate::LayerPanel => {
+                self.ui_actions.push(UiAction::ToggleLayerPanel);
+                return;
+            }
+            Immediate::File(action) => {
+                self.ui_actions.push(UiAction::File(action));
+                return;
+            }
+            Immediate::Undo | Immediate::Redo => {}
         }
+
         let result = match cmd {
             Immediate::Undo => doc.undo(),
             Immediate::Redo => doc.redo(),
-            Immediate::LayerPanel => unreachable!("直前に処理済み"),
+            _ => unreachable!("直前に処理済み"),
         };
         match result {
             Ok(Some(name)) => self.cmdline.info(format!("{}: {name}", cmd.name())),

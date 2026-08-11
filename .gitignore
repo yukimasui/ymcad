@@ -8,6 +8,8 @@ Cargo.lock.bak
 *.dxf
 !tests/**/*.dxf
 !crates/cad-core/tests/data/*.dxf
+# 動作確認用のサンプル（R12 の書き出し例）
+!docs/sample.dxf
 
 # エディタ / OS
 .vscode/

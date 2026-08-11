@@ -6,6 +6,7 @@ use cad_core::geom::{Aabb, Point2};
 use cad_core::Document;
 
 use crate::cmdline::Submission;
+use crate::file_ops::{self, FileOps, FileOutcome};
 use crate::input::{self, ViewAction};
 use crate::layer_panel::LayerPanel;
 use crate::render;
@@ -93,6 +94,10 @@ pub struct CadApp {
     snap: SnapState,
     /// レイヤパネル。
     layer_panel: LayerPanel,
+    /// ファイル操作と未保存確認。
+    files: FileOps,
+    /// 終了してよいと判断した状態。
+    quitting: bool,
     /// このフレームで吸着したスナップ候補。
     snapped: Option<cad_core::snap::SnapCandidate>,
     /// 矩形選択のドラッグ中の状態。
@@ -117,6 +122,8 @@ impl CadApp {
             session: Session::new(),
             snap: SnapState::new(),
             layer_panel: LayerPanel::new(),
+            files: FileOps::new(),
+            quitting: false,
             snapped: None,
             rect_drag: None,
             cursor_model: None,
@@ -226,6 +233,10 @@ impl CadApp {
             for action in self.session.take_ui_actions() {
                 match action {
                     UiAction::ToggleLayerPanel => self.layer_panel.toggle(),
+                    UiAction::File(a) => {
+                        let outcome = self.files.request(a, &mut self.doc);
+                        self.report_file_outcome(outcome);
+                    }
                 }
             }
         }
@@ -375,6 +386,62 @@ impl CadApp {
 }
 
 impl CadApp {
+    /// ファイル操作の結果をコマンドラインへ出す。
+    fn report_file_outcome(&mut self, outcome: FileOutcome) {
+        match outcome {
+            FileOutcome::Nothing => {}
+            FileOutcome::Ok(msg) => {
+                self.session.cmdline.info(msg);
+                // 図面が入れ替わったので、選択とスナップの状態を捨てる。
+                self.session.selection.clear();
+                self.snap.release();
+            }
+            FileOutcome::Failed(msg) => self.session.cmdline.error(msg),
+            FileOutcome::Quit => self.quitting = true,
+        }
+    }
+
+    /// ショートカットとウィンドウの終了要求を処理する。
+    fn handle_file_input(&mut self, ctx: &egui::Context) {
+        // 確認ダイアログ表示中はショートカットを受け付けない。
+        if !self.files.is_confirming() {
+            if let Some(action) = file_ops::shortcut(ctx) {
+                let outcome = self.files.request(action, &mut self.doc);
+                self.report_file_outcome(outcome);
+            }
+        }
+
+        // ウィンドウの ✕ ボタン。未保存なら一旦止めて確認する。
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
+            if self.doc.is_dirty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                let outcome = self
+                    .files
+                    .request(file_ops::FileAction::Quit, &mut self.doc);
+                self.report_file_outcome(outcome);
+            } else {
+                self.quitting = true;
+            }
+        }
+
+        let outcome = self.files.show_confirm(ctx, &mut self.doc);
+        self.report_file_outcome(outcome);
+
+        if self.quitting {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
+    /// ウィンドウタイトル。ファイル名と未保存マークを出す。
+    fn window_title(&self) -> String {
+        let name = self.doc.path().and_then(|p| p.file_name()).map_or_else(
+            || "名称未設定".to_owned(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        let dirty = if self.doc.is_dirty() { "*" } else { "" };
+        format!("{dirty}{name} — ymcad")
+    }
+
     /// レイヤパネルを描画し、返ってきたコマンドを適用する。
     fn layer_area(&mut self, ui: &mut egui::Ui) {
         if !self.layer_panel.is_open() {
@@ -395,6 +462,10 @@ impl CadApp {
 
 impl eframe::App for CadApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        self.handle_file_input(&ctx);
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
+
         egui::Panel::bottom("cmdline").show(ui, |ui| self.command_area(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         self.layer_area(ui);
