@@ -44,7 +44,7 @@ WAYLAND_DISPLAY= cargo run --release
 |---|---|
 | ジオメトリ（点・ベクトル・線分・円・円弧・AABB・交点計算） | ✅ Phase 1 |
 | 世代つきアリーナによるエンティティ管理 | ✅ Phase 1 |
-| レイヤ（色・表示/非表示・ロック） | ✅ Phase 1（UI は Phase 5） |
+| レイヤ（色・表示/非表示・ロック・線種） | ✅ Phase 1 / 5 |
 | Command による Undo / Redo（履歴 256 段） | ✅ Phase 1 |
 | グリッド表示（1/2/5 系列で自動段階変更）・原点マーカー | ✅ Phase 1 |
 | カーソル座標のリアルタイム表示 | ✅ Phase 1 |
@@ -54,7 +54,7 @@ WAYLAND_DISPLAY= cargo run --release
 | 編集コマンド（ERASE / MOVE / COPY / UNDO / REDO） | ✅ Phase 3 |
 | 選択（クリック / 窓選択 / 交差選択） | ✅ Phase 3 |
 | オブジェクトスナップ（端点/中点/中心/交点/垂線/最近点） | ✅ Phase 4 |
-| レイヤパネル・線種 | ⬜ Phase 5 |
+| レイヤパネル（追加/削除/リネーム/色/表示/ロック/線種） | ✅ Phase 5 |
 | DXF R12 入出力・ファイル操作 | ⬜ Phase 6 |
 
 ## コマンド
