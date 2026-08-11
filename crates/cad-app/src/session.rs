@@ -81,9 +81,9 @@ impl Session {
         std::mem::take(&mut self.view_actions)
     }
 
-    /// 相対座標入力の基準点。
+    /// 相対座標入力と垂線スナップの基準となる、直前に確定した点。
     #[must_use]
-    fn last_point(&self) -> Option<Point2> {
+    pub fn last_point(&self) -> Option<Point2> {
         self.tool.as_ref().and_then(|t| t.last_point())
     }
 

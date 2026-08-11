@@ -7,6 +7,7 @@
 use crate::selection::{Selection, WindowMode};
 use crate::viewport::Viewport;
 use cad_core::geom::{Line, Point2};
+use cad_core::snap::{SnapCandidate, SnapKind};
 use cad_core::{Document, Geometry};
 
 /// 細グリッドの目標間隔 [px]。この値に最も近い 1/2/5 系列の刻みを選ぶ。
@@ -360,6 +361,118 @@ pub fn draw_selection_rect(painter: &egui::Painter, rect: egui::Rect, mode: Wind
                 ));
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// スナップマーカー
+// ---------------------------------------------------------------------------
+
+/// スナップマーカーの一辺 [px]。
+const SNAP_MARKER_PX: f32 = 9.0;
+/// マーカーの線幅 [px]。
+const SNAP_MARKER_STROKE_PX: f32 = 1.6;
+/// マーカーの色。AutoCAD に倣って黄緑。
+const SNAP_MARKER_COLOR: egui::Color32 = egui::Color32::from_rgb(0xc6, 0xff, 0x00);
+
+/// スナップマーカーとツールチップを描く。
+///
+/// 記号の形は AutoCAD の慣習に合わせる。形だけで種類が分かることが操作感に効く。
+///
+/// | 種類 | 記号 |
+/// |---|---|
+/// | 端点 | 四角 |
+/// | 中点 | 三角 |
+/// | 中心 | 円 |
+/// | 交点 | ✕ |
+/// | 垂線 | 直角記号 |
+/// | 最近点 | 砂時計 |
+pub fn draw_snap_marker(
+    painter: &egui::Painter,
+    vp: &Viewport,
+    candidate: &SnapCandidate,
+    show_tooltip: bool,
+) {
+    let c = vp.model_to_screen(candidate.point);
+    let h = SNAP_MARKER_PX / 2.0;
+    let stroke = egui::Stroke::new(SNAP_MARKER_STROKE_PX, SNAP_MARKER_COLOR);
+
+    match candidate.kind {
+        SnapKind::Endpoint => {
+            painter.rect_stroke(
+                egui::Rect::from_center_size(c, egui::vec2(SNAP_MARKER_PX, SNAP_MARKER_PX)),
+                0.0,
+                stroke,
+                egui::StrokeKind::Middle,
+            );
+        }
+        SnapKind::Midpoint => {
+            closed_path(
+                painter,
+                &[
+                    egui::pos2(c.x, c.y - h),
+                    egui::pos2(c.x + h, c.y + h),
+                    egui::pos2(c.x - h, c.y + h),
+                ],
+                stroke,
+            );
+        }
+        SnapKind::Center => {
+            painter.circle_stroke(c, h, stroke);
+        }
+        SnapKind::Intersection => {
+            painter.line_segment(
+                [egui::pos2(c.x - h, c.y - h), egui::pos2(c.x + h, c.y + h)],
+                stroke,
+            );
+            painter.line_segment(
+                [egui::pos2(c.x + h, c.y - h), egui::pos2(c.x - h, c.y + h)],
+                stroke,
+            );
+        }
+        SnapKind::Perpendicular => {
+            // 直角記号（左と下の辺 + 内側の小さな角）。
+            painter.line_segment(
+                [egui::pos2(c.x - h, c.y - h), egui::pos2(c.x - h, c.y + h)],
+                stroke,
+            );
+            painter.line_segment(
+                [egui::pos2(c.x - h, c.y + h), egui::pos2(c.x + h, c.y + h)],
+                stroke,
+            );
+            painter.line_segment([egui::pos2(c.x - h, c.y), egui::pos2(c.x, c.y)], stroke);
+            painter.line_segment([egui::pos2(c.x, c.y), egui::pos2(c.x, c.y + h)], stroke);
+        }
+        SnapKind::Nearest => {
+            // 砂時計。
+            closed_path(
+                painter,
+                &[
+                    egui::pos2(c.x - h, c.y - h),
+                    egui::pos2(c.x + h, c.y - h),
+                    egui::pos2(c.x - h, c.y + h),
+                    egui::pos2(c.x + h, c.y + h),
+                ],
+                stroke,
+            );
+        }
+    }
+
+    if show_tooltip {
+        painter.text(
+            egui::pos2(c.x + SNAP_MARKER_PX, c.y - SNAP_MARKER_PX),
+            egui::Align2::LEFT_BOTTOM,
+            candidate.kind.label(),
+            egui::FontId::monospace(12.0),
+            SNAP_MARKER_COLOR,
+        );
+    }
+}
+
+/// 点列を順に結んで閉じる。
+fn closed_path(painter: &egui::Painter, points: &[egui::Pos2], stroke: egui::Stroke) {
+    for i in 0..points.len() {
+        painter.line_segment([points[i], points[(i + 1) % points.len()]], stroke);
     }
 }
 
