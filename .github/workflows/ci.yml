@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: fmt / clippy / test / build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Ubuntu の GUI ビルド依存を導入
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgtk-3-dev libxkbcommon-dev \
+            libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo build --workspace --release
+
+  invariants:
+    name: アーキテクチャ不変条件
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # cad-core は UI 非依存でなければならない（将来 wasm ビューアを載せる余地を残すため）。
+      #
+      # `cargo tree -p cad-core -i egui` の「失敗を期待する」形は使わない。
+      # ネットワークエラーやパッケージ名の typo でも非ゼロ終了するため、
+      # 検査が壊れていても「合格」に見えてしまう (fail-open)。
+      # 依存をフラットに列挙してから禁止クレート名を照合する fail-closed な形にする。
+      - name: cad-core が UI クレートに依存していないこと
+        run: |
+          set -euo pipefail
+          DEPS=$(cargo tree -p cad-core --edges normal,build --prefix none --format '{p}' \
+                 | awk '{print $1}' | sort -u)
+          # 依存リストが取れていること自体を先に確認する（fail-closed）。
+          if ! printf '%s\n' "$DEPS" | grep -qx 'cad-core'; then
+            echo "::error::cargo tree の出力を解釈できませんでした。検査が機能していません。"
+            exit 1
+          fi
+          FAIL=0
+          for ui in egui eframe egui-winit egui_glow egui-wgpu epaint emath ecolor \
+                    winit wgpu glow glutin rfd accesskit; do
+            if printf '%s\n' "$DEPS" | grep -qx "$ui"; then
+              echo "::error file=crates/cad-core/Cargo.toml::cad-core が UI クレート '$ui' に依存しています"
+              FAIL=1
+            fi
+          done
+          if [ "$FAIL" -eq 0 ]; then echo "OK: cad-core は UI 非依存です"; fi
+          exit "$FAIL"
+
+      # 図面座標は f64。cad-core に f32 を持ち込まない。
+      - name: cad-core が f64 のみで書かれていること
+        run: |
+          set -euo pipefail
+          HITS=$(grep -rn '\bf32\b' crates/cad-core/src --include='*.rs' \
+                 | grep -v ':[0-9]*: *//' || true)
+          if [ -n "$HITS" ]; then
+            echo "::error::cad-core に f32 が含まれています"; echo "$HITS"; exit 1
+          fi
+          echo "OK: cad-core に f32 はありません"
+
+      # f64 → f32 の縮小変換は viewport.rs の変換関数だけに閉じ込める。
+      - name: f64→f32 の縮小が viewport.rs に閉じていること
+        run: |
+          set -euo pipefail
+          HITS=$(grep -rn 'as f32' crates/cad-app/src --include='*.rs' \
+                 | grep -v 'src/viewport.rs' | grep -v ':[0-9]*: *//' || true)
+          if [ -n "$HITS" ]; then
+            echo "::error::viewport.rs の外で f64→f32 の縮小が行われています"; echo "$HITS"; exit 1
+          fi
+          echo "OK: 縮小変換は viewport.rs に閉じています"
+
+      # トレランスは geom/tolerance.rs に一元管理する。
+      - name: トレランスのマジックナンバーが無いこと
+        run: |
+          set -euo pipefail
+          HITS=$(grep -rnE '[0-9](\.[0-9]*)?e-[0-9]' crates/cad-core/src --include='*.rs' \
+                 | grep -v 'geom/tolerance.rs' | grep -v ':[0-9]*: *//' || true)
+          if [ -n "$HITS" ]; then
+            echo "::error::tolerance.rs の外にトレランスの直書きがあります"; echo "$HITS"; exit 1
+          fi
+          echo "OK: トレランスは tolerance.rs に一元管理されています"
