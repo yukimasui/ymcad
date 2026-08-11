@@ -24,6 +24,40 @@
 
 ---
 
+## ユーザーへの引き継ぎ（2026-08-12 時点）
+
+**全 Phase の実装が完了し、`develop` に push 済み。`main` は手つかず。**
+
+### 次にやること
+
+1. **目視確認** — 下の「目視確認が必要な項目」を上から順に。`cargo run --release` で起動する
+2. **DXF の相互運用確認** — `sudo apt install librecad` してから `librecad docs/sample.dxf`。
+   これだけは `sudo` が要るため自動で実施できなかった唯一の受け入れ基準
+3. **`main` へのマージ判断** — 指示書の「main に PR 等を行う際は必ず事前にユーザーの確認」に従い、
+   こちらからは実施していない
+
+### 不具合が見つかったら
+
+指示書の「ユーザーの不具合報告などがあれば修正してから PR 等を進める」に従い、
+先に修正する。修正は該当 Phase の `feature/` ブランチではなく、
+新しく `fix/` ブランチを切って `develop` へ入れるのがよい。
+
+### 自動検証の状況
+
+| 項目 | 結果 |
+|---|---|
+| `cargo fmt --all -- --check` | ✅ |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ |
+| `cargo test --workspace` | ✅ 454 件 |
+| `cargo build --workspace --release` | ✅ 警告なし |
+| `cad-core` が UI 非依存 | ✅ |
+| `cad-core` が f64 のみ | ✅ |
+| f64→f32 の縮小が `viewport.rs` のみ | ✅ |
+| トレランスが `tolerance.rs` に一元管理 | ✅ |
+| DXF R12 構造検査 | ✅ |
+
+---
+
 ## 自律作業モード（2026-08-11 〜）
 
 ユーザー不在のため、**Phase 2 以降を承認待ちなしで進める**ことになった。
