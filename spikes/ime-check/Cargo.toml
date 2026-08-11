@@ -1,0 +1,10 @@
+[package]
+name = "ime-check"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Phase 0 spike: verify Japanese IME (ibus) input in an egui TextEdit on Ubuntu"
+
+[dependencies]
+eframe = "0.36"
+egui = "0.36"
