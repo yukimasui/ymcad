@@ -1,0 +1,27 @@
+# INVARIANT — CI (.github/workflows/ci.yml の "cad-core must not depend on any UI crate") で機械的に検査している。
+#
+#   1. cad-core は UI 非依存。egui / eframe / egui-winit / epaint / emath / ecolor /
+#      winit / wgpu / glow / glutin / rfd / accesskit を **絶対に追加しない**。
+#      将来 wasm ビューアを載せる余地を残すための制約。
+#   2. cad-core は f64 のみ。ソース中に f32 を書かない。
+#
+# 依存を足すときは上記に触れないか必ず確認すること。
+
+[package]
+name = "cad-core"
+description = "ymcad のジオメトリ・エンティティ・コマンド・DXF。UI には一切依存しない。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+# 座標計算の精度を守るための lint。f64 → f32 の暗黙的な劣化を検出する。
+cast_possible_truncation = "warn"
+cast_precision_loss = "warn"
