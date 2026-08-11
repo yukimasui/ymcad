@@ -1,0 +1,25 @@
+//! ymcad のコア。ジオメトリ、エンティティ、コマンド、DXF 入出力を担う。
+//!
+//! # 不変条件
+//!
+//! 1. **UI 非依存。** egui / eframe / winit などに依存してはならない
+//!    （将来 wasm ビューアを載せる余地を残すため。CI で機械的に検査している）。
+//! 2. **座標はすべて `f64`。** `f32` はこのクレートに登場しない。
+//!    画面座標への変換は `cad-app` の `viewport.rs` の責務。
+//! 3. **エンティティを変更できるのは [`Command`] だけ。**
+//!    詳細は [`command`] モジュールを参照。
+
+#![forbid(unsafe_code)]
+
+pub mod command;
+pub mod document;
+pub mod entity;
+pub mod error;
+pub mod geom;
+pub mod layer;
+
+pub use command::{Command, EditCtx, UndoStack};
+pub use document::Document;
+pub use entity::{Entity, EntityId, EntityStore, Geometry};
+pub use error::{CadError, Result};
+pub use layer::{AciColor, ColorSpec, Layer, LayerId, LayerTable};
