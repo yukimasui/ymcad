@@ -96,6 +96,13 @@ impl Line {
         Aabb::new(self.a, self.b)
     }
 
+    /// 平行移動した複製を作る。
+    #[inline]
+    #[must_use]
+    pub fn translated(&self, v: Vec2) -> Self {
+        Self::new(self.a + v, self.b + v)
+    }
+
     /// Liang–Barsky 法で矩形 `r`（モデル座標系）にクリップする。
     ///
     /// 完全に矩形の外にある場合は `None`。
@@ -282,5 +289,22 @@ mod tests {
         let small = Line::new(Point2::new(0.0, 0.0), Point2::new(0.000_001, 0.0));
         assert!(eq_len(small.length(), 0.000_001));
         assert!(!small.is_degenerate());
+    }
+
+    #[test]
+    fn translated_moves_both_endpoints() {
+        let l = Line::new(Point2::new(1.0, 2.0), Point2::new(3.0, 4.0));
+        let moved = l.translated(Vec2::new(10.0, -1.0));
+        assert!(moved.a.eq_tol(Point2::new(11.0, 1.0)));
+        assert!(moved.b.eq_tol(Point2::new(13.0, 3.0)));
+        // 長さは変わらない。
+        assert!(eq_len(moved.length(), l.length()));
+    }
+
+    #[test]
+    fn translated_by_zero_is_unchanged() {
+        let l = Line::new(Point2::new(1.0, 2.0), Point2::new(3.0, 4.0));
+        let moved = l.translated(Vec2::ZERO);
+        assert_eq!(moved, l);
     }
 }

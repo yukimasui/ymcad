@@ -6,10 +6,12 @@
 pub mod basic;
 pub mod edit_ctx;
 pub mod stack;
+pub mod transform;
 
 pub use basic::{AddEntities, DeleteEntities};
 pub use edit_ctx::EditCtx;
 pub use stack::UndoStack;
+pub use transform::{CopyEntities, MoveEntities};
 
 use crate::error::Result;
 

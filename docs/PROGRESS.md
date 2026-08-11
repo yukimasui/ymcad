@@ -3,7 +3,7 @@
 **このファイルは作業を中断・再開するための引き継ぎメモ。** 実装を進めたら都度更新すること。
 設計判断そのものは `docs/DECISIONS.md`（ADR）に、モジュール構成は `docs/ARCHITECTURE.md` に書く。
 
-最終更新: 2026-08-12 (Phase 2 完了)
+最終更新: 2026-08-12 (Phase 3 完了)
 
 ---
 
@@ -11,8 +11,8 @@
 
 | | |
 |---|---|
-| 完了 Phase | **Phase 0（IME 検証）/ Phase 1（基盤）/ Phase 2（ビューポート操作）** |
-| 進行中 Phase | **Phase 3（作図コマンドとコマンドライン UI）— 着手前** |
+| 完了 Phase | **Phase 0 / 1 / 2 / 3（作図コマンドとコマンドライン UI）** |
+| 進行中 Phase | **Phase 4（オブジェクトスナップ）— 着手前** |
 | 現在ブランチ | `develop` |
 | GitHub push | `develop` は push 済み。**`main` へのマージ/PR は事前にユーザー確認が必要** |
 
@@ -50,7 +50,10 @@
 
 - [ ] Phase 2: **60fps 維持**（ステータスバーの「描画 平均/最大 ms」が 16.6ms を大きく下回るか）
   - カーソル直下の固定は単体テストで検証済みだが、体感も見てほしい
-- [ ] Phase 3: コマンドラインの操作感、窓選択/交差選択の色と方向
+- [ ] Phase 3: **コマンドラインの操作感**（キー入力が常にコマンドラインへ流れるか、
+  Space/Enter 確定、空 Enter の再実行、ラバーバンドの見え方）
+  - 窓選択（左→右、青の実線）/ 交差選択（右→左、緑の破線）の色と方向
+  - IME で日本語変換中にコマンドが誤爆しないか（`[変換中]` 表示が出る）
 - [ ] Phase 4: スナップマーカーがチラつかないこと、ヒステリシスの効き具合
 - [ ] Phase 5: レイヤパネルの操作感
 - [ ] Phase 6: 書き出した DXF が LibreCAD / QCAD で開けること（`sudo apt install librecad` が必要）
@@ -62,7 +65,7 @@
 - [x] **Phase 0** — IME 検証スパイク … 全 5 項目 PASS。`docs/DECISIONS.md` ADR-0001 参照
 - [x] **Phase 1** — 基盤 … 受け入れ基準すべて充足。ユーザー目視確認済み
 - [x] **Phase 2** — ビューポート操作 … 自動検証は充足。60fps のみユーザー目視待ち
-- [ ] **Phase 3** — 作図コマンドとコマンドライン UI ← **本アプリの核心**
+- [x] **Phase 3** — 作図コマンドとコマンドライン UI … 自動検証は全項目充足。操作感のみユーザー目視待ち
 - [ ] **Phase 4** — オブジェクトスナップ（OSNAP）
 - [ ] **Phase 5** — レイヤと画層プロパティ
 - [ ] **Phase 6** — DXF 入出力とファイル操作
@@ -158,6 +161,47 @@
 - ZOOM ALL の図面限界は暫定で A3 横（420×297mm）の定数。
   Phase 6 で DXF の `$LIMMIN` / `$LIMMAX` と対応づけて `Document` へ移す
 - `Z` → `E` / `Z` → `A` は暫定の状態機械。Phase 3 でコマンドラインへ統合する
+
+---
+
+## Phase 3 の結果（完了）
+
+ブランチ: `feature/phase-3-commands`
+
+### 実装
+- [x] 常設のコマンドライン。**キー入力は常にここへ流れる**（入力欄のクリック不要）
+- [x] `Enter` / `Space` で確定、空 `Enter` で直前コマンド再実行、`Esc` で中断・選択解除
+- [x] 実行中コマンドのプロンプト表示、履歴 10 行表示
+- [x] 座標直接入力 3 形式（`100,50` / `@100,50` / `@100<45`）+ 全角の正規化
+- [x] 作図: LINE(`L`, `C` で閉じる) / CIRCLE(`C`, `D` 直径 / `2P` 2点) / ARC(`A`, 3点)
+      / RECTANGLE(`REC`) / POLYLINE(`PL`)
+- [x] 編集: ERASE(`E`) / MOVE(`M`) / COPY(`CO`, 複数回継続) / UNDO(`U`) / REDO
+- [x] ZOOM(`Z`) をコマンドラインへ統合（Phase 2 の暫定キー処理は削除）
+- [x] 選択: クリック / 窓選択（左→右、青） / 交差選択（右→左、緑の破線） / `Shift` で解除
+- [x] 選択中エンティティのハイライト、確定前のラバーバンド表示
+
+### 受け入れ基準
+- [x] 全コマンドがエイリアスで起動する … `tools/mod.rs: aliases_resolve_to_expected_tools`
+- [x] 空 Enter による直前コマンド再実行 … `session.rs: repeat_last_command_draws_again`
+- [x] 全操作が Undo/Redo で正しく巻き戻る
+      … `session.rs: every_draw_command_round_trips_through_undo_redo`、
+      `erase_and_undo`、`move_and_undo_restores_position`、`copy_continues_for_multiple_copies`
+- [x] 座標直接入力の 3 形式すべてが動作 … `session.rs: all_three_coordinate_forms_work`
+- [x] 窓選択と交差選択が方向で正しく切り替わる … `selection.rs: window_requires_containment_crossing_does_not`
+- [ ] 操作感 → **ユーザー目視待ち**
+
+### この Phase の設計判断
+- **ラバーバンドは `Document` に入れない**（ADR-0008）。`Tool::preview` が返す派生データ。
+  途中の図形を図面に入れて後で消すと Undo 履歴が汚れ、`EditCtx` を唯一の変更経路にした
+  意味が失われる
+- **交差選択は矩形の 4 辺との交点で厳密に判定**（ADR-0009）。bbox の重なりだけだと
+  円のように bbox に隙間のある図形で誤検出する
+- **IME 変換中はコマンドラインを一切解釈しない**（ADR-0002 の実装）。`[変換中]` を画面表示
+
+### 積み残し
+- `RECTANGLE` の回転矩形、`POLYLINE` の円弧セグメントは未対応（指示書の範囲外）
+- 絶対極座標 `100<45` は指示書の 3 形式に含まれないため未対応
+- OSNAP が無いため、既存図形の端点に正確に吸着できない → Phase 4 で解決
 
 ---
 

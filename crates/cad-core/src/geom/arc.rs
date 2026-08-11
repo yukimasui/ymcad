@@ -79,6 +79,13 @@ impl Circle {
             .map(|i| self.point_at_angle(TAU * f64::from(i) / f64::from(n)))
             .collect()
     }
+
+    /// 平行移動した複製を作る。半径は変わらない。
+    #[inline]
+    #[must_use]
+    pub fn translated(&self, v: Vec2) -> Self {
+        Self::new(self.center + v, self.radius)
+    }
 }
 
 /// 円弧。`start_angle` から `end_angle` へ反時計回りに掃引する（DXF R12 ARC 準拠）。
@@ -240,6 +247,18 @@ impl Arc {
         (0..=n)
             .map(|i| self.point_at(f64::from(i) / f64::from(n)))
             .collect()
+    }
+
+    /// 平行移動した複製を作る。半径・角度は変わらない。
+    #[inline]
+    #[must_use]
+    pub fn translated(&self, v: Vec2) -> Self {
+        Self::new(
+            self.center + v,
+            self.radius,
+            self.start_angle,
+            self.end_angle,
+        )
     }
 }
 
@@ -468,5 +487,43 @@ mod tests {
         let small = Arc::new(Point2::ORIGIN, 0.000_001, 0.0, FRAC_PI_2);
         assert!(!is_zero_len(small.radius));
         assert!(eq_len(small.length(), 0.000_001 * FRAC_PI_2));
+    }
+
+    #[test]
+    fn circle_translated_keeps_radius() {
+        let c = Circle::new(Point2::new(1.0, 2.0), 5.0);
+        let moved = c.translated(Vec2::new(10.0, -3.0));
+        assert!(moved.center.eq_tol(Point2::new(11.0, -1.0)));
+        assert!(eq_len(moved.radius, c.radius));
+    }
+
+    #[test]
+    fn circle_translated_by_zero_is_unchanged() {
+        let c = Circle::new(Point2::new(1.0, 2.0), 5.0);
+        assert_eq!(c.translated(Vec2::ZERO), c);
+    }
+
+    #[test]
+    fn arc_translated_keeps_radius_and_angles() {
+        let a = Arc::new(Point2::new(1.0, 1.0), 3.0, 0.0, FRAC_PI_2);
+        let moved = a.translated(Vec2::new(-2.0, 4.0));
+        assert!(moved.center.eq_tol(Point2::new(-1.0, 5.0)));
+        assert!(eq_len(moved.radius, a.radius));
+        assert!(eq_len(moved.start_angle, a.start_angle));
+        assert!(eq_len(moved.end_angle, a.end_angle));
+    }
+
+    #[test]
+    fn arc_translated_by_zero_is_unchanged() {
+        let a = Arc::new(Point2::new(1.0, 1.0), 3.0, 0.0, FRAC_PI_2);
+        assert_eq!(a.translated(Vec2::ZERO), a);
+    }
+
+    #[test]
+    fn arc_translated_large_offset() {
+        let a = Arc::new(Point2::ORIGIN, 2.0, 0.0, PI);
+        let moved = a.translated(Vec2::new(1e6, 1e6));
+        assert!(moved.center.eq_tol(Point2::new(1e6, 1e6)));
+        assert!(eq_len(moved.radius, 2.0));
     }
 }
