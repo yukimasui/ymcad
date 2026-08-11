@@ -13,6 +13,7 @@
 
 pub mod command;
 pub mod document;
+pub mod dxf;
 pub mod entity;
 pub mod error;
 pub mod geom;
