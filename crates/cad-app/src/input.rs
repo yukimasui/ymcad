@@ -2,6 +2,10 @@
 //!
 //! egui のイベントを「何をしたいか」（[`ViewAction`]）へ翻訳するだけで、
 //! ここでは図面もビューポートも変更しない。適用は [`crate::app`] の責務。
+//!
+//! キーボードは扱わない。**キー入力はすべてコマンドラインへ流れる**ため
+//! （Phase 2 では `Z` → `E` を暫定の状態機械で処理していたが、
+//! Phase 3 でコマンドラインへ統合した）。ここが扱うのはマウスだけ。
 
 use crate::viewport::Viewport;
 
@@ -23,33 +27,7 @@ pub enum ViewAction {
     ZoomAll,
 }
 
-/// キー入力の途中状態。
-///
-/// AutoCAD の `Z` → `E` のような 2 段のキー入力を扱う。
-///
-/// Phase 3 で常設のコマンドラインを実装したら、ZOOM は他のコマンドと同様に
-/// コマンドラインへ統合し、この暫定的な状態機械は置き換える。
-#[derive(Debug, Default)]
-pub struct KeySequence {
-    /// `Z` を受け取り、オプション（`E` / `A`）を待っている。
-    awaiting_zoom_option: bool,
-}
-
-impl KeySequence {
-    /// 入力待ちのプロンプト文字列。何も待っていなければ `None`。
-    #[must_use]
-    pub fn prompt(&self) -> Option<&'static str> {
-        self.awaiting_zoom_option
-            .then_some("ZOOM オプションを指定 [全体(A)/範囲(E)]:")
-    }
-
-    /// 途中状態を捨てる（`Esc` 用）。
-    pub fn reset(&mut self) {
-        self.awaiting_zoom_option = false;
-    }
-}
-
-/// このフレームの入力から [`ViewAction`] を集める。
+/// このフレームのマウス入力から [`ViewAction`] を集める。
 ///
 /// `response` は図面キャンバスのもの。
 #[must_use]
@@ -57,7 +35,6 @@ pub fn collect_view_actions(
     response: &egui::Response,
     ui: &egui::Ui,
     vp: &Viewport,
-    keys: &mut KeySequence,
 ) -> Vec<ViewAction> {
     let mut actions = Vec::new();
 
@@ -69,56 +46,38 @@ pub fn collect_view_actions(
         }
     }
 
+    if !response.contains_pointer() {
+        return actions;
+    }
+
     // ---- ズーム: ホイール ----
     //
     // カーソル直下のモデル座標を固定するため、必ずアンカーを渡す。
-    // カーソルが画面外なら画面中心を使う。
+    // カーソルが取れない場合だけ画面中心へフォールバックする。
     let anchor = response
         .hover_pos()
         .or_else(|| ui.input(|i| i.pointer.latest_pos()))
         .unwrap_or_else(|| vp.rect().center());
 
-    if response.contains_pointer() {
-        let (scroll_y, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, f64::from(i.zoom_delta())));
+    let (scroll_y, pinch) = ui.input(|i| (i.smooth_scroll_delta.y, f64::from(i.zoom_delta())));
 
-        // CAD ではホイールはスクロールではなくズーム。
-        // ホイール手前（下）で縮小、奥（上）で拡大。
-        if scroll_y != 0.0 {
-            let steps = f64::from(scroll_y / SCROLL_POINTS_PER_ZOOM_STEP);
-            actions.push(ViewAction::ZoomAt {
-                anchor,
-                factor: ZOOM_STEP.powf(steps),
-            });
-        }
-
-        // ピンチ操作（タッチパッド）も同じ扱いにする。
-        if (pinch - 1.0).abs() > f64::EPSILON {
-            actions.push(ViewAction::ZoomAt {
-                anchor,
-                factor: pinch,
-            });
-        }
+    // CAD ではホイールはスクロールではなくズーム。
+    // ホイール手前（下）で縮小、奥（上）で拡大。
+    if scroll_y != 0.0 {
+        let steps = f64::from(scroll_y / SCROLL_POINTS_PER_ZOOM_STEP);
+        actions.push(ViewAction::ZoomAt {
+            anchor,
+            factor: ZOOM_STEP.powf(steps),
+        });
     }
 
-    // ---- キー入力 ----
-    ui.input(|i| {
-        if i.key_pressed(egui::Key::Escape) {
-            keys.reset();
-            return;
-        }
-
-        if keys.awaiting_zoom_option {
-            if i.key_pressed(egui::Key::E) {
-                actions.push(ViewAction::ZoomExtents);
-                keys.awaiting_zoom_option = false;
-            } else if i.key_pressed(egui::Key::A) {
-                actions.push(ViewAction::ZoomAll);
-                keys.awaiting_zoom_option = false;
-            }
-        } else if i.key_pressed(egui::Key::Z) {
-            keys.awaiting_zoom_option = true;
-        }
-    });
+    // ピンチ操作（タッチパッド）も同じ扱いにする。
+    if (pinch - 1.0).abs() > f64::EPSILON {
+        actions.push(ViewAction::ZoomAt {
+            anchor,
+            factor: pinch,
+        });
+    }
 
     actions
 }
@@ -126,16 +85,6 @@ pub fn collect_view_actions(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn escape_clears_pending_sequence() {
-        let mut k = KeySequence {
-            awaiting_zoom_option: true,
-        };
-        assert!(k.prompt().is_some());
-        k.reset();
-        assert!(k.prompt().is_none());
-    }
 
     /// ホイール 1 ノッチ（50 points 相当）でちょうど 1 段ズームすること。
     #[test]

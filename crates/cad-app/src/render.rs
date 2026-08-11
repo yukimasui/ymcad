@@ -4,8 +4,10 @@
 //! モデル座標からスクリーン座標への変換は必ず [`Viewport`] を経由すること
 //! （このモジュールに `as f32` を書かない）。
 
+use crate::selection::{Selection, WindowMode};
 use crate::viewport::Viewport;
-use cad_core::geom::Point2;
+use cad_core::geom::{Line, Point2};
+use cad_core::{Document, Geometry};
 
 /// 細グリッドの目標間隔 [px]。この値に最も近い 1/2/5 系列の刻みを選ぶ。
 const MINOR_GRID_TARGET_PX: f32 = 12.0;
@@ -186,6 +188,179 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     let a = f32::from(a);
     let b = f32::from(b);
     (a + (b - a) * t.clamp(0.0, 1.0)).round().clamp(0.0, 255.0) as u8
+}
+
+// ---------------------------------------------------------------------------
+// エンティティの描画
+// ---------------------------------------------------------------------------
+
+/// 通常の線幅 [px]。
+const ENTITY_STROKE_PX: f32 = 1.2;
+/// 選択中の線幅 [px]。
+const SELECTED_STROKE_PX: f32 = 2.2;
+/// 円弧・円を折れ線で近似するときの許容誤差 [px]。
+///
+/// モデル空間ではなく **画面上の** 誤差で指定するのが肝。
+/// `Viewport::px_to_model_len` でモデル空間へ換算するので、
+/// ズームしても見た目の滑らかさが一定になり、分割数も過剰にならない。
+const TESSELLATION_SAGITTA_PX: f32 = 0.3;
+
+/// 選択中のエンティティの色。
+const SELECTED_COLOR: egui::Color32 = egui::Color32::from_rgb(0x4f, 0xc3, 0xf7);
+/// ラバーバンド（確定前）の色。
+const PREVIEW_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
+
+/// 図面のエンティティを描く。
+///
+/// 非表示レイヤの要素と、画面外の要素は描かない。
+pub fn draw_entities(
+    painter: &egui::Painter,
+    doc: &Document,
+    vp: &Viewport,
+    selection: &Selection,
+) {
+    let view = vp.visible_model_rect();
+    if view.is_empty() {
+        return;
+    }
+    // 線幅ぶんだけ広げてカリングする。境界上の要素が消えないように。
+    let cull = view.expanded(vp.px_to_model_len(SELECTED_STROKE_PX));
+
+    for (id, entity) in doc.entities().iter() {
+        if !doc.layers().is_entity_visible(entity) {
+            continue;
+        }
+        if !cull.intersects(&entity.bbox()) {
+            continue;
+        }
+
+        let selected = selection.contains(id);
+        let color = if selected {
+            SELECTED_COLOR
+        } else {
+            let (r, g, b) = doc.layers().resolve_color(entity).rgb();
+            egui::Color32::from_rgb(r, g, b)
+        };
+        let width = if selected {
+            SELECTED_STROKE_PX
+        } else {
+            ENTITY_STROKE_PX
+        };
+
+        draw_geometry(painter, vp, &entity.geom, egui::Stroke::new(width, color));
+    }
+}
+
+/// 確定前のラバーバンドを描く。
+pub fn draw_preview(painter: &egui::Painter, vp: &Viewport, geoms: &[Geometry]) {
+    let stroke = egui::Stroke::new(ENTITY_STROKE_PX, PREVIEW_COLOR);
+    for g in geoms {
+        draw_geometry(painter, vp, g, stroke);
+    }
+}
+
+/// 図形 1 つを描く。
+pub fn draw_geometry(
+    painter: &egui::Painter,
+    vp: &Viewport,
+    geom: &Geometry,
+    stroke: egui::Stroke,
+) {
+    match geom {
+        Geometry::Line(l) => draw_clipped_segment(painter, vp, l, stroke),
+        Geometry::Polyline(p) => {
+            for seg in p.segments() {
+                draw_clipped_segment(painter, vp, &seg, stroke);
+            }
+        }
+        Geometry::Circle(c) => {
+            let sagitta = vp.px_to_model_len(TESSELLATION_SAGITTA_PX);
+            draw_polyline_points(painter, vp, &c.tessellate(sagitta), true, stroke);
+        }
+        Geometry::Arc(a) => {
+            let sagitta = vp.px_to_model_len(TESSELLATION_SAGITTA_PX);
+            draw_polyline_points(painter, vp, &a.tessellate(sagitta), false, stroke);
+        }
+    }
+}
+
+/// 線分を、見えている範囲へモデル空間でクリップしてから描く。
+///
+/// クリップしないと、極端にズームしたときに画面外の遠い端点が
+/// 巨大なスクリーン座標になり、tessellator が破綻する。
+fn draw_clipped_segment(painter: &egui::Painter, vp: &Viewport, line: &Line, stroke: egui::Stroke) {
+    let margin = vp.px_to_model_len(stroke.width);
+    let Some(clipped) = line.clip_to(vp.visible_model_rect().expanded(margin)) else {
+        return;
+    };
+    painter.line_segment(
+        [vp.model_to_screen(clipped.a), vp.model_to_screen(clipped.b)],
+        stroke,
+    );
+}
+
+/// 折れ線近似した点列を描く。
+fn draw_polyline_points(
+    painter: &egui::Painter,
+    vp: &Viewport,
+    points: &[Point2],
+    closed: bool,
+    stroke: egui::Stroke,
+) {
+    if points.len() < 2 {
+        return;
+    }
+    for pair in points.windows(2) {
+        draw_clipped_segment(painter, vp, &Line::new(pair[0], pair[1]), stroke);
+    }
+    if closed {
+        if let (Some(first), Some(last)) = (points.first(), points.last()) {
+            draw_clipped_segment(painter, vp, &Line::new(*last, *first), stroke);
+        }
+    }
+}
+
+/// 窓選択・交差選択の矩形を描く。
+///
+/// AutoCAD に倣い、窓選択は青系、交差選択は緑系。交差選択は破線にする。
+pub fn draw_selection_rect(painter: &egui::Painter, rect: egui::Rect, mode: WindowMode) {
+    let (fill, edge) = match mode {
+        WindowMode::Window => (
+            egui::Color32::from_rgba_unmultiplied(0x21, 0x96, 0xf3, 0x30),
+            egui::Color32::from_rgb(0x64, 0xb5, 0xf6),
+        ),
+        WindowMode::Crossing => (
+            egui::Color32::from_rgba_unmultiplied(0x4c, 0xaf, 0x50, 0x30),
+            egui::Color32::from_rgb(0x81, 0xc7, 0x84),
+        ),
+    };
+
+    painter.rect_filled(rect, 0.0, fill);
+
+    let stroke = egui::Stroke::new(1.0, edge);
+    match mode {
+        // 窓選択は実線。
+        WindowMode::Window => {
+            painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+        }
+        // 交差選択は破線。
+        WindowMode::Crossing => {
+            let corners = [
+                rect.left_top(),
+                rect.right_top(),
+                rect.right_bottom(),
+                rect.left_bottom(),
+            ];
+            for i in 0..4 {
+                painter.add(egui::Shape::dashed_line(
+                    &[corners[i], corners[(i + 1) % 4]],
+                    stroke,
+                    6.0,
+                    4.0,
+                ));
+            }
+        }
+    }
 }
 
 #[cfg(test)]

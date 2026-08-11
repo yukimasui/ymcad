@@ -5,8 +5,11 @@ use std::time::{Duration, Instant};
 use cad_core::geom::{Aabb, Point2};
 use cad_core::Document;
 
-use crate::input::{self, KeySequence, ViewAction};
+use crate::cmdline::Submission;
+use crate::input::{self, ViewAction};
 use crate::render;
+use crate::selection::WindowMode;
+use crate::session::Session;
 use crate::viewport::Viewport;
 
 /// ZOOM ALL で使う既定の図面範囲（A3 横 420 × 297 mm）。
@@ -20,6 +23,10 @@ fn default_drawing_limits() -> Aabb {
 
 /// ZOOM 時に取る余白の割合。
 const FIT_MARGIN: f64 = 0.05;
+/// クリック選択の拾い半径 [px]。画面上で一定になるようモデル空間へ換算して使う。
+const PICK_RADIUS_PX: f32 = 6.0;
+/// この距離[px]を超えてドラッグしたら、クリックではなく矩形選択とみなす。
+const DRAG_THRESHOLD_PX: f32 = 4.0;
 
 /// 直近の描画時間を保持して平均と最大を出す。
 ///
@@ -63,15 +70,26 @@ impl DrawTimer {
     }
 }
 
+/// 矩形選択のドラッグ中の状態。
+#[derive(Clone, Copy, Debug)]
+struct RectDrag {
+    /// ドラッグ開始位置（スクリーン座標）。
+    from: egui::Pos2,
+    /// 開始時に Shift が押されていたか（選択解除モード）。
+    shift: bool,
+}
+
 /// ymcad のアプリケーション状態。
 pub struct CadApp {
     /// 図面。変更は必ず `Document::apply` / `undo` / `redo` 経由で行う。
     doc: Document,
     /// モデル空間とスクリーン空間の対応。
     viewport: Viewport,
-    /// 2 段キー入力の途中状態。
-    keys: KeySequence,
-    /// 直近フレームのカーソル位置（モデル座標）。ステータスバー表示用。
+    /// コマンドライン・ツール・選択。
+    session: Session,
+    /// 矩形選択のドラッグ中の状態。
+    rect_drag: Option<RectDrag>,
+    /// 直近フレームのカーソル位置（モデル座標）。
     cursor_model: Option<Point2>,
     /// 読み込めた日本語フォントの情報。読み込めなかった場合は `None`。
     font_status: Option<String>,
@@ -88,7 +106,8 @@ impl CadApp {
         Self {
             doc: Document::new(),
             viewport: Viewport::default(),
-            keys: KeySequence::default(),
+            session: Session::new(),
+            rect_drag: None,
             cursor_model: None,
             font_status,
             draw_timer: DrawTimer::new(),
@@ -126,6 +145,8 @@ impl CadApp {
         }
     }
 
+    // ---- UI ---------------------------------------------------------------
+
     fn status_bar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             // 座標は小数点以下 4 桁で表示する。
@@ -138,15 +159,19 @@ impl CadApp {
             ui.separator();
             ui.monospace(format!("要素 {}", self.doc.entities().len()));
             ui.separator();
+            ui.monospace(format!("選択 {}", self.session.selection.len()));
+            ui.separator();
+            if self.session.has_active_tool() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(0xff, 0xc1, 0x07),
+                    egui::RichText::new("コマンド実行中").monospace(),
+                );
+                ui.separator();
+            }
 
             // 60fps の予算は 16.6ms。実測がそれを大きく下回っていることを見せる。
             let (avg, max) = self.draw_timer.stats_ms();
             ui.monospace(format!("描画 平均{avg:.2}ms 最大{max:.2}ms"));
-
-            if let Some(prompt) = self.keys.prompt() {
-                ui.separator();
-                ui.colored_label(egui::Color32::from_rgb(0xff, 0xc1, 0x07), prompt);
-            }
 
             if self.font_status.is_none() {
                 ui.separator();
@@ -156,6 +181,17 @@ impl CadApp {
                 );
             }
         });
+    }
+
+    fn command_area(&mut self, ui: &mut egui::Ui) {
+        let prompt = self.session.prompt();
+        let submission = self.session.cmdline.show(ui, &prompt);
+        if submission != Submission::None {
+            self.session.handle_submission(submission, &mut self.doc);
+            for action in self.session.take_view_actions() {
+                self.apply_view_action(action);
+            }
+        }
     }
 
     fn canvas(&mut self, ui: &mut egui::Ui) {
@@ -170,36 +206,106 @@ impl CadApp {
             self.initialized = true;
         }
 
-        for action in input::collect_view_actions(&response, ui, &self.viewport, &mut self.keys) {
+        for action in input::collect_view_actions(&response, ui, &self.viewport) {
             self.apply_view_action(action);
         }
-
-        let started = Instant::now();
-
-        // 図面領域は常に暗い背景で塗る（AutoCAD のモデル空間に倣う）。
-        painter.rect_filled(response.rect, 0.0, ui.visuals().extreme_bg_color);
-        render::draw_grid(&painter, &self.viewport, ui.visuals());
-        render::draw_origin_marker(&painter, &self.viewport);
-
-        self.draw_timer.push(started.elapsed());
 
         self.cursor_model = response
             .hover_pos()
             .map(|p| self.viewport.screen_to_model(p));
 
-        // パン中はカーソルを掴んだ形にする。
+        let active_drag = self.handle_pointer(&response, ui);
+
+        // ---- 描画 ----
+        let started = Instant::now();
+
+        painter.rect_filled(response.rect, 0.0, ui.visuals().extreme_bg_color);
+        render::draw_grid(&painter, &self.viewport, ui.visuals());
+        render::draw_origin_marker(&painter, &self.viewport);
+        render::draw_entities(&painter, &self.doc, &self.viewport, &self.session.selection);
+
+        let preview = self.session.preview(self.cursor_model, &self.doc);
+        render::draw_preview(&painter, &self.viewport, &preview);
+
+        if let Some((rect, mode)) = active_drag {
+            render::draw_selection_rect(&painter, rect, mode);
+        }
+
+        self.draw_timer.push(started.elapsed());
+
         if response.dragged_by(egui::PointerButton::Middle) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        } else if response.contains_pointer() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
         }
+    }
+
+    /// マウス操作を処理し、描画すべき選択矩形があれば返す。
+    fn handle_pointer(
+        &mut self,
+        response: &egui::Response,
+        ui: &egui::Ui,
+    ) -> Option<(egui::Rect, WindowMode)> {
+        let shift = ui.input(|i| i.modifiers.shift);
+        let pick_tolerance = self.viewport.px_to_model_len(PICK_RADIUS_PX);
+
+        // ---- 左ドラッグによる矩形選択 ----
+        //
+        // 点の入力待ち中は矩形選択に入らない（作図の邪魔をしない）。
+        if !self.session.wants_point() {
+            if response.drag_started_by(egui::PointerButton::Primary) {
+                if let Some(from) = response.interact_pointer_pos() {
+                    self.rect_drag = Some(RectDrag { from, shift });
+                }
+            }
+
+            if let Some(drag) = self.rect_drag {
+                let current = response
+                    .interact_pointer_pos()
+                    .or_else(|| response.hover_pos())
+                    .unwrap_or(drag.from);
+                let mode = WindowMode::from_drag(f64::from(drag.from.x), f64::from(current.x));
+                let rect = egui::Rect::from_two_pos(drag.from, current);
+
+                if response.drag_stopped_by(egui::PointerButton::Primary) {
+                    self.rect_drag = None;
+                    // 動きが小さいならクリック扱い（後段のクリック処理に任せる）。
+                    if rect.width() > DRAG_THRESHOLD_PX || rect.height() > DRAG_THRESHOLD_PX {
+                        let model_rect = Aabb::new(
+                            self.viewport.screen_to_model(rect.min),
+                            self.viewport.screen_to_model(rect.max),
+                        );
+                        self.session.handle_rect_select(
+                            model_rect,
+                            mode,
+                            drag.shift,
+                            &mut self.doc,
+                        );
+                        return None;
+                    }
+                } else {
+                    return Some((rect, mode));
+                }
+            }
+        }
+
+        // ---- クリック ----
+        if response.clicked_by(egui::PointerButton::Primary) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let model = self.viewport.screen_to_model(pos);
+                self.session
+                    .handle_click(model, shift, pick_tolerance, &mut self.doc);
+            }
+        }
+
+        None
     }
 }
 
 impl eframe::App for CadApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // ステータスバーはカーソル座標を出すので、キャンバスより先に配置しても
-        // 表示するのは 1 フレーム前の値になる。目視では差が分からない。
+        egui::Panel::bottom("cmdline").show(ui, |ui| self.command_area(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
-
         egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
     }
 }

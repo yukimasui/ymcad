@@ -7,9 +7,13 @@
 #![forbid(unsafe_code)]
 
 mod app;
+mod cmdline;
 mod input;
 mod jp_font;
 mod render;
+mod selection;
+mod session;
+mod tools;
 mod viewport;
 
 fn main() -> eframe::Result<()> {
