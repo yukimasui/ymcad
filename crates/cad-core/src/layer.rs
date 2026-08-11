@@ -1,10 +1,11 @@
 //! レイヤ（画層）。
 //!
-//! Phase 1 では色・表示/非表示・ロックまで。線種は Phase 5 で追加する。
+//! Phase 1 では色・表示/非表示・ロックまで。線種は Phase 5 で追加した。
 
 use std::collections::BTreeMap;
 
 use crate::entity::Entity;
+use crate::error::{CadError, Result};
 
 /// レイヤの識別子。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -62,6 +63,62 @@ pub enum ColorSpec {
     Aci(AciColor),
 }
 
+/// 線種。画面表示のみで、Phase 6 の DXF では CONTINUOUS 固定で書き出す。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, PartialOrd, Ord, Hash)]
+pub enum LineType {
+    /// 実線。
+    #[default]
+    Continuous,
+    /// 破線。
+    Dashed,
+    /// 一点鎖線。
+    Center,
+    /// 隠線。
+    Hidden,
+}
+
+impl LineType {
+    /// DXF の線種名（`"CONTINUOUS"`, `"DASHED"`, `"CENTER"`, `"HIDDEN"`）。
+    #[must_use]
+    pub fn dxf_name(self) -> &'static str {
+        match self {
+            Self::Continuous => "CONTINUOUS",
+            Self::Dashed => "DASHED",
+            Self::Center => "CENTER",
+            Self::Hidden => "HIDDEN",
+        }
+    }
+
+    /// 表示名（`"実線"`, `"破線"`, `"一点鎖線"`, `"隠線"`）。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Continuous => "実線",
+            Self::Dashed => "破線",
+            Self::Center => "一点鎖線",
+            Self::Hidden => "隠線",
+        }
+    }
+
+    /// 全種類。
+    #[must_use]
+    pub fn all() -> [LineType; 4] {
+        [Self::Continuous, Self::Dashed, Self::Center, Self::Hidden]
+    }
+
+    /// 破線パターン。線分の「描く長さ, 空ける長さ, ...」の繰り返しを
+    /// **図面単位ではなく画面 px** で返す。実線なら空スライス。
+    #[must_use]
+    pub fn dash_pattern_px(self) -> &'static [f64] {
+        match self {
+            Self::Continuous => &[],
+            Self::Dashed => &[6.0, 4.0],
+            Self::Center => &[12.0, 3.0, 3.0, 3.0],
+            Self::Hidden => &[3.0, 3.0],
+        }
+    }
+}
+
 /// レイヤ 1 つぶんの属性。
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layer {
@@ -73,6 +130,8 @@ pub struct Layer {
     pub visible: bool,
     /// ロックされているか。ロック中は選択も編集もできない。
     pub locked: bool,
+    /// 線種。
+    pub linetype: LineType,
 }
 
 impl Layer {
@@ -84,6 +143,7 @@ impl Layer {
             color,
             visible: true,
             locked: false,
+            linetype: LineType::default(),
         }
     }
 
@@ -189,6 +249,16 @@ impl LayerTable {
         self.get(entity.layer).is_some_and(Layer::is_editable)
     }
 
+    /// エンティティの実効的な線種を解決する。
+    ///
+    /// この試作では線種にエンティティ単位の上書きが無く、常にレイヤから継承する。
+    /// レイヤが見つからない場合は既定の線種を返す（描画を止めないため）。
+    #[must_use]
+    pub fn resolve_linetype(&self, entity: &Entity) -> LineType {
+        self.get(entity.layer)
+            .map_or(LineType::default(), |l| l.linetype)
+    }
+
     // ---- 変更系（`pub(crate)` — EditCtx からのみ到達可能） ----------------
 
     /// レイヤを追加する。同名があればその ID を返す。
@@ -213,6 +283,58 @@ impl LayerTable {
         if self.get(id).is_some() {
             self.current = id;
         }
+    }
+
+    /// レイヤを取り除く。取り除いた中身を返す（Undo で書き戻すため）。
+    ///
+    /// `by_name` も合わせて更新する。取り除いたレイヤが現在レイヤだった場合は
+    /// `"0"` へ戻す（呼び出し側の [`command::layer_ops::DeleteLayer`](crate::command::layer_ops::DeleteLayer)
+    /// は現在レイヤの削除自体を拒否するので、通常この分岐は通らない）。
+    ///
+    /// # Errors
+    ///
+    /// 存在しない ID の場合 [`CadError::LayerNotFound`]。
+    pub(crate) fn remove(&mut self, id: LayerId) -> Result<Layer> {
+        let slot = self
+            .layers
+            .get_mut(id.index() as usize)
+            .ok_or(CadError::LayerNotFound)?;
+        let layer = slot.take().ok_or(CadError::LayerNotFound)?;
+        self.by_name.remove(&layer.name);
+        if self.current == id {
+            self.current = LayerId::ZERO;
+        }
+        Ok(layer)
+    }
+
+    /// 削除したレイヤを **元の `LayerId` のまま** 書き戻す。`by_name` も復元する。
+    ///
+    /// # Errors
+    ///
+    /// スロットが既に使用中の場合 [`CadError::SlotOccupied`]。
+    pub(crate) fn restore(&mut self, id: LayerId, layer: Layer) -> Result<()> {
+        let index = id.index() as usize;
+        if index >= self.layers.len() {
+            self.layers.resize(index + 1, None);
+        }
+        if self.layers[index].is_some() {
+            return Err(CadError::SlotOccupied);
+        }
+        self.by_name.insert(layer.name.clone(), id);
+        self.layers[index] = Some(layer);
+        Ok(())
+    }
+
+    /// レイヤ名を変更し、変更前の名前を返す。`by_name` の整合性はここで保証する。
+    ///
+    /// 新しい名前が他のレイヤと衝突していないかは呼び出し側（コマンド）の責務。
+    pub(crate) fn rename(&mut self, id: LayerId, new_name: impl Into<String>) -> Option<String> {
+        let new_name = new_name.into();
+        let layer = self.get_mut(id)?;
+        let old_name = std::mem::replace(&mut layer.name, new_name.clone());
+        self.by_name.remove(&old_name);
+        self.by_name.insert(new_name, id);
+        Some(old_name)
     }
 }
 
@@ -306,5 +428,105 @@ mod tests {
     fn aci_standard_colors() {
         assert_eq!(AciColor::RED.rgb(), (255, 0, 0));
         assert_eq!(AciColor::WHITE.rgb(), (255, 255, 255));
+    }
+
+    #[test]
+    fn layer_new_defaults_to_continuous_linetype() {
+        let l = Layer::new("WALL", AciColor::WHITE);
+        assert_eq!(l.linetype, LineType::Continuous);
+    }
+
+    #[test]
+    fn resolve_linetype_inherits_from_layer_and_falls_back_for_unknown() {
+        let mut t = LayerTable::new();
+        let id = t.insert(Layer::new("WALL", AciColor::WHITE));
+        t.get_mut(id).unwrap().linetype = LineType::Center;
+
+        let e = entity_on(id);
+        assert_eq!(t.resolve_linetype(&e), LineType::Center);
+
+        // 存在しないレイヤを指すエンティティでも既定値で落ちること。
+        let dangling = entity_on(LayerId(999));
+        assert_eq!(t.resolve_linetype(&dangling), LineType::Continuous);
+    }
+
+    #[test]
+    fn remove_and_restore_roundtrip_preserves_id_and_by_name() {
+        let mut t = LayerTable::new();
+        let id = t.insert(Layer::new("WALL", AciColor::RED));
+
+        let removed = t.remove(id).unwrap();
+        assert!(t.get(id).is_none());
+        assert_eq!(t.by_name("WALL"), None);
+
+        t.restore(id, removed).unwrap();
+        assert_eq!(t.get(id).unwrap().name, "WALL");
+        assert_eq!(t.by_name("WALL"), Some(id));
+    }
+
+    #[test]
+    fn remove_missing_layer_is_error() {
+        let mut t = LayerTable::new();
+        assert_eq!(t.remove(LayerId(999)), Err(CadError::LayerNotFound));
+    }
+
+    #[test]
+    fn remove_resets_current_to_zero_when_current_is_removed() {
+        let mut t = LayerTable::new();
+        let id = t.insert(Layer::new("WALL", AciColor::WHITE));
+        t.set_current(id);
+        assert_eq!(t.current(), id);
+
+        t.remove(id).unwrap();
+        assert_eq!(t.current(), LayerId::ZERO);
+    }
+
+    #[test]
+    fn restore_into_occupied_slot_is_rejected() {
+        let mut t = LayerTable::new();
+        assert_eq!(
+            t.restore(LayerId::ZERO, Layer::new("DUP", AciColor::WHITE)),
+            Err(CadError::SlotOccupied)
+        );
+    }
+
+    #[test]
+    fn rename_updates_by_name_map_consistently() {
+        let mut t = LayerTable::new();
+        let id = t.insert(Layer::new("WALL", AciColor::WHITE));
+
+        let old = t.rename(id, "STRUCTURE").unwrap();
+        assert_eq!(old, "WALL");
+        assert_eq!(t.get(id).unwrap().name, "STRUCTURE");
+        assert_eq!(t.by_name("WALL"), None);
+        assert_eq!(t.by_name("STRUCTURE"), Some(id));
+    }
+
+    #[test]
+    fn rename_missing_layer_returns_none() {
+        let mut t = LayerTable::new();
+        assert_eq!(t.rename(LayerId(999), "X"), None);
+    }
+
+    #[test]
+    fn linetype_default_is_continuous() {
+        assert_eq!(LineType::default(), LineType::Continuous);
+    }
+
+    #[test]
+    fn linetype_labels_are_japanese() {
+        assert_eq!(LineType::Continuous.label(), "実線");
+        assert_eq!(LineType::Dashed.label(), "破線");
+        assert_eq!(LineType::Center.label(), "一点鎖線");
+        assert_eq!(LineType::Hidden.label(), "隠線");
+    }
+
+    #[test]
+    fn linetype_all_contains_every_variant() {
+        let all = LineType::all();
+        assert!(all.contains(&LineType::Continuous));
+        assert!(all.contains(&LineType::Dashed));
+        assert!(all.contains(&LineType::Center));
+        assert!(all.contains(&LineType::Hidden));
     }
 }

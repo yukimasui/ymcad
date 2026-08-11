@@ -124,6 +124,7 @@ pub fn immediate(input: &str) -> Option<Immediate> {
     match input.trim().to_uppercase().as_str() {
         "UNDO" | "U" => Some(Immediate::Undo),
         "REDO" => Some(Immediate::Redo),
+        "LAYER" | "LA" => Some(Immediate::LayerPanel),
         _ => None,
     }
 }
@@ -135,6 +136,8 @@ pub enum Immediate {
     Undo,
     /// 取り消した操作をやり直す。
     Redo,
+    /// レイヤパネルの開閉。
+    LayerPanel,
 }
 
 impl Immediate {
@@ -144,6 +147,7 @@ impl Immediate {
         match self {
             Self::Undo => "UNDO",
             Self::Redo => "REDO",
+            Self::LayerPanel => "LAYER",
         }
     }
 }
@@ -205,6 +209,7 @@ mod tests {
         assert_eq!(immediate("U"), Some(Immediate::Undo));
         assert_eq!(immediate("undo"), Some(Immediate::Undo));
         assert_eq!(immediate("REDO"), Some(Immediate::Redo));
+        assert_eq!(immediate("LA"), Some(Immediate::LayerPanel));
         assert_eq!(immediate("LINE"), None);
     }
 

@@ -34,6 +34,21 @@ const MIN_SCALE: f64 = 1e-9;
 /// スケールの上限。
 const MAX_SCALE: f64 = 1e9;
 
+/// 画面上の長さ [px] を `f64` から `f32` へ落とす。
+///
+/// `cad-core` は f64 しか持たないため、線種の破線パターンのように
+/// 「画面上の px」を f64 で受け取る場面がある。
+/// f64 → f32 の縮小変換はこのモジュールに閉じ込める規約なので、その入り口をここに置く。
+#[inline]
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "f64→f32 の縮小はこのモジュールの役目。値は画面上の px なので範囲は十分小さい"
+)]
+pub fn px_to_f32(len_px: f64) -> f32 {
+    len_px as f32
+}
+
 /// モデル空間とスクリーン空間の対応づけ。
 #[derive(Clone, Copy, Debug)]
 pub struct Viewport {

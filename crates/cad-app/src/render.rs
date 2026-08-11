@@ -5,8 +5,9 @@
 //! （このモジュールに `as f32` を書かない）。
 
 use crate::selection::{Selection, WindowMode};
-use crate::viewport::Viewport;
+use crate::viewport::{px_to_f32, Viewport};
 use cad_core::geom::{Line, Point2};
+use cad_core::layer::LineType;
 use cad_core::snap::{SnapCandidate, SnapKind};
 use cad_core::{Document, Geometry};
 
@@ -206,6 +207,10 @@ const SELECTED_STROKE_PX: f32 = 2.2;
 /// ズームしても見た目の滑らかさが一定になり、分割数も過剰にならない。
 const TESSELLATION_SAGITTA_PX: f32 = 0.3;
 
+/// 1 本の線分あたりに描く破線の最大本数。
+/// 極端なズームで 1 本の線が画面を何度も横切っても描画が止まらないようにする。
+const MAX_DASHES_PER_SEGMENT: usize = 2000;
+
 /// 選択中のエンティティの色。
 const SELECTED_COLOR: egui::Color32 = egui::Color32::from_rgb(0x4f, 0xc3, 0xf7);
 /// ラバーバンド（確定前）の色。
@@ -248,7 +253,15 @@ pub fn draw_entities(
             ENTITY_STROKE_PX
         };
 
-        draw_geometry(painter, vp, &entity.geom, egui::Stroke::new(width, color));
+        // 線種はレイヤから継承する。実線ならパターンは空。
+        let linetype = doc.layers().resolve_linetype(entity);
+        draw_geometry(
+            painter,
+            vp,
+            &entity.geom,
+            egui::Stroke::new(width, color),
+            linetype,
+        );
     }
 }
 
@@ -256,7 +269,8 @@ pub fn draw_entities(
 pub fn draw_preview(painter: &egui::Painter, vp: &Viewport, geoms: &[Geometry]) {
     let stroke = egui::Stroke::new(ENTITY_STROKE_PX, PREVIEW_COLOR);
     for g in geoms {
-        draw_geometry(painter, vp, g, stroke);
+        // ラバーバンドは常に実線。確定前だと分かればよく、線種は関係ない。
+        draw_geometry(painter, vp, g, stroke, LineType::Continuous);
     }
 }
 
@@ -266,22 +280,66 @@ pub fn draw_geometry(
     vp: &Viewport,
     geom: &Geometry,
     stroke: egui::Stroke,
+    linetype: LineType,
 ) {
     match geom {
-        Geometry::Line(l) => draw_clipped_segment(painter, vp, l, stroke),
+        Geometry::Line(l) => draw_clipped_segment(painter, vp, l, stroke, linetype),
         Geometry::Polyline(p) => {
             for seg in p.segments() {
-                draw_clipped_segment(painter, vp, &seg, stroke);
+                draw_clipped_segment(painter, vp, &seg, stroke, linetype);
             }
         }
         Geometry::Circle(c) => {
             let sagitta = vp.px_to_model_len(TESSELLATION_SAGITTA_PX);
-            draw_polyline_points(painter, vp, &c.tessellate(sagitta), true, stroke);
+            draw_polyline_points(painter, vp, &c.tessellate(sagitta), true, stroke, linetype);
         }
         Geometry::Arc(a) => {
             let sagitta = vp.px_to_model_len(TESSELLATION_SAGITTA_PX);
-            draw_polyline_points(painter, vp, &a.tessellate(sagitta), false, stroke);
+            draw_polyline_points(painter, vp, &a.tessellate(sagitta), false, stroke, linetype);
         }
+    }
+}
+
+/// 破線パターンに従って線分を描く。パターンが空なら実線 1 本。
+///
+/// パターンは **画面上の px** で与えられるので、ズームしても破線のピッチが
+/// 一定に見える（図面単位で与えると拡大したとき破線が伸びてしまう）。
+fn draw_patterned_segment(
+    painter: &egui::Painter,
+    a: egui::Pos2,
+    b: egui::Pos2,
+    stroke: egui::Stroke,
+    pattern: &[f64],
+) {
+    if pattern.is_empty() {
+        painter.line_segment([a, b], stroke);
+        return;
+    }
+
+    let total = (b - a).length();
+    if total <= 0.0 {
+        return;
+    }
+    let dir = (b - a) / total;
+
+    let mut pos = 0.0_f32;
+    let mut index = 0usize;
+    let mut drawing = true;
+    let mut guard = 0usize;
+
+    while pos < total && guard < MAX_DASHES_PER_SEGMENT {
+        let step = px_to_f32(pattern[index % pattern.len()]);
+        if step <= 0.0 {
+            break;
+        }
+        let end = (pos + step).min(total);
+        if drawing {
+            painter.line_segment([a + dir * pos, a + dir * end], stroke);
+        }
+        pos = end;
+        index += 1;
+        drawing = !drawing;
+        guard += 1;
     }
 }
 
@@ -289,14 +347,23 @@ pub fn draw_geometry(
 ///
 /// クリップしないと、極端にズームしたときに画面外の遠い端点が
 /// 巨大なスクリーン座標になり、tessellator が破綻する。
-fn draw_clipped_segment(painter: &egui::Painter, vp: &Viewport, line: &Line, stroke: egui::Stroke) {
+fn draw_clipped_segment(
+    painter: &egui::Painter,
+    vp: &Viewport,
+    line: &Line,
+    stroke: egui::Stroke,
+    linetype: LineType,
+) {
     let margin = vp.px_to_model_len(stroke.width);
     let Some(clipped) = line.clip_to(vp.visible_model_rect().expanded(margin)) else {
         return;
     };
-    painter.line_segment(
-        [vp.model_to_screen(clipped.a), vp.model_to_screen(clipped.b)],
+    draw_patterned_segment(
+        painter,
+        vp.model_to_screen(clipped.a),
+        vp.model_to_screen(clipped.b),
         stroke,
+        linetype.dash_pattern_px(),
     );
 }
 
@@ -307,16 +374,17 @@ fn draw_polyline_points(
     points: &[Point2],
     closed: bool,
     stroke: egui::Stroke,
+    linetype: LineType,
 ) {
     if points.len() < 2 {
         return;
     }
     for pair in points.windows(2) {
-        draw_clipped_segment(painter, vp, &Line::new(pair[0], pair[1]), stroke);
+        draw_clipped_segment(painter, vp, &Line::new(pair[0], pair[1]), stroke, linetype);
     }
     if closed {
         if let (Some(first), Some(last)) = (points.first(), points.last()) {
-            draw_clipped_segment(painter, vp, &Line::new(*last, *first), stroke);
+            draw_clipped_segment(painter, vp, &Line::new(*last, *first), stroke, linetype);
         }
     }
 }
