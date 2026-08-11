@@ -10,6 +10,7 @@ mod app;
 mod cmdline;
 mod input;
 mod jp_font;
+mod layer_panel;
 mod render;
 mod selection;
 mod session;

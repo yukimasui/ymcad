@@ -7,9 +7,10 @@ use cad_core::Document;
 
 use crate::cmdline::Submission;
 use crate::input::{self, ViewAction};
+use crate::layer_panel::LayerPanel;
 use crate::render;
 use crate::selection::WindowMode;
-use crate::session::Session;
+use crate::session::{Session, UiAction};
 use crate::snap::SnapState;
 use crate::viewport::Viewport;
 
@@ -90,6 +91,8 @@ pub struct CadApp {
     session: Session,
     /// オブジェクトスナップ。
     snap: SnapState,
+    /// レイヤパネル。
+    layer_panel: LayerPanel,
     /// このフレームで吸着したスナップ候補。
     snapped: Option<cad_core::snap::SnapCandidate>,
     /// 矩形選択のドラッグ中の状態。
@@ -113,6 +116,7 @@ impl CadApp {
             viewport: Viewport::default(),
             session: Session::new(),
             snap: SnapState::new(),
+            layer_panel: LayerPanel::new(),
             snapped: None,
             rect_drag: None,
             cursor_model: None,
@@ -166,6 +170,13 @@ impl CadApp {
             ui.separator();
             ui.monospace(format!("要素 {}", self.doc.entities().len()));
             ui.separator();
+            let layer_name = self
+                .doc
+                .layers()
+                .get(self.doc.layers().current())
+                .map_or("?", |l| l.name.as_str());
+            ui.monospace(format!("画層 {layer_name}"));
+            ui.separator();
             ui.monospace(format!("選択 {}", self.session.selection.len()));
             ui.separator();
             if self.snap.is_enabled() {
@@ -211,6 +222,11 @@ impl CadApp {
             self.session.handle_submission(submission, &mut self.doc);
             for action in self.session.take_view_actions() {
                 self.apply_view_action(action);
+            }
+            for action in self.session.take_ui_actions() {
+                match action {
+                    UiAction::ToggleLayerPanel => self.layer_panel.toggle(),
+                }
             }
         }
     }
@@ -358,10 +374,30 @@ impl CadApp {
     }
 }
 
+impl CadApp {
+    /// レイヤパネルを描画し、返ってきたコマンドを適用する。
+    fn layer_area(&mut self, ui: &mut egui::Ui) {
+        if !self.layer_panel.is_open() {
+            return;
+        }
+        egui::Panel::right("layers")
+            .default_size(460.0)
+            .show(ui, |ui| {
+                let commands = self
+                    .layer_panel
+                    .show(ui, &self.doc, &self.session.selection);
+                for cmd in commands {
+                    self.session.apply_external(cmd, &mut self.doc);
+                }
+            });
+    }
+}
+
 impl eframe::App for CadApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::Panel::bottom("cmdline").show(ui, |ui| self.command_area(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        self.layer_area(ui);
         egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
     }
 }

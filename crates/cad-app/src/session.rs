@@ -12,6 +12,13 @@ use crate::input::ViewAction;
 use crate::selection::{self, Selection, WindowMode};
 use crate::tools::{self, Immediate, StepInput, StepOutcome, Tool, ToolCtx};
 
+/// UI に対する要求。図面の変更ではないのでコマンドにはしない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiAction {
+    /// レイヤパネルの開閉。
+    ToggleLayerPanel,
+}
+
 /// 実行中コマンドが無いときのプロンプト。
 const IDLE_PROMPT: &str = "コマンド:";
 /// 選択待ちのプロンプト。
@@ -29,6 +36,8 @@ pub struct Session {
     awaiting_selection: bool,
     /// このフレームで発生したビュー操作。
     view_actions: Vec<ViewAction>,
+    /// このフレームで発生した UI 要求。
+    ui_actions: Vec<UiAction>,
 }
 
 impl Default for Session {
@@ -49,6 +58,7 @@ impl Session {
             tool: None,
             awaiting_selection: false,
             view_actions: Vec::new(),
+            ui_actions: Vec::new(),
         }
     }
 
@@ -79,6 +89,20 @@ impl Session {
     /// 溜まったビュー操作を取り出す。
     pub fn take_view_actions(&mut self) -> Vec<ViewAction> {
         std::mem::take(&mut self.view_actions)
+    }
+
+    /// 溜まった UI 要求を取り出す。
+    pub fn take_ui_actions(&mut self) -> Vec<UiAction> {
+        std::mem::take(&mut self.ui_actions)
+    }
+
+    /// レイヤ操作など、外部から組み立てたコマンドを適用する。
+    ///
+    /// 図面を変更する経路は `Document::apply` ただ 1 つなので、
+    /// レイヤパネルからの操作もここを通す。
+    pub fn apply_external(&mut self, cmd: Box<dyn cad_core::Command>, doc: &mut Document) {
+        let name = cmd.name();
+        self.apply(cmd, name, doc);
     }
 
     /// 相対座標入力と垂線スナップの基準となる、直前に確定した点。
@@ -221,15 +245,20 @@ impl Session {
     }
 
     fn run_immediate(&mut self, cmd: Immediate, doc: &mut Document) {
+        if cmd == Immediate::LayerPanel {
+            self.ui_actions.push(UiAction::ToggleLayerPanel);
+            return;
+        }
         let result = match cmd {
             Immediate::Undo => doc.undo(),
             Immediate::Redo => doc.redo(),
+            Immediate::LayerPanel => unreachable!("直前に処理済み"),
         };
         match result {
             Ok(Some(name)) => self.cmdline.info(format!("{}: {name}", cmd.name())),
             Ok(None) => self.cmdline.info(match cmd {
                 Immediate::Undo => "これ以上取り消せません",
-                Immediate::Redo => "やり直せる操作がありません",
+                _ => "やり直せる操作がありません",
             }),
             Err(e) => self.cmdline.error(format!("{}: {e}", cmd.name())),
         }
