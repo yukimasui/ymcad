@@ -11,6 +11,7 @@ repository.workspace = true
 cad-core.workspace = true
 eframe.workspace = true
 egui.workspace = true
+rfd.workspace = true
 
 [lints.clippy]
 # f64 → f32 の縮小変換は viewport.rs の変換関数だけに許す。
