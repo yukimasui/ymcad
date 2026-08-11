@@ -3,7 +3,7 @@
 **このファイルは作業を中断・再開するための引き継ぎメモ。** 実装を進めたら都度更新すること。
 設計判断そのものは `docs/DECISIONS.md`（ADR）に、モジュール構成は `docs/ARCHITECTURE.md` に書く。
 
-最終更新: 2026-08-11 (Phase 1 実装完了・目視確認待ち)
+最終更新: 2026-08-11 (Phase 1 完了)
 
 ---
 
@@ -11,10 +11,10 @@
 
 | | |
 |---|---|
-| 完了 Phase | **Phase 0（IME 検証スパイク）— 合格** |
-| 進行中 Phase | **Phase 1（基盤）— 実装完了、ユーザー目視確認待ち** |
-| 現在ブランチ | `feature/phase-1-foundation` |
-| GitHub push | **未実施**（ローカルのみ。`main` への PR は事前にユーザー確認が必要） |
+| 完了 Phase | **Phase 0（IME 検証）/ Phase 1（基盤）— どちらも受け入れ基準を充足** |
+| 進行中 Phase | **Phase 2（ビューポート操作）— 着手前** |
+| 現在ブランチ | `develop` |
+| GitHub push | `develop` は push 済み。**`main` へのマージ/PR は事前にユーザー確認が必要** |
 
 ### ブランチ運用
 
@@ -27,7 +27,7 @@
 ## Phase 進捗
 
 - [x] **Phase 0** — IME 検証スパイク … 全 5 項目 PASS。`docs/DECISIONS.md` ADR-0001 参照
-- [ ] **Phase 1** — 基盤（ワークスペース / ジオメトリ / アリーナ / Command / 空ビューポート）
+- [x] **Phase 1** — 基盤 … 受け入れ基準すべて充足。ユーザー目視確認済み
 - [ ] **Phase 2** — ビューポート操作（パン・ズーム・ZOOM E/A・グリッド）
 - [ ] **Phase 3** — 作図コマンドとコマンドライン UI ← **本アプリの核心**
 - [ ] **Phase 4** — オブジェクトスナップ（OSNAP）
@@ -90,7 +90,7 @@
 - [x] `cargo build --release` が警告なし
 - [x] `cargo test` 通過（156 件。うち cad-core のジオメトリ関連は 106 件）
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` 通過
-- [ ] アプリ起動でグリッドと原点マーカーが表示される（**ユーザー目視**）
+- [x] アプリ起動でグリッドと原点マーカーが表示される（ユーザー目視で確認済み。座標表示の更新も確認）
 - [x] `cad-core/Cargo.toml` に UI 系依存が無い（`cargo tree` で `cad-core` 単独を確認）
 
 ---
