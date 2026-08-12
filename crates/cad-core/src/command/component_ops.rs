@@ -303,3 +303,430 @@ fn instance_definitions(entities: &[Entity]) -> Vec<DefinitionId> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::component::DefinitionTable;
+    use crate::entity::EntityStore;
+    use crate::geom::tolerance::eq_len;
+    use crate::geom::{Circle, Line};
+    use crate::group::GroupTable;
+    use crate::layer::{LayerId, LayerTable};
+
+    fn new_parts() -> (EntityStore, LayerTable, GroupTable, DefinitionTable) {
+        (
+            EntityStore::new(),
+            LayerTable::new(),
+            GroupTable::new(),
+            DefinitionTable::new(),
+        )
+    }
+
+    fn p(x: f64, y: f64) -> Point2 {
+        Point2::new(x, y)
+    }
+
+    fn line_entity(x: f64) -> Entity {
+        Entity::new(
+            Geometry::Line(Line::new(p(x, 0.0), p(x + 1.0, 0.0))),
+            LayerId::ZERO,
+        )
+    }
+
+    fn circle_entity() -> Entity {
+        Entity::new(
+            Geometry::Circle(Circle::new(p(0.0, 0.0), 1.0)),
+            LayerId::ZERO,
+        )
+    }
+
+    // ---- DefineComponent --------------------------------------------------
+
+    #[test]
+    fn define_execute_creates_a_definition_and_leaves_entities_alone() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let existing = e.insert(line_entity(0.0));
+
+        let mut cmd =
+            DefineComponent::new("COMPONENT", "部品", p(1.0, 2.0), vec![line_entity(5.0)]);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.execute(&mut ctx).expect("定義を作れるはず");
+        }
+
+        let id = cmd.created().expect("ID が返るはず");
+        let def = d.get(id).expect("引けるはず");
+        assert_eq!(def.name, "部品");
+        assert!(eq_len(def.origin.x, 1.0), "基点が保たれる");
+        assert_eq!(def.entities.len(), 1);
+        assert_eq!(e.len(), 1, "図面のエンティティには触らない");
+        assert!(e.contains(existing));
+    }
+
+    #[test]
+    fn define_undo_removes_the_definition() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let mut cmd =
+            DefineComponent::new("COMPONENT", "部品", Point2::ORIGIN, vec![line_entity(0.0)]);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.execute(&mut ctx).expect("作れる");
+            cmd.undo(&mut ctx).expect("戻せる");
+        }
+        assert_eq!(d.len(), 0);
+        assert!(d.by_name("部品").is_none());
+        assert!(cmd.created().is_none(), "Undo 後は created が None");
+    }
+
+    /// **Redo で同じ `DefinitionId` を使い回すこと。**
+    ///
+    /// ID が変わると、Undo スタックに残る `InsertInstance` の参照が壊れる
+    /// （ADR-0004 / ADR-0022 と同じ理由）。
+    #[test]
+    fn define_redo_reuses_the_same_definition_id() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let mut cmd =
+            DefineComponent::new("COMPONENT", "部品", Point2::ORIGIN, vec![line_entity(0.0)]);
+
+        let first = {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.execute(&mut ctx).expect("作れる");
+            cmd.created().expect("ID")
+        };
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.undo(&mut ctx).expect("戻せる");
+            cmd.execute(&mut ctx).expect("やり直せる");
+        }
+        assert_eq!(cmd.created(), Some(first), "Redo で同じ ID になること");
+    }
+
+    #[test]
+    fn define_rejects_a_duplicate_name() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let mut first = DefineComponent::new("COMPONENT", "部品", Point2::ORIGIN, Vec::new());
+        let mut second = DefineComponent::new("COMPONENT", "部品", Point2::ORIGIN, Vec::new());
+
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+        first.execute(&mut ctx).expect("1 つ目は作れる");
+        assert!(second.execute(&mut ctx).is_err(), "同名は拒否される");
+    }
+
+    #[test]
+    fn define_rejects_an_empty_name() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let mut cmd = DefineComponent::new("COMPONENT", "   ", Point2::ORIGIN, Vec::new());
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+        assert!(cmd.execute(&mut ctx).is_err());
+        assert_eq!(d.len(), 0, "図面は変わらない");
+    }
+
+    #[test]
+    fn define_large_coordinates() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let far = p(1.0e12, -1.0e12);
+        let mut cmd = DefineComponent::new("COMPONENT", "遠方", far, vec![line_entity(1.0e12)]);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.execute(&mut ctx).expect("作れる");
+        }
+        let def = d.get(cmd.created().expect("ID")).expect("引ける");
+        assert!(eq_len(def.origin.x, 1.0e12));
+    }
+
+    // ---- InsertInstance ---------------------------------------------------
+
+    /// 定義を作って配置する下準備。
+    fn define_and_insert(
+        e: &mut EntityStore,
+        l: &mut LayerTable,
+        g: &mut GroupTable,
+        d: &mut DefinitionTable,
+    ) -> (DefinitionId, EntityId) {
+        let mut def =
+            DefineComponent::new("COMPONENT", "部品", Point2::ORIGIN, vec![circle_entity()]);
+        let mut ins;
+        let def_id;
+        {
+            let mut ctx = EditCtx::new(e, l, g, d);
+            def.execute(&mut ctx).expect("定義を作れる");
+            def_id = def.created().expect("ID");
+            ins = InsertInstance::new("INSERT", def_id, Placement::at(p(10.0, 0.0)), LayerId::ZERO);
+            ins.execute(&mut ctx).expect("配置できる");
+        }
+        (def_id, ins.created().expect("ID"))
+    }
+
+    #[test]
+    fn insert_execute_adds_an_instance_entity() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (def_id, id) = define_and_insert(&mut e, &mut l, &mut g, &mut d);
+
+        let entity = e.get(id).expect("あるはず");
+        let Geometry::Instance(i) = &entity.geom else {
+            panic!("インスタンスのはず: {:?}", entity.geom);
+        };
+        assert_eq!(i.definition, def_id);
+        assert!(eq_len(i.placement.origin.x, 10.0));
+        assert!(i.overrides.is_empty(), "上書きは無い");
+    }
+
+    #[test]
+    fn insert_undo_removes_the_instance() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let mut def =
+            DefineComponent::new("COMPONENT", "部品", Point2::ORIGIN, vec![circle_entity()]);
+        let mut ctx_scope = |e: &mut EntityStore,
+                             l: &mut LayerTable,
+                             g: &mut GroupTable,
+                             d: &mut DefinitionTable| {
+            let mut ctx = EditCtx::new(e, l, g, d);
+            def.execute(&mut ctx).expect("定義");
+            let def_id = def.created().expect("ID");
+            let mut ins =
+                InsertInstance::new("INSERT", def_id, Placement::at(p(1.0, 1.0)), LayerId::ZERO);
+            ins.execute(&mut ctx).expect("配置");
+            assert_eq!(ctx.entities().len(), 1);
+            ins.undo(&mut ctx).expect("戻せる");
+        };
+        ctx_scope(&mut e, &mut l, &mut g, &mut d);
+        assert_eq!(e.len(), 0, "インスタンスが消える");
+        assert_eq!(d.len(), 1, "定義は残る");
+    }
+
+    #[test]
+    fn insert_missing_definition_fails_and_leaves_document_unchanged() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        // 別の表で作った ID を使う（この表には存在しない）。
+        let mut other = DefinitionTable::new();
+        let dangling = other.insert(Definition::new("よそ", Point2::ORIGIN, Vec::new()));
+
+        let mut cmd = InsertInstance::new(
+            "INSERT",
+            dangling,
+            Placement::at(Point2::ORIGIN),
+            LayerId::ZERO,
+        );
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+        assert_eq!(cmd.execute(&mut ctx), Err(CadError::DefinitionNotFound));
+        assert_eq!(ctx.entities().len(), 0, "図面は変わらない");
+    }
+
+    #[test]
+    fn insert_redo_after_undo_works() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (_, _) = define_and_insert(&mut e, &mut l, &mut g, &mut d);
+        let def_id = d.by_name("部品").expect("あるはず");
+
+        let mut cmd =
+            InsertInstance::new("INSERT", def_id, Placement::at(p(5.0, 5.0)), LayerId::ZERO);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.execute(&mut ctx).expect("配置");
+            cmd.undo(&mut ctx).expect("戻す");
+            cmd.execute(&mut ctx).expect("やり直す");
+        }
+        assert_eq!(e.len(), 2, "元の 1 つ + やり直した 1 つ");
+    }
+
+    // ---- SetDefinitionContents --------------------------------------------
+
+    #[test]
+    fn set_contents_replaces_and_undo_restores() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let mut def =
+            DefineComponent::new("COMPONENT", "部品", Point2::ORIGIN, vec![circle_entity()]);
+        let def_id;
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            def.execute(&mut ctx).expect("定義");
+            def_id = def.created().expect("ID");
+        }
+
+        let mut cmd = SetDefinitionContents::new(
+            "EDITCOMP",
+            def_id,
+            p(1.0, 1.0),
+            vec![line_entity(0.0), line_entity(2.0)],
+        );
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.execute(&mut ctx).expect("差し替えられる");
+        }
+        assert_eq!(d.get(def_id).expect("引ける").entities.len(), 2);
+        assert!(eq_len(d.get(def_id).expect("引ける").origin.x, 1.0));
+
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.undo(&mut ctx).expect("戻せる");
+        }
+        let def = d.get(def_id).expect("引ける");
+        assert_eq!(def.entities.len(), 1, "元の中身に戻る");
+        assert!(eq_len(def.origin.x, 0.0), "元の基点に戻る");
+    }
+
+    /// **循環を拒否すること。** 深さ上限は最後の砦であって、これの代わりにはならない。
+    #[test]
+    fn set_contents_rejects_a_self_reference() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let mut def = DefineComponent::new("COMPONENT", "部品", Point2::ORIGIN, Vec::new());
+        let def_id;
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            def.execute(&mut ctx).expect("定義");
+            def_id = def.created().expect("ID");
+        }
+
+        // 自分自身を含めようとする。
+        let itself = Entity::new(
+            Geometry::Instance(Instance::new(def_id, Placement::at(Point2::ORIGIN))),
+            LayerId::ZERO,
+        );
+        let mut cmd = SetDefinitionContents::new("EDITCOMP", def_id, Point2::ORIGIN, vec![itself]);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            assert_eq!(cmd.execute(&mut ctx), Err(CadError::DefinitionCycle));
+        }
+        assert_eq!(
+            d.get(def_id).expect("引ける").entities.len(),
+            0,
+            "拒否されたら中身は変わらない"
+        );
+    }
+
+    #[test]
+    fn set_contents_rejects_an_indirect_cycle() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (a, b);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            let mut da = DefineComponent::new("COMPONENT", "A", Point2::ORIGIN, Vec::new());
+            da.execute(&mut ctx).expect("A");
+            a = da.created().expect("ID");
+            let mut db = DefineComponent::new("COMPONENT", "B", Point2::ORIGIN, Vec::new());
+            db.execute(&mut ctx).expect("B");
+            b = db.created().expect("ID");
+        }
+
+        let inst_of = |id: DefinitionId| {
+            Entity::new(
+                Geometry::Instance(Instance::new(id, Placement::at(Point2::ORIGIN))),
+                LayerId::ZERO,
+            )
+        };
+
+        // A の中に B を入れるのは安全。
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            SetDefinitionContents::new("EDITCOMP", a, Point2::ORIGIN, vec![inst_of(b)])
+                .execute(&mut ctx)
+                .expect("A ← B は循環しない");
+        }
+        // B の中に A を入れると A → B → A で循環する。
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            let mut cmd =
+                SetDefinitionContents::new("EDITCOMP", b, Point2::ORIGIN, vec![inst_of(a)]);
+            assert_eq!(cmd.execute(&mut ctx), Err(CadError::DefinitionCycle));
+        }
+    }
+
+    #[test]
+    fn set_contents_missing_definition_fails() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let mut other = DefinitionTable::new();
+        let dangling = other.insert(Definition::new("よそ", Point2::ORIGIN, Vec::new()));
+
+        let mut cmd = SetDefinitionContents::new("EDITCOMP", dangling, Point2::ORIGIN, Vec::new());
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+        assert_eq!(cmd.execute(&mut ctx), Err(CadError::DefinitionNotFound));
+    }
+
+    // ---- DeleteDefinition -------------------------------------------------
+
+    #[test]
+    fn delete_removes_an_unused_definition_and_undo_restores_it() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let mut def = DefineComponent::new("COMPONENT", "部品", p(1.0, 2.0), vec![circle_entity()]);
+        let def_id;
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            def.execute(&mut ctx).expect("定義");
+            def_id = def.created().expect("ID");
+        }
+
+        let mut cmd = DeleteDefinition::new("PURGE", def_id);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.execute(&mut ctx).expect("消せる");
+        }
+        assert_eq!(d.len(), 0);
+
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.undo(&mut ctx).expect("戻せる");
+        }
+        let restored = d.get(def_id).expect("同じ ID で戻る");
+        assert_eq!(restored.name, "部品");
+        assert!(eq_len(restored.origin.x, 1.0), "基点も戻る");
+        assert_eq!(restored.entities.len(), 1);
+    }
+
+    /// **使用中の定義は削除できないこと。**
+    ///
+    /// 参照だけ残った状態を作ると、解決が空を返して図形が黙って消える。
+    #[test]
+    fn delete_refuses_a_definition_used_in_the_drawing() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (def_id, _) = define_and_insert(&mut e, &mut l, &mut g, &mut d);
+
+        let mut cmd = DeleteDefinition::new("PURGE", def_id);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+        assert!(
+            matches!(cmd.execute(&mut ctx), Err(CadError::NotEditable(_))),
+            "図面で使われている定義は消せない"
+        );
+        assert_eq!(ctx.definitions().len(), 1, "定義は残る");
+    }
+
+    #[test]
+    fn delete_refuses_a_definition_used_inside_another_definition() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (a, b);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            let mut da =
+                DefineComponent::new("COMPONENT", "内", Point2::ORIGIN, vec![circle_entity()]);
+            da.execute(&mut ctx).expect("内");
+            a = da.created().expect("ID");
+            let inner = Entity::new(
+                Geometry::Instance(Instance::new(a, Placement::at(Point2::ORIGIN))),
+                LayerId::ZERO,
+            );
+            let mut db = DefineComponent::new("COMPONENT", "外", Point2::ORIGIN, vec![inner]);
+            db.execute(&mut ctx).expect("外");
+            b = db.created().expect("ID");
+        }
+        let _ = b;
+
+        let mut cmd = DeleteDefinition::new("PURGE", a);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+        assert!(
+            matches!(cmd.execute(&mut ctx), Err(CadError::NotEditable(_))),
+            "他の定義から使われている定義は消せない"
+        );
+    }
+
+    #[test]
+    fn delete_missing_definition_fails_and_leaves_document_unchanged() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let mut other = DefinitionTable::new();
+        let dangling = other.insert(Definition::new("よそ", Point2::ORIGIN, Vec::new()));
+
+        let mut cmd = DeleteDefinition::new("PURGE", dangling);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+        assert_eq!(cmd.execute(&mut ctx), Err(CadError::DefinitionNotFound));
+        assert_eq!(ctx.definitions().len(), 0);
+    }
+}

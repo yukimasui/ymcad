@@ -1,6 +1,7 @@
 //! グループの操作と分解。
 
 use super::{Command, EditCtx};
+use crate::component::{self, DefinitionTable};
 use crate::entity::{Entity, EntityId, Geometry};
 use crate::error::{CadError, Result};
 use crate::group::{Group, GroupId};
@@ -209,9 +210,22 @@ impl ExplodeEntities {
     }
 
     /// 分解した結果の図形。分解できないものは空を返す。
-    fn pieces(entity: &Entity) -> Vec<Geometry> {
+    fn pieces(entity: &Entity, defs: &DefinitionTable) -> Vec<Entity> {
         match &entity.geom {
-            Geometry::Polyline(p) => p.segments().map(Geometry::Line).collect(),
+            // ポリラインは線分列へ。属性は元の要素から引き継ぐ。
+            Geometry::Polyline(p) => p
+                .segments()
+                .map(|s| {
+                    let mut piece = entity.clone();
+                    piece.geom = Geometry::Line(s);
+                    piece
+                })
+                .collect(),
+            // インスタンスは定義の中身へ。
+            //
+            // **中身が持っていたレイヤ・色に戻る**（AutoCAD と同じ）。
+            // インスタンス側の属性を被せると、分解しただけで図面の色分けが崩れる。
+            Geometry::Instance(i) => component::resolve_entities(i, defs),
             _ => Vec::new(),
         }
     }
@@ -230,7 +244,7 @@ impl Command for ExplodeEntities {
                 self.rollback(ctx);
                 return Err(CadError::EntityNotFound);
             };
-            let pieces = Self::pieces(&entity);
+            let pieces = Self::pieces(&entity, ctx.definitions());
             if pieces.is_empty() {
                 // 分解できない種類は触らない。
                 continue;
@@ -245,9 +259,7 @@ impl Command for ExplodeEntities {
             };
             self.removed.push((*id, removed));
 
-            for geom in pieces {
-                let mut piece = entity.clone();
-                piece.geom = geom;
+            for piece in pieces {
                 self.created.push(ctx.add_entity(piece));
             }
         }
@@ -288,7 +300,6 @@ impl ExplodeEntities {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::DefinitionTable;
     use crate::entity::EntityStore;
     use crate::geom::{Line, Point2, Polyline};
     use crate::group::GroupTable;
@@ -627,5 +638,150 @@ mod tests {
             ctx.entities().get(alive).unwrap().geom,
             Geometry::Polyline(_)
         ));
+    }
+
+    // ---- インスタンスの分解 -----------------------------------------------
+
+    /// コンポーネントのインスタンスが中身へ分解されること。
+    #[test]
+    fn explode_expands_a_component_instance() {
+        use crate::command::{DefineComponent, InsertInstance};
+        use crate::component::Placement;
+        use crate::geom::Circle;
+
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let target;
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            let contents = vec![
+                Entity::new(
+                    Geometry::Line(Line::new(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0))),
+                    LayerId::ZERO,
+                ),
+                Entity::new(
+                    Geometry::Circle(Circle::new(Point2::new(0.0, 0.0), 2.0)),
+                    LayerId::ZERO,
+                ),
+            ];
+            let mut def = DefineComponent::new("COMPONENT", "部品", Point2::ORIGIN, contents);
+            def.execute(&mut ctx).expect("定義");
+            let def_id = def.created().expect("ID");
+
+            let mut ins = InsertInstance::new(
+                "INSERT",
+                def_id,
+                Placement::at(Point2::new(10.0, 0.0)),
+                LayerId::ZERO,
+            );
+            ins.execute(&mut ctx).expect("配置");
+            target = ins.created().expect("ID");
+        }
+        assert_eq!(e.len(), 1, "インスタンス 1 件");
+
+        let mut cmd = ExplodeEntities::new("EXPLODE", vec![target]);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.execute(&mut ctx).expect("分解できる");
+        }
+
+        assert_eq!(e.len(), 2, "線分 1 本 + 円 1 つ");
+        assert!(!e.contains(target), "インスタンスは消える");
+        assert_eq!(d.len(), 1, "定義は残る");
+
+        // ワールド座標へ移った位置になっていること。
+        let line = e
+            .iter()
+            .find_map(|(_, ent)| match &ent.geom {
+                Geometry::Line(l) => Some(*l),
+                _ => None,
+            })
+            .expect("線分があるはず");
+        assert!(
+            crate::geom::tolerance::eq_len(line.a.x, 10.0),
+            "配置ぶん動いている: {}",
+            line.a.x
+        );
+    }
+
+    /// **分解すると定義の中身のレイヤに戻ること。**
+    ///
+    /// インスタンス側のレイヤを被せると、分解しただけで図面の色分けが崩れる。
+    /// AutoCAD もブロックを分解すると中身のレイヤに戻る。
+    #[test]
+    fn explode_restores_the_layers_of_the_contents() {
+        use crate::command::{DefineComponent, InsertInstance};
+        use crate::component::Placement;
+        use crate::layer::{AciColor, Layer};
+
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let inner_layer = l.insert(Layer::new("中身", AciColor::RED));
+        let outer_layer = l.insert(Layer::new("配置先", AciColor(5)));
+
+        let target;
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            let contents = vec![Entity::new(
+                Geometry::Line(Line::new(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0))),
+                inner_layer,
+            )];
+            let mut def = DefineComponent::new("COMPONENT", "部品", Point2::ORIGIN, contents);
+            def.execute(&mut ctx).expect("定義");
+            let def_id = def.created().expect("ID");
+
+            // インスタンスは別のレイヤに置く。
+            let mut ins =
+                InsertInstance::new("INSERT", def_id, Placement::at(Point2::ORIGIN), outer_layer);
+            ins.execute(&mut ctx).expect("配置");
+            target = ins.created().expect("ID");
+        }
+
+        let mut cmd = ExplodeEntities::new("EXPLODE", vec![target]);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.execute(&mut ctx).expect("分解できる");
+        }
+
+        let (_, piece) = e.iter().next().expect("1 件あるはず");
+        assert_eq!(
+            piece.layer, inner_layer,
+            "中身のレイヤに戻る（配置先のレイヤにならない）"
+        );
+    }
+
+    /// 分解の Undo でインスタンスが同じ ID で戻ること。
+    #[test]
+    fn explode_undo_restores_the_instance() {
+        use crate::command::{DefineComponent, InsertInstance};
+        use crate::component::Placement;
+
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let target;
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            let contents = vec![Entity::new(
+                Geometry::Line(Line::new(Point2::new(0.0, 0.0), Point2::new(1.0, 0.0))),
+                LayerId::ZERO,
+            )];
+            let mut def = DefineComponent::new("COMPONENT", "部品", Point2::ORIGIN, contents);
+            def.execute(&mut ctx).expect("定義");
+            let mut ins = InsertInstance::new(
+                "INSERT",
+                def.created().expect("ID"),
+                Placement::at(Point2::ORIGIN),
+                LayerId::ZERO,
+            );
+            ins.execute(&mut ctx).expect("配置");
+            target = ins.created().expect("ID");
+        }
+        let before = e.get(target).cloned().expect("あるはず");
+
+        let mut cmd = ExplodeEntities::new("EXPLODE", vec![target]);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.execute(&mut ctx).expect("分解");
+            cmd.undo(&mut ctx).expect("戻す");
+        }
+        assert_eq!(e.len(), 1);
+        assert_eq!(e.get(target), Some(&before), "同じ ID・内容で戻る");
     }
 }

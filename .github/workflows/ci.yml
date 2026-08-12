@@ -43,7 +43,7 @@ jobs:
 
           cargo run -q -p cad-core --example write_sample -- "$out/sample.ymc"
           python3 tools/validate_ymc.py "$out/sample.ymc" \
-            --expect line=1,circle=1,arc=1,xline=1,polyline=1
+            --expect arc=1,xline=1,polyline=1,instance=3
 
           cargo run -q -p cad-core --example write_sample -- "$out/sample.dxf"
           python3 tools/validate_dxf_r12.py "$out/sample.dxf"

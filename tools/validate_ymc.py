@@ -32,9 +32,11 @@ from pathlib import Path
 
 # crates/cad-core/src/native/mod.rs と一致していること。
 MAGIC = b"YMCAD\x1a\0\0"
-MAX_KNOWN_VERSION = 1
+MAX_KNOWN_VERSION = 2
+# コンポーネント定義セクションが入った最初の版。
+VERSION_WITH_COMPONENTS = 2
 
-KIND_NAMES = {0: "line", 1: "circle", 2: "arc", 3: "xline", 4: "polyline"}
+KIND_NAMES = {0: "line", 1: "circle", 2: "arc", 3: "xline", 4: "polyline", 5: "instance"}
 LINETYPE_NAMES = {0: "continuous", 1: "dashed", 2: "center", 3: "hidden"}
 
 COLOR_BY_LAYER = 0
@@ -45,8 +47,16 @@ OPTION_SOME = 1
 FLAG_VISIBLE = 1 << 0
 FLAG_LOCKED = 1 << 1
 
+# 配置のフラグ。
+PLACEMENT_FLIPPED = 1 << 0
+
+# パラメータ値の種別。
+VALUE_NUMBER = 0
+VALUE_BOOL = 1
+VALUE_CHOICE = 2
+
 # 図形ごとの固定長ペイロードに含まれる f64 の個数。
-# polyline は可変長なので別扱い。
+# polyline と instance は可変長なので別扱い。
 FIXED_F64_COUNT = {0: 4, 1: 3, 2: 5, 3: 4}
 
 
@@ -163,72 +173,43 @@ def validate(data: bytes, verbose: bool = False) -> dict[str, int]:
             print(f"  グループ[{i}] {name!r}")
 
     # ---- エンティティ ----
-    entity_count = c.u32()
     counts: dict[str, int] = {name: 0 for name in KIND_NAMES.values()}
     used_groups: set[int] = set()
+    used_definitions: set[int] = set()
 
+    entity_count = c.u32()
     for i in range(entity_count):
-        kind = c.u8()
-        if kind not in KIND_NAMES:
-            raise ValidationError(f"エンティティ {i}: 未知の図形種別 {kind}")
-        name = KIND_NAMES[kind]
-        counts[name] += 1
+        read_entity(c, f"エンティティ {i}", layer_count, group_count,
+                    counts, used_groups, used_definitions)
 
-        if kind == 4:  # polyline
-            closed = c.u8()
-            if closed not in (0, 1):
-                raise ValidationError(
-                    f"エンティティ {i}: closed が 0/1 ではありません（{closed}）"
-                )
-            vertex_count = c.u32()
-            values = [(c.f64(), c.f64()) for _ in range(vertex_count)]
-            flat = [v for pair in values for v in pair]
-        else:
-            flat = [c.f64() for _ in range(FIXED_F64_COUNT[kind])]
+    # ---- コンポーネント定義（形式 v2 以降） ----
+    #
+    # 定義はエンティティより後ろにある。v1 のファイルはここが無いだけなので、
+    # バージョンで分岐すれば前半をそのまま読める。
+    definition_count = 0
+    definition_names: list[str] = []
+    if version >= VERSION_WITH_COMPONENTS:
+        definition_count = c.u32()
+        for i in range(definition_count):
+            name = c.string()
+            if name in definition_names:
+                raise ValidationError(f"コンポーネント定義名が重複しています: {name}")
+            definition_names.append(name)
+            c.f64()  # 基点 x
+            c.f64()  # 基点 y
+            n = c.u32()
+            for j in range(n):
+                read_entity(c, f"定義 {i}（{name}）の要素 {j}", layer_count,
+                            group_count, counts, used_groups, used_definitions)
+            if verbose:
+                print(f"  定義[{i}] {name!r} 要素 {n} 件")
 
-        # 座標に NaN / Inf が入っていたら、どこかで壊れている。
-        for v in flat:
-            if v != v or v in (float("inf"), float("-inf")):
-                raise ValidationError(f"エンティティ {i}（{name}）: 座標が有限ではありません")
-
-        # 半径は正であること。
-        if kind == 1 and flat[2] <= 0.0:
-            raise ValidationError(f"エンティティ {i}（円）: 半径が正ではありません（{flat[2]}）")
-        if kind == 2 and flat[2] <= 0.0:
-            raise ValidationError(f"エンティティ {i}（円弧）: 半径が正ではありません（{flat[2]}）")
-
-        # 作図線の方向は単位ベクトルであること（Rust 側の不変条件と同じ検査）。
-        if kind == 3:
-            dx, dy = flat[2], flat[3]
-            length = (dx * dx + dy * dy) ** 0.5
-            if abs(length - 1.0) > 1e-9:
-                raise ValidationError(
-                    f"エンティティ {i}（作図線）: 方向が単位ベクトルではありません（長さ {length}）"
-                )
-
-        layer_index = c.u32()
-        if layer_index >= layer_count:
+    # 定義の参照が範囲内であること。**前方参照があるので最後にまとめて検査する。**
+    for index in sorted(used_definitions):
+        if index >= definition_count:
             raise ValidationError(
-                f"エンティティ {i}: レイヤ参照が範囲外 {layer_index}（レイヤ数 {layer_count}）"
+                f"コンポーネント定義の参照が範囲外 {index}（定義数 {definition_count}）"
             )
-
-        color_tag = c.u8()
-        if color_tag == COLOR_ACI:
-            c.u8()
-        elif color_tag != COLOR_BY_LAYER:
-            raise ValidationError(f"エンティティ {i}: 未知の色指定 {color_tag}")
-
-        group_tag = c.u8()
-        if group_tag == OPTION_SOME:
-            group_index = c.u32()
-            if group_index >= group_count:
-                raise ValidationError(
-                    f"エンティティ {i}: グループ参照が範囲外 {group_index}"
-                    f"（グループ数 {group_count}）"
-                )
-            used_groups.add(group_index)
-        elif group_tag != OPTION_NONE:
-            raise ValidationError(f"エンティティ {i}: 未知のグループ指定 {group_tag}")
 
     # ---- 最も効く検査: 末尾でぴったり尽きること ----
     if c.remaining() != 0:
@@ -246,8 +227,111 @@ def validate(data: bytes, verbose: bool = False) -> dict[str, int]:
         )
 
     if verbose:
-        print(f"エンティティ {entity_count} 件: {counts}")
+        print(f"エンティティ {entity_count} 件（定義の中身を含む内訳）: {counts}")
     return counts
+
+
+def read_entity(
+    c: Cursor,
+    where: str,
+    layer_count: int,
+    group_count: int,
+    counts: dict[str, int],
+    used_groups: set[int],
+    used_definitions: set[int],
+) -> None:
+    """エンティティ 1 件を読んで検査する。
+
+    図面直下の要素と定義の中身で**同じ形**なので、同じ関数で読む。
+    分けると片方だけ直し忘れる。
+    """
+    kind = c.u8()
+    if kind not in KIND_NAMES:
+        raise ValidationError(f"{where}: 未知の図形種別 {kind}")
+    name = KIND_NAMES[kind]
+    counts[name] += 1
+
+    if kind == 4:  # polyline
+        closed = c.u8()
+        if closed not in (0, 1):
+            raise ValidationError(f"{where}: closed が 0/1 ではありません（{closed}）")
+        vertex_count = c.u32()
+        pairs = [(c.f64(), c.f64()) for _ in range(vertex_count)]
+        flat = [v for pair in pairs for v in pair]
+    elif kind == 5:  # instance
+        def_index = c.u32()
+        used_definitions.add(def_index)
+        # 基点 2 + 回転 1 + 倍率 1。
+        flat = [c.f64() for _ in range(4)]
+        scale = flat[3]
+        if not (scale > 0.0):
+            raise ValidationError(f"{where}: 配置の倍率が正ではありません（{scale}）")
+        flags = c.u8()
+        unknown = flags & ~PLACEMENT_FLIPPED
+        if unknown:
+            raise ValidationError(f"{where}: 配置に未定義のフラグビット {unknown:#04x}")
+        # パラメータの個別上書き。
+        n = c.u32()
+        seen: set[str] = set()
+        for _ in range(n):
+            key = c.string()
+            if key in seen:
+                raise ValidationError(f"{where}: パラメータ上書きの名前が重複 {key!r}")
+            seen.add(key)
+            tag = c.u8()
+            if tag == VALUE_NUMBER:
+                c.f64()
+            elif tag == VALUE_BOOL:
+                b = c.u8()
+                if b not in (0, 1):
+                    raise ValidationError(f"{where}: 真偽値が 0/1 ではありません（{b}）")
+            elif tag == VALUE_CHOICE:
+                c.string()
+            else:
+                raise ValidationError(f"{where}: 未知のパラメータ値の種別 {tag}")
+    else:
+        flat = [c.f64() for _ in range(FIXED_F64_COUNT[kind])]
+
+    # 座標に NaN / Inf が入っていたら、どこかで壊れている。
+    for v in flat:
+        if v != v or v in (float("inf"), float("-inf")):
+            raise ValidationError(f"{where}（{name}）: 座標が有限ではありません")
+
+    # 半径は正であること。
+    if kind in (1, 2) and flat[2] <= 0.0:
+        raise ValidationError(f"{where}（{name}）: 半径が正ではありません（{flat[2]}）")
+
+    # 作図線の方向は単位ベクトルであること（Rust 側の不変条件と同じ検査）。
+    if kind == 3:
+        dx, dy = flat[2], flat[3]
+        length = (dx * dx + dy * dy) ** 0.5
+        if abs(length - 1.0) > 1e-9:
+            raise ValidationError(
+                f"{where}（作図線）: 方向が単位ベクトルではありません（長さ {length}）"
+            )
+
+    layer_index = c.u32()
+    if layer_index >= layer_count:
+        raise ValidationError(
+            f"{where}: レイヤ参照が範囲外 {layer_index}（レイヤ数 {layer_count}）"
+        )
+
+    color_tag = c.u8()
+    if color_tag == COLOR_ACI:
+        c.u8()
+    elif color_tag != COLOR_BY_LAYER:
+        raise ValidationError(f"{where}: 未知の色指定 {color_tag}")
+
+    group_tag = c.u8()
+    if group_tag == OPTION_SOME:
+        group_index = c.u32()
+        if group_index >= group_count:
+            raise ValidationError(
+                f"{where}: グループ参照が範囲外 {group_index}（グループ数 {group_count}）"
+            )
+        used_groups.add(group_index)
+    elif group_tag != OPTION_NONE:
+        raise ValidationError(f"{where}: 未知のグループ指定 {group_tag}")
 
 
 def parse_expect(text: str) -> dict[str, int]:
