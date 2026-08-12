@@ -96,6 +96,107 @@ impl Geometry {
             }
         }
     }
+
+    /// `center` を中心に `angle`（ラジアン、反時計回り）だけ回転する。
+    #[must_use]
+    pub fn rotated(&self, center: Point2, angle: f64) -> Self {
+        let rot = |p: Point2| center + (p - center).rotated(angle);
+        match self {
+            Self::Line(l) => Self::Line(Line::new(rot(l.a), rot(l.b))),
+            // 中心のみ回転する。半径は不変。
+            Self::Circle(c) => Self::Circle(Circle::new(rot(c.center), c.radius)),
+            // 中心を回転し、開始角・終了角の両方に angle を加える。
+            Self::Arc(a) => Self::Arc(Arc::new(
+                rot(a.center),
+                a.radius,
+                a.start_angle + angle,
+                a.end_angle + angle,
+            )),
+            Self::Polyline(p) => {
+                let vertices = p.vertices.iter().copied().map(rot).collect();
+                Self::Polyline(Polyline::new(vertices, p.closed))
+            }
+        }
+    }
+
+    /// `center` を中心に `factor` 倍に拡大縮小する。
+    ///
+    /// `factor` が `0` または有限値でない（NaN・無限大）場合は安全策として `self` を
+    /// そのまま返す。`factor` の妥当性検証は呼び出し側の責務であり、ここでは
+    /// 縮退したジオメトリ（半径 0 の円など）を作らないための最終防衛線に過ぎない。
+    #[must_use]
+    pub fn scaled(&self, center: Point2, factor: f64) -> Self {
+        if !factor.is_finite() || factor == 0.0 {
+            return self.clone();
+        }
+        let scale = |p: Point2| center + (p - center) * factor;
+        match self {
+            Self::Line(l) => Self::Line(Line::new(scale(l.a), scale(l.b))),
+            // 中心が動き、半径も factor 倍になる。
+            Self::Circle(c) => Self::Circle(Circle::new(scale(c.center), c.radius * factor)),
+            // 中心が動き、半径も factor 倍になる。角度は不変。
+            Self::Arc(a) => Self::Arc(Arc::new(
+                scale(a.center),
+                a.radius * factor,
+                a.start_angle,
+                a.end_angle,
+            )),
+            Self::Polyline(p) => {
+                let vertices = p.vertices.iter().copied().map(scale).collect();
+                Self::Polyline(Polyline::new(vertices, p.closed))
+            }
+        }
+    }
+
+    /// `axis` を鏡像軸として反転する。
+    ///
+    /// `axis` が退化している（長さ 0）場合は反転先が定まらないため `self` を
+    /// そのまま返す（NaN を作らない）。
+    ///
+    /// `Arc` は反射によって掃引の向き（CCW）が逆転するため、単に端点を反射する
+    /// だけでは足りない。`start_angle` と `end_angle` を入れ替えたうえで反射する
+    /// ことで、「`start_angle` から `end_angle` へ CCW」という不変条件を保つ
+    /// （入れ替えを忘れると、鏡像の弧ではなく円の残り部分＝補角の弧になる）。
+    #[must_use]
+    pub fn mirrored(&self, axis: &Line) -> Self {
+        if axis.is_degenerate() {
+            return self.clone();
+        }
+        match self {
+            Self::Line(l) => Self::Line(Line::new(
+                reflect_point(axis, l.a),
+                reflect_point(axis, l.b),
+            )),
+            // 中心のみ反射する。半径は不変。
+            Self::Circle(c) => Self::Circle(Circle::new(reflect_point(axis, c.center), c.radius)),
+            Self::Arc(a) => {
+                // 非退化なので axis.dir() は必ず Some。
+                let axis_angle = axis.dir().expect("非退化な axis のはず").angle();
+                let new_center = reflect_point(axis, a.center);
+                // 反射で向きが逆転するため start/end を入れ替えて反射する。
+                let new_start = 2.0 * axis_angle - a.end_angle;
+                let new_end = 2.0 * axis_angle - a.start_angle;
+                Self::Arc(Arc::new(new_center, a.radius, new_start, new_end))
+            }
+            Self::Polyline(p) => {
+                let vertices = p
+                    .vertices
+                    .iter()
+                    .copied()
+                    .map(|v| reflect_point(axis, v))
+                    .collect();
+                Self::Polyline(Polyline::new(vertices, p.closed))
+            }
+        }
+    }
+}
+
+/// 点 `p` を `axis`（非退化前提）に関して反射する。
+///
+/// `axis.closest_param` は無限直線への射影なので、線分の外側でも正しく使える。
+fn reflect_point(axis: &Line, p: Point2) -> Point2 {
+    let foot = axis.point_at(axis.closest_param(p));
+    foot + (foot - p)
 }
 
 /// 図面を構成する 1 要素。
@@ -145,16 +246,75 @@ impl Entity {
             color: self.color,
         }
     }
+
+    /// `center` を中心に回転した複製を作る（レイヤ・色は変わらない）。
+    #[must_use]
+    pub fn rotated(&self, center: Point2, angle: f64) -> Self {
+        Self {
+            geom: self.geom.rotated(center, angle),
+            layer: self.layer,
+            color: self.color,
+        }
+    }
+
+    /// `center` を中心に拡大縮小した複製を作る（レイヤ・色は変わらない）。
+    #[must_use]
+    pub fn scaled(&self, center: Point2, factor: f64) -> Self {
+        Self {
+            geom: self.geom.scaled(center, factor),
+            layer: self.layer,
+            color: self.color,
+        }
+    }
+
+    /// `axis` を鏡像軸として反転した複製を作る（レイヤ・色は変わらない）。
+    #[must_use]
+    pub fn mirrored(&self, axis: &Line) -> Self {
+        Self {
+            geom: self.geom.mirrored(axis),
+            layer: self.layer,
+            color: self.color,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::geom::tolerance::eq_len;
+    use crate::geom::tolerance::{eq_angle, eq_len};
     use crate::geom::{Point2 as P, Vec2 as V};
+    use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
 
     fn line_geom(a: (f64, f64), b: (f64, f64)) -> Geometry {
         Geometry::Line(Line::new(P::new(a.0, a.1), P::new(b.0, b.1)))
+    }
+
+    fn line_at(g: &Geometry) -> Line {
+        match g {
+            Geometry::Line(l) => *l,
+            other => panic!("Line のはず: {other:?}"),
+        }
+    }
+
+    fn circle_at(g: &Geometry) -> Circle {
+        match g {
+            Geometry::Circle(c) => *c,
+            other => panic!("Circle のはず: {other:?}"),
+        }
+    }
+
+    fn arc_at(g: &Geometry) -> Arc {
+        match g {
+            Geometry::Arc(a) => *a,
+            other => panic!("Arc のはず: {other:?}"),
+        }
+    }
+
+    fn polyline_at(g: &Geometry) -> &Polyline {
+        match g {
+            Geometry::Polyline(p) => p,
+            other => panic!("Polyline のはず: {other:?}"),
+        }
     }
 
     #[test]
@@ -382,5 +542,242 @@ mod tests {
         assert_eq!(moved.layer, e.layer);
         assert_eq!(moved.color, e.color);
         assert_eq!(moved.geom, line_geom((3.0, 3.0), (50.0, 50.0)));
+    }
+
+    // ---- rotated ------------------------------------------------------------
+
+    #[test]
+    fn geometry_rotated_line_quarter_turn() {
+        let g = line_geom((1.0, 0.0), (1.0, 1.0));
+        let rotated = g.rotated(P::ORIGIN, FRAC_PI_2);
+        let l = line_at(&rotated);
+        assert!(l.a.eq_tol(P::new(0.0, 1.0)));
+        assert!(l.b.eq_tol(P::new(-1.0, 1.0)));
+    }
+
+    #[test]
+    fn geometry_rotated_by_zero_is_identity() {
+        let g = line_geom((2.0, 3.0), (5.0, 7.0));
+        let rotated = g.rotated(P::new(1.0, 1.0), 0.0);
+        let l = line_at(&rotated);
+        assert!(l.a.eq_tol(P::new(2.0, 3.0)));
+        assert!(l.b.eq_tol(P::new(5.0, 7.0)));
+    }
+
+    #[test]
+    fn geometry_rotated_by_tau_is_identity() {
+        let g = line_geom((2.0, 3.0), (5.0, 7.0));
+        let rotated = g.rotated(P::new(1.0, 1.0), TAU);
+        let l = line_at(&rotated);
+        assert!(l.a.eq_tol(P::new(2.0, 3.0)));
+        assert!(l.b.eq_tol(P::new(5.0, 7.0)));
+    }
+
+    #[test]
+    fn geometry_rotated_circle_center_moves_radius_unchanged() {
+        let g = Geometry::Circle(Circle::new(P::new(1.0, 0.0), 5.0));
+        let rotated = g.rotated(P::ORIGIN, FRAC_PI_2);
+        let c = circle_at(&rotated);
+        assert!(c.center.eq_tol(P::new(0.0, 1.0)));
+        assert!(eq_len(c.radius, 5.0));
+    }
+
+    #[test]
+    fn geometry_rotated_arc_shifts_both_angles() {
+        let g = Geometry::Arc(Arc::new(P::new(1.0, 0.0), 2.0, 0.2, 1.0));
+        let rotated = g.rotated(P::ORIGIN, FRAC_PI_4);
+        let a = arc_at(&rotated);
+        let expected_center = P::ORIGIN + V::new(1.0, 0.0).rotated(FRAC_PI_4);
+        assert!(a.center.eq_tol(expected_center));
+        assert!(eq_len(a.radius, 2.0));
+        assert!(eq_angle(a.start_angle, 0.2 + FRAC_PI_4));
+        assert!(eq_angle(a.end_angle, 1.0 + FRAC_PI_4));
+    }
+
+    #[test]
+    fn geometry_rotated_polyline_preserves_closed_and_vertex_count() {
+        let g = Geometry::Polyline(Polyline::rectangle(P::new(0.0, 0.0), P::new(2.0, 3.0)));
+        let rotated = g.rotated(P::new(1.0, 1.0), FRAC_PI_2);
+        let p = polyline_at(&rotated);
+        assert!(p.closed);
+        assert_eq!(p.vertex_count(), 4);
+    }
+
+    // ---- scaled ---------------------------------------------------------------
+
+    #[test]
+    fn geometry_scaled_line() {
+        let g = line_geom((2.0, 0.0), (2.0, 1.0));
+        let scaled = g.scaled(P::ORIGIN, 3.0);
+        let l = line_at(&scaled);
+        assert!(l.a.eq_tol(P::new(6.0, 0.0)));
+        assert!(l.b.eq_tol(P::new(6.0, 3.0)));
+    }
+
+    #[test]
+    fn geometry_scaled_by_one_is_identity() {
+        let g = line_geom((2.0, 3.0), (5.0, 7.0));
+        let scaled = g.scaled(P::new(1.0, 1.0), 1.0);
+        let l = line_at(&scaled);
+        assert!(l.a.eq_tol(P::new(2.0, 3.0)));
+        assert!(l.b.eq_tol(P::new(5.0, 7.0)));
+    }
+
+    #[test]
+    fn geometry_scaled_zero_factor_returns_self() {
+        let g = line_geom((2.0, 3.0), (5.0, 7.0));
+        assert_eq!(g.scaled(P::new(5.0, 5.0), 0.0), g);
+    }
+
+    #[test]
+    fn geometry_scaled_nan_factor_returns_self() {
+        let g = line_geom((2.0, 3.0), (5.0, 7.0));
+        assert_eq!(g.scaled(P::new(5.0, 5.0), f64::NAN), g);
+    }
+
+    #[test]
+    fn geometry_scaled_infinite_factor_returns_self() {
+        let g = line_geom((2.0, 3.0), (5.0, 7.0));
+        assert_eq!(g.scaled(P::new(5.0, 5.0), f64::INFINITY), g);
+    }
+
+    #[test]
+    fn geometry_scaled_circle_radius_scales() {
+        let g = Geometry::Circle(Circle::new(P::new(2.0, 0.0), 4.0));
+        let scaled = g.scaled(P::ORIGIN, 2.0);
+        let c = circle_at(&scaled);
+        assert!(c.center.eq_tol(P::new(4.0, 0.0)));
+        assert!(eq_len(c.radius, 8.0));
+    }
+
+    #[test]
+    fn geometry_scaled_arc_radius_scales_angles_unchanged() {
+        let g = Geometry::Arc(Arc::new(P::new(2.0, 0.0), 4.0, 0.3, 1.2));
+        let scaled = g.scaled(P::ORIGIN, 2.0);
+        let a = arc_at(&scaled);
+        assert!(a.center.eq_tol(P::new(4.0, 0.0)));
+        assert!(eq_len(a.radius, 8.0));
+        assert!(eq_angle(a.start_angle, 0.3));
+        assert!(eq_angle(a.end_angle, 1.2));
+    }
+
+    #[test]
+    fn geometry_scaled_polyline_preserves_closed_and_vertex_count() {
+        let g = Geometry::Polyline(Polyline::rectangle(P::new(0.0, 0.0), P::new(2.0, 3.0)));
+        let scaled = g.scaled(P::new(1.0, 1.0), 2.0);
+        let p = polyline_at(&scaled);
+        assert!(p.closed);
+        assert_eq!(p.vertex_count(), 4);
+    }
+
+    // ---- mirrored ---------------------------------------------------------------
+
+    fn x_axis() -> Line {
+        Line::new(P::ORIGIN, P::new(1.0, 0.0))
+    }
+
+    #[test]
+    fn geometry_mirrored_line_across_x_axis() {
+        let g = line_geom((2.0, 3.0), (5.0, -1.0));
+        let mirrored = g.mirrored(&x_axis());
+        let l = line_at(&mirrored);
+        assert!(l.a.eq_tol(P::new(2.0, -3.0)));
+        assert!(l.b.eq_tol(P::new(5.0, 1.0)));
+    }
+
+    #[test]
+    fn geometry_mirrored_twice_is_identity() {
+        let axis = Line::new(P::new(0.0, 1.0), P::new(1.0, 1.0));
+        let g = line_geom((2.0, 3.0), (5.0, -1.0));
+        let twice = g.mirrored(&axis).mirrored(&axis);
+        let l = line_at(&twice);
+        assert!(l.a.eq_tol(P::new(2.0, 3.0)));
+        assert!(l.b.eq_tol(P::new(5.0, -1.0)));
+    }
+
+    #[test]
+    fn geometry_mirrored_degenerate_axis_returns_self() {
+        let axis = Line::new(P::new(3.0, 3.0), P::new(3.0, 3.0));
+        let g = line_geom((2.0, 3.0), (5.0, -1.0));
+        assert_eq!(g.mirrored(&axis), g);
+    }
+
+    #[test]
+    fn geometry_mirrored_circle_center_only_radius_unchanged() {
+        let g = Geometry::Circle(Circle::new(P::new(2.0, 3.0), 5.0));
+        let mirrored = g.mirrored(&x_axis());
+        let c = circle_at(&mirrored);
+        assert!(c.center.eq_tol(P::new(2.0, -3.0)));
+        assert!(eq_len(c.radius, 5.0));
+    }
+
+    /// 鏡像で掃引方向が反転する落とし穴を明示的な角度でピン留めするテスト。
+    ///
+    /// 第一象限の四半円（0 〜 π/2, CCW）を X 軸で反転すると、
+    /// 第四象限の四半円（-π/2 〜 0, CCW）になるはず。
+    /// start/end を入れ替えずに単純に反射しただけだと、円の残り 3/4
+    /// （補角の弧）になってしまう。
+    #[test]
+    fn geometry_mirrored_arc_swaps_start_and_end() {
+        let g = Geometry::Arc(Arc::new(P::ORIGIN, 1.0, 0.0, FRAC_PI_2));
+        let mirrored = g.mirrored(&x_axis());
+        let a = arc_at(&mirrored);
+        assert!(a.center.eq_tol(P::ORIGIN));
+        assert!(eq_len(a.radius, 1.0));
+        assert!(eq_angle(a.start_angle, -FRAC_PI_2));
+        assert!(eq_angle(a.end_angle, 0.0));
+    }
+
+    #[test]
+    fn geometry_mirrored_arc_twice_is_identity() {
+        let axis = Line::new(P::new(0.0, 2.0), P::new(3.0, 2.0));
+        let g = Geometry::Arc(Arc::new(P::new(1.0, 1.0), 3.0, 0.4, 2.1));
+        let twice = g.mirrored(&axis).mirrored(&axis);
+        let a = arc_at(&twice);
+        assert!(a.center.eq_tol(P::new(1.0, 1.0)));
+        assert!(eq_len(a.radius, 3.0));
+        assert!(eq_angle(a.start_angle, 0.4));
+        assert!(eq_angle(a.end_angle, 2.1));
+    }
+
+    #[test]
+    fn geometry_mirrored_polyline_preserves_closed_and_vertex_count() {
+        let g = Geometry::Polyline(Polyline::rectangle(P::new(0.0, 0.0), P::new(2.0, 3.0)));
+        let mirrored = g.mirrored(&x_axis());
+        let p = polyline_at(&mirrored);
+        assert!(p.closed);
+        assert_eq!(p.vertex_count(), 4);
+    }
+
+    // ---- Entity: rotated / scaled / mirrored -----------------------------------
+
+    #[test]
+    fn entity_rotated_keeps_layer_and_color() {
+        let e = Entity::new(line_geom((1.0, 0.0), (1.0, 1.0)), LayerId::ZERO);
+        let rotated = e.rotated(P::ORIGIN, FRAC_PI_2);
+        assert_eq!(rotated.layer, e.layer);
+        assert_eq!(rotated.color, e.color);
+        let l = line_at(&rotated.geom);
+        assert!(l.a.eq_tol(P::new(0.0, 1.0)));
+    }
+
+    #[test]
+    fn entity_scaled_keeps_layer_and_color() {
+        let e = Entity::new(line_geom((2.0, 0.0), (2.0, 1.0)), LayerId::ZERO);
+        let scaled = e.scaled(P::ORIGIN, 3.0);
+        assert_eq!(scaled.layer, e.layer);
+        assert_eq!(scaled.color, e.color);
+        let l = line_at(&scaled.geom);
+        assert!(l.a.eq_tol(P::new(6.0, 0.0)));
+    }
+
+    #[test]
+    fn entity_mirrored_keeps_layer_and_color() {
+        let e = Entity::new(line_geom((2.0, 3.0), (5.0, -1.0)), LayerId::ZERO);
+        let mirrored = e.mirrored(&x_axis());
+        assert_eq!(mirrored.layer, e.layer);
+        assert_eq!(mirrored.color, e.color);
+        let l = line_at(&mirrored.geom);
+        assert!(l.a.eq_tol(P::new(2.0, -3.0)));
     }
 }
