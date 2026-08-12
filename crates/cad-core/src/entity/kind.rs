@@ -61,6 +61,41 @@ impl Geometry {
             Self::Polyline(p) => Self::Polyline(p.translated(v)),
         }
     }
+
+    /// `regions` のいずれかに入っている定義点だけを `delta` ぶん動かす。
+    ///
+    /// `regions` が空のときは図形全体を平行移動する（MOVE と同じ）。
+    /// AutoCAD は交差窓を複数回重ねられるので、範囲は 1 つではなくスライスで受ける。
+    #[must_use]
+    pub fn stretched(&self, regions: &[Aabb], delta: Vec2) -> Self {
+        if regions.is_empty() {
+            return self.translated(delta);
+        }
+        let inside = |p: Point2| regions.iter().any(|r| r.contains(p));
+        let move_if_inside = |p: Point2| if inside(p) { p + delta } else { p };
+        match self {
+            Self::Line(l) => Self::Line(Line::new(move_if_inside(l.a), move_if_inside(l.b))),
+            // 中心が範囲内のときだけ図形全体を動かす。半径・角度は不変。
+            Self::Circle(c) => {
+                if inside(c.center) {
+                    Self::Circle(c.translated(delta))
+                } else {
+                    Self::Circle(*c)
+                }
+            }
+            Self::Arc(a) => {
+                if inside(a.center) {
+                    Self::Arc(a.translated(delta))
+                } else {
+                    Self::Arc(*a)
+                }
+            }
+            Self::Polyline(p) => {
+                let vertices = p.vertices.iter().copied().map(move_if_inside).collect();
+                Self::Polyline(Polyline::new(vertices, p.closed))
+            }
+        }
+    }
 }
 
 /// 図面を構成する 1 要素。
@@ -96,6 +131,16 @@ impl Entity {
     pub fn translated(&self, v: Vec2) -> Self {
         Self {
             geom: self.geom.translated(v),
+            layer: self.layer,
+            color: self.color,
+        }
+    }
+
+    /// `regions` に入っている定義点だけを動かした複製を作る（レイヤ・色は変わらない）。
+    #[must_use]
+    pub fn stretched(&self, regions: &[Aabb], delta: Vec2) -> Self {
+        Self {
+            geom: self.geom.stretched(regions, delta),
             layer: self.layer,
             color: self.color,
         }
@@ -162,5 +207,180 @@ mod tests {
         assert_eq!(moved.layer, e.layer);
         assert_eq!(moved.color, e.color);
         assert_eq!(moved.geom, line_geom((3.0, 4.0), (4.0, 4.0)));
+    }
+
+    // ---- stretched --------------------------------------------------------
+
+    /// `(0,0)-(10,10)` の範囲。
+    fn region() -> Aabb {
+        Aabb::new(P::new(0.0, 0.0), P::new(10.0, 10.0))
+    }
+
+    /// `region()` とは重ならない範囲。
+    fn other_region() -> Aabb {
+        Aabb::new(P::new(100.0, 100.0), P::new(110.0, 110.0))
+    }
+
+    #[test]
+    fn geometry_stretched_empty_regions_equals_translated_line() {
+        let g = line_geom((1.0, 1.0), (2.0, 2.0));
+        let delta = V::new(5.0, -3.0);
+        assert_eq!(g.stretched(&[], delta), g.translated(delta));
+    }
+
+    #[test]
+    fn geometry_stretched_empty_regions_equals_translated_circle() {
+        let g = Geometry::Circle(Circle::new(P::new(1.0, 1.0), 3.0));
+        let delta = V::new(5.0, -3.0);
+        assert_eq!(g.stretched(&[], delta), g.translated(delta));
+    }
+
+    #[test]
+    fn geometry_stretched_empty_regions_equals_translated_arc() {
+        let g = Geometry::Arc(Arc::new(P::new(1.0, 1.0), 3.0, 0.0, 1.0));
+        let delta = V::new(5.0, -3.0);
+        assert_eq!(g.stretched(&[], delta), g.translated(delta));
+    }
+
+    #[test]
+    fn geometry_stretched_empty_regions_equals_translated_polyline() {
+        let g = Geometry::Polyline(Polyline::rectangle(P::new(0.0, 0.0), P::new(2.0, 3.0)));
+        let delta = V::new(5.0, -3.0);
+        assert_eq!(g.stretched(&[], delta), g.translated(delta));
+    }
+
+    #[test]
+    fn geometry_stretched_line_only_a_inside_moves_a_only() {
+        // a は region の内側、b はその外側。
+        let g = line_geom((1.0, 1.0), (50.0, 50.0));
+        let moved = g.stretched(&[region()], V::new(5.0, 5.0));
+        assert_eq!(moved, line_geom((6.0, 6.0), (50.0, 50.0)));
+    }
+
+    #[test]
+    fn geometry_stretched_line_only_b_inside_moves_b_only() {
+        let g = line_geom((50.0, 50.0), (1.0, 1.0));
+        let moved = g.stretched(&[region()], V::new(5.0, 5.0));
+        assert_eq!(moved, line_geom((50.0, 50.0), (6.0, 6.0)));
+    }
+
+    #[test]
+    fn geometry_stretched_line_both_inside_equals_translated() {
+        let g = line_geom((1.0, 1.0), (2.0, 2.0));
+        let delta = V::new(5.0, 5.0);
+        assert_eq!(g.stretched(&[region()], delta), g.translated(delta));
+    }
+
+    #[test]
+    fn geometry_stretched_line_neither_inside_is_unchanged() {
+        let g = line_geom((50.0, 50.0), (60.0, 60.0));
+        let moved = g.stretched(&[region()], V::new(5.0, 5.0));
+        assert_eq!(moved, g);
+    }
+
+    #[test]
+    fn geometry_stretched_polyline_moves_only_vertices_inside_region() {
+        // 4 頂点のうち先頭 2 つだけが region の内側。
+        let g = Geometry::Polyline(Polyline::new(
+            vec![
+                P::new(1.0, 1.0),
+                P::new(2.0, 2.0),
+                P::new(50.0, 50.0),
+                P::new(60.0, 60.0),
+            ],
+            false,
+        ));
+        let moved = g.stretched(&[region()], V::new(3.0, 3.0));
+        let expected = Geometry::Polyline(Polyline::new(
+            vec![
+                P::new(4.0, 4.0),
+                P::new(5.0, 5.0),
+                P::new(50.0, 50.0),
+                P::new(60.0, 60.0),
+            ],
+            false,
+        ));
+        assert_eq!(moved, expected);
+    }
+
+    #[test]
+    fn geometry_stretched_polyline_preserves_closed_flag_and_vertex_count() {
+        let g = Geometry::Polyline(Polyline::rectangle(P::new(0.0, 0.0), P::new(2.0, 3.0)));
+        let moved = g.stretched(&[region()], V::new(1.0, 1.0));
+        match (&g, &moved) {
+            (Geometry::Polyline(orig), Geometry::Polyline(m)) => {
+                assert_eq!(m.closed, orig.closed);
+                assert_eq!(m.vertex_count(), orig.vertex_count());
+            }
+            _ => panic!("Polyline のはず"),
+        }
+    }
+
+    #[test]
+    fn geometry_stretched_circle_center_inside_moves_whole_circle_radius_unchanged() {
+        let g = Geometry::Circle(Circle::new(P::new(5.0, 5.0), 3.0));
+        let moved = g.stretched(&[region()], V::new(2.0, 2.0));
+        assert_eq!(moved, Geometry::Circle(Circle::new(P::new(7.0, 7.0), 3.0)));
+    }
+
+    #[test]
+    fn geometry_stretched_circle_center_outside_is_unchanged_even_when_circumference_crosses_region(
+    ) {
+        // 中心は region の外だが、半径が大きいため円周は region と交差する。
+        let g = Geometry::Circle(Circle::new(P::new(15.0, 5.0), 8.0));
+        let moved = g.stretched(&[region()], V::new(2.0, 2.0));
+        assert_eq!(moved, g);
+    }
+
+    #[test]
+    fn geometry_stretched_arc_center_inside_moves_radius_and_angles_unchanged() {
+        let g = Geometry::Arc(Arc::new(P::new(5.0, 5.0), 3.0, 0.1, 1.5));
+        let moved = g.stretched(&[region()], V::new(2.0, 2.0));
+        assert_eq!(
+            moved,
+            Geometry::Arc(Arc::new(P::new(7.0, 7.0), 3.0, 0.1, 1.5))
+        );
+    }
+
+    #[test]
+    fn geometry_stretched_arc_center_outside_is_unchanged() {
+        let g = Geometry::Arc(Arc::new(P::new(50.0, 50.0), 3.0, 0.1, 1.5));
+        let moved = g.stretched(&[region()], V::new(2.0, 2.0));
+        assert_eq!(moved, g);
+    }
+
+    #[test]
+    fn geometry_stretched_multiple_regions_point_in_either_moves() {
+        // a は region() の内側、b は other_region() の内側。両方とも動くはず。
+        let g = line_geom((1.0, 1.0), (105.0, 105.0));
+        let moved = g.stretched(&[region(), other_region()], V::new(1.0, 1.0));
+        assert_eq!(moved, line_geom((2.0, 2.0), (106.0, 106.0)));
+    }
+
+    #[test]
+    fn geometry_stretched_multiple_overlapping_regions_moves_point_exactly_once() {
+        // 2 つの重なり合う範囲の両方に入る点でも、delta が 2 重にはかからない。
+        let overlap_a = Aabb::new(P::new(0.0, 0.0), P::new(10.0, 10.0));
+        let overlap_b = Aabb::new(P::new(5.0, 5.0), P::new(15.0, 15.0));
+        let g = line_geom((7.0, 7.0), (100.0, 100.0));
+        let moved = g.stretched(&[overlap_a, overlap_b], V::new(3.0, 3.0));
+        assert_eq!(moved, line_geom((10.0, 10.0), (100.0, 100.0)));
+    }
+
+    #[test]
+    fn geometry_stretched_large_coordinates() {
+        let big_region = Aabb::new(P::new(0.0, 0.0), P::new(2.0e6, 2.0e6));
+        let g = line_geom((1.0e6, 1.0e6), (5.0e6, 5.0e6));
+        let moved = g.stretched(&[big_region], V::new(1.0e6, 0.0));
+        assert_eq!(moved, line_geom((2.0e6, 1.0e6), (5.0e6, 5.0e6)));
+    }
+
+    #[test]
+    fn entity_stretched_keeps_layer_and_color() {
+        let e = Entity::new(line_geom((1.0, 1.0), (50.0, 50.0)), LayerId::ZERO);
+        let moved = e.stretched(&[region()], V::new(2.0, 2.0));
+        assert_eq!(moved.layer, e.layer);
+        assert_eq!(moved.color, e.color);
+        assert_eq!(moved.geom, line_geom((3.0, 3.0), (50.0, 50.0)));
     }
 }

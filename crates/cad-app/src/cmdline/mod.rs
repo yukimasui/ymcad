@@ -18,6 +18,8 @@ pub mod coord;
 
 use std::collections::VecDeque;
 
+use crate::tools::{self, CommandSpec};
+
 /// 履歴に残す行数。
 const HISTORY_LIMIT: usize = 200;
 /// 画面に見せる履歴の行数。
@@ -54,6 +56,76 @@ pub enum Submission {
     Cancel,
 }
 
+/// コマンド候補の一覧と選択状態。
+///
+/// 入力が変わるたびに [`Self::update`] で作り直す。
+#[derive(Debug, Default)]
+struct Suggestions {
+    items: Vec<&'static CommandSpec>,
+    /// 明示的に選ばれている候補。`None` なら未選択。
+    ///
+    /// 未選択のときに `Enter` を押すと、候補ではなく入力文字列がそのまま確定される。
+    /// 「打った通りに実行される」のが既定で、候補選択は明示的な操作にする。
+    selected: Option<usize>,
+}
+
+impl Suggestions {
+    /// 入力に合わせて候補を作り直す。
+    ///
+    /// 候補の顔ぶれが変わったら選択を解除する。選択位置だけ残ると、
+    /// 別のコマンドを選んだつもりになる事故が起きる。
+    fn update(&mut self, input: &str) {
+        let next = tools::suggestions(input);
+        let changed = next.len() != self.items.len()
+            || next
+                .iter()
+                .zip(&self.items)
+                .any(|(a, b)| !std::ptr::eq(*a, *b));
+        if changed {
+            self.selected = None;
+        }
+        self.items = next;
+        // 件数が減って選択が範囲外になった場合の保険。
+        if self.selected.is_some_and(|i| i >= self.items.len()) {
+            self.selected = None;
+        }
+    }
+
+    fn clear(&mut self) {
+        self.items.clear();
+        self.selected = None;
+    }
+
+    fn is_visible(&self) -> bool {
+        !self.items.is_empty()
+    }
+
+    /// 選択を上下に動かす。端では未選択へ戻る（一覧から抜けられるように）。
+    fn move_selection(&mut self, delta: i32) {
+        if self.items.is_empty() {
+            return;
+        }
+        let last = self.items.len() - 1;
+        self.selected = match (self.selected, delta) {
+            (None, d) if d > 0 => Some(0),
+            (None, _) => Some(last),
+            (Some(i), d) if d > 0 => (i < last).then_some(i + 1),
+            (Some(i), _) => (i > 0).then(|| i - 1),
+        };
+    }
+
+    /// 明示的に選ばれている候補の名前。
+    fn selected_name(&self) -> Option<String> {
+        self.items.get(self.selected?).map(|c| c.name.to_owned())
+    }
+
+    /// `Tab` で補完する名前。未選択なら先頭候補。
+    fn completion(&self) -> Option<String> {
+        let index = self.selected.unwrap_or(0);
+        self.items.get(index).map(|c| c.name.to_owned())
+    }
+}
+
 /// コマンドラインの状態。
 #[derive(Debug)]
 pub struct CommandLine {
@@ -65,6 +137,8 @@ pub struct CommandLine {
     last_command: Option<String>,
     /// IME で変換中か。
     composing: bool,
+    /// コマンド候補。
+    suggestions: Suggestions,
 }
 
 impl Default for CommandLine {
@@ -82,6 +156,7 @@ impl CommandLine {
             history: VecDeque::new(),
             last_command: None,
             composing: false,
+            suggestions: Suggestions::default(),
         }
     }
 
@@ -147,30 +222,23 @@ impl CommandLine {
 
     /// コマンドラインを描画し、確定操作を返す。
     ///
-    /// `prompt` は実行中コマンドの案内（例: `線分の始点を指定:`）。
-    pub fn show(&mut self, ui: &mut egui::Ui, prompt: &str) -> Submission {
+    /// - `prompt` … 実行中コマンドの案内（例: `線分の始点を指定:`）
+    /// - `allow_suggestions` … コマンド候補を出してよいか。
+    ///   ツール実行中や選択待ち中は座標やオプションを打っている段階なので `false` を渡す
+    pub fn show(&mut self, ui: &mut egui::Ui, prompt: &str, allow_suggestions: bool) -> Submission {
         self.track_ime(ui);
+        self.refresh_suggestions(allow_suggestions);
 
         // 変換中はキーを一切奪わない。IME に確定させるのが先。
+        // 候補の操作キーもこのブロックの中にあるので、変換中は自動的に無効になる。
         let submitted = if self.composing {
             None
         } else {
-            ui.input_mut(|i| {
-                let esc = i.consume_key(egui::Modifiers::NONE, egui::Key::Escape);
-                // AutoCAD では Space も Enter と同じく確定として働く。
-                let enter = i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
-                    || i.consume_key(egui::Modifiers::NONE, egui::Key::Space);
-                if esc {
-                    Some(Submission::Cancel)
-                } else if enter {
-                    Some(Submission::Text(String::new())) // 中身は後で詰める
-                } else {
-                    None
-                }
-            })
+            ui.input_mut(|i| self.consume_keys(i))
         };
 
         self.show_history(ui);
+        self.show_suggestions(ui);
 
         ui.horizontal(|ui| {
             ui.monospace(prompt);
@@ -196,11 +264,17 @@ impl CommandLine {
         match submitted {
             Some(Submission::Cancel) => {
                 self.input.clear();
+                self.suggestions.clear();
                 Submission::Cancel
             }
             Some(Submission::Text(_)) => {
-                let text = self.input.trim().to_owned();
+                // 候補が明示的に選ばれていれば、入力文字列ではなくその名前を確定する。
+                let text = self
+                    .suggestions
+                    .selected_name()
+                    .unwrap_or_else(|| self.input.trim().to_owned());
                 self.input.clear();
+                self.suggestions.clear();
                 if text.is_empty() {
                     Submission::Empty
                 } else {
@@ -209,6 +283,107 @@ impl CommandLine {
             }
             _ => Submission::None,
         }
+    }
+
+    /// 入力に合わせて候補を作り直す。
+    ///
+    /// 変換中は入力欄に未確定文字列が入っているので触らない（ADR-0002）。
+    fn refresh_suggestions(&mut self, allow: bool) {
+        if self.composing {
+            return;
+        }
+        if !allow {
+            self.suggestions.clear();
+            return;
+        }
+        self.suggestions.update(&self.input);
+    }
+
+    /// このフレームのキー入力を消費し、確定操作があれば返す。
+    ///
+    /// 候補の操作キー（`Tab` / `↑` / `↓`）は `TextEdit` を描く前に奪う。
+    /// あとから処理すると `TextEdit` にカーソル移動として取られてしまう。
+    fn consume_keys(&mut self, i: &mut egui::InputState) -> Option<Submission> {
+        const NONE: egui::Modifiers = egui::Modifiers::NONE;
+
+        if i.consume_key(NONE, egui::Key::Escape) {
+            // 候補が出ていれば、まず候補だけを閉じる。
+            // いきなりコマンドを中断すると、打ち間違いのやり直しが面倒になる。
+            if self.suggestions.is_visible() {
+                self.suggestions.clear();
+                return None;
+            }
+            return Some(Submission::Cancel);
+        }
+
+        if self.suggestions.is_visible() {
+            if i.consume_key(NONE, egui::Key::ArrowDown) {
+                self.suggestions.move_selection(1);
+                return None;
+            }
+            if i.consume_key(NONE, egui::Key::ArrowUp) {
+                self.suggestions.move_selection(-1);
+                return None;
+            }
+            if i.consume_key(NONE, egui::Key::Tab) {
+                // 選択中（未選択なら先頭）の候補を入力欄へ入れる。
+                if let Some(name) = self.suggestions.completion() {
+                    self.input = name;
+                    self.suggestions.update(&self.input);
+                }
+                return None;
+            }
+        }
+
+        // AutoCAD では Space も Enter と同じく確定として働く。
+        let enter = i.consume_key(NONE, egui::Key::Enter) || i.consume_key(NONE, egui::Key::Space);
+        enter.then(|| Submission::Text(String::new())) // 中身は呼び出し側で詰める
+    }
+
+    /// 候補一覧を描く。
+    fn show_suggestions(&self, ui: &mut egui::Ui) {
+        if !self.suggestions.is_visible() {
+            return;
+        }
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::symmetric(6, 3))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                for (index, spec) in self.suggestions.items.iter().enumerate() {
+                    let selected = self.suggestions.selected == Some(index);
+                    let name_color = if selected {
+                        ui.visuals().strong_text_color()
+                    } else {
+                        ui.visuals().text_color()
+                    };
+                    let row = ui.horizontal(|ui| {
+                        ui.monospace(
+                            egui::RichText::new(format!("{:<10}", spec.name)).color(name_color),
+                        );
+                        let alias = spec.alias_text();
+                        ui.monospace(
+                            egui::RichText::new(format!("{alias:<10}"))
+                                .color(ui.visuals().weak_text_color()),
+                        );
+                        ui.monospace(
+                            egui::RichText::new(spec.summary).color(ui.visuals().weak_text_color()),
+                        );
+                    });
+                    if selected {
+                        // 選択行は背景を敷いて分かるようにする。
+                        ui.painter().rect_filled(
+                            row.response.rect.expand(1.0),
+                            2.0,
+                            ui.visuals().selection.bg_fill.gamma_multiply(0.5),
+                        );
+                    }
+                }
+                ui.monospace(
+                    egui::RichText::new("↑↓ 選択  Tab 補完  Enter 実行")
+                        .small()
+                        .color(ui.visuals().weak_text_color()),
+                );
+            });
     }
 
     fn show_history(&self, ui: &mut egui::Ui) {
