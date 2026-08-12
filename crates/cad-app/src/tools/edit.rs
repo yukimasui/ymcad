@@ -1,8 +1,9 @@
 //! 編集コマンドとビュー操作コマンド。
 
 use cad_core::command::{
-    CopyEntities, DeleteEntities, MirrorCopyEntities, MirrorEntities, MoveEntities,
-    RotateCopyEntities, RotateEntities, ScaleCopyEntities, ScaleEntities, StretchEntities,
+    CopyEntities, CreateGroup, DeleteEntities, ExplodeEntities, MirrorCopyEntities, MirrorEntities,
+    MoveEntities, RotateCopyEntities, RotateEntities, ScaleCopyEntities, ScaleEntities,
+    StretchEntities, Ungroup,
 };
 use cad_core::geom::tolerance::is_zero_len;
 use cad_core::geom::{Aabb, Line, Point2};
@@ -587,6 +588,166 @@ impl Tool for ZoomTool {
             },
             StepInput::Enter => StepOutcome::Finish,
             _ => StepOutcome::Reject("A（全体）または E（範囲）を指定してください".to_owned()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GROUP / UNGROUP / EXPLODE
+// ---------------------------------------------------------------------------
+
+/// 選択した要素を 1 つのグループにまとめる。
+///
+/// AutoCAD の GROUP。名前を省略すると連番の既定名が付く。
+/// グループの一員をクリックすると全体が選択されるようになる。
+#[derive(Debug, Default)]
+pub struct GroupTool {
+    /// 選択が終わり、名前の入力待ちか。
+    naming: bool,
+}
+
+impl Tool for GroupTool {
+    fn name(&self) -> &'static str {
+        "GROUP"
+    }
+
+    fn prompt(&self) -> String {
+        if self.naming {
+            "グループ名を入力 <Enter で既定名>:".to_owned()
+        } else {
+            "オブジェクトを選択 (Enter で確定):".to_owned()
+        }
+    }
+
+    fn wants_selection(&self) -> bool {
+        true
+    }
+
+    fn step(&mut self, input: StepInput, ctx: &ToolCtx<'_>) -> StepOutcome {
+        match input {
+            StepInput::SelectionReady => {
+                self.naming = true;
+                StepOutcome::Continue
+            }
+            // 既定名で作る。
+            StepInput::Enter => self.commit(ctx.doc.groups().next_default_name(), ctx),
+            // 打った文字列をそのまま名前にする。
+            StepInput::Word(w) => self.commit(w, ctx),
+            // 数字だけの名前も許す（`interpret` が数値として渡してくるため）。
+            StepInput::Number(n) => self.commit(format_number_name(n), ctx),
+            StepInput::Point(_) => StepOutcome::Reject("グループ名を入力してください".to_owned()),
+        }
+    }
+}
+
+/// 数値として解釈された入力をグループ名に戻す。
+///
+/// `1` のような入力は `Session::interpret` が数値にしてしまうので、
+/// 名前として扱えるよう文字列へ直す。整数なら小数点を付けない。
+fn format_number_name(n: f64) -> String {
+    if n.fract() == 0.0 && n.is_finite() {
+        format!("{n:.0}")
+    } else {
+        n.to_string()
+    }
+}
+
+impl GroupTool {
+    fn commit(&self, group_name: String, ctx: &ToolCtx<'_>) -> StepOutcome {
+        let targets = ctx.selection.to_vec();
+        if targets.is_empty() {
+            return StepOutcome::Finish;
+        }
+        if ctx.doc.groups().by_name(&group_name).is_some() {
+            return StepOutcome::Reject(format!("同じ名前のグループがあります: {group_name}"));
+        }
+        StepOutcome::Apply(Box::new(CreateGroup::new("GROUP", group_name, targets)))
+    }
+}
+
+/// グループを解除する。
+///
+/// AutoCAD の UNGROUP。選択した要素が属するグループを解除する。
+/// 要素そのものは残る。
+#[derive(Debug, Default)]
+pub struct UngroupTool;
+
+impl Tool for UngroupTool {
+    fn name(&self) -> &'static str {
+        "UNGROUP"
+    }
+
+    fn prompt(&self) -> String {
+        "解除するグループの要素を選択 (Enter で確定):".to_owned()
+    }
+
+    fn wants_selection(&self) -> bool {
+        true
+    }
+
+    fn step(&mut self, input: StepInput, ctx: &ToolCtx<'_>) -> StepOutcome {
+        match input {
+            StepInput::SelectionReady | StepInput::Enter => {
+                // 選択されている要素が属するグループを集める。
+                let mut groups: Vec<_> = ctx
+                    .selection
+                    .iter()
+                    .filter_map(|id| ctx.doc.entities().get(id))
+                    .filter_map(|e| e.group)
+                    .collect();
+                groups.sort_unstable();
+                groups.dedup();
+
+                match groups.len() {
+                    0 => StepOutcome::Reject("選択した要素はグループに属していません".to_owned()),
+                    // 複数のグループにまたがる場合は、まとめて解除する。
+                    _ => {
+                        let commands: Vec<Box<dyn cad_core::Command>> = groups
+                            .into_iter()
+                            .map(|g| {
+                                Box::new(Ungroup::new("UNGROUP", g)) as Box<dyn cad_core::Command>
+                            })
+                            .collect();
+                        StepOutcome::Apply(Box::new(cad_core::command::MacroCommand::new(
+                            "UNGROUP", commands,
+                        )))
+                    }
+                }
+            }
+            _ => StepOutcome::Reject("Enter で解除を実行してください".to_owned()),
+        }
+    }
+}
+
+/// 選択した要素を分解する。
+///
+/// AutoCAD の EXPLODE。ポリラインを線分の集合にする。
+#[derive(Debug, Default)]
+pub struct ExplodeTool;
+
+impl Tool for ExplodeTool {
+    fn name(&self) -> &'static str {
+        "EXPLODE"
+    }
+
+    fn prompt(&self) -> String {
+        "分解するオブジェクトを選択 (Enter で確定):".to_owned()
+    }
+
+    fn wants_selection(&self) -> bool {
+        true
+    }
+
+    fn step(&mut self, input: StepInput, ctx: &ToolCtx<'_>) -> StepOutcome {
+        match input {
+            StepInput::SelectionReady | StepInput::Enter => {
+                let targets = ctx.selection.to_vec();
+                if targets.is_empty() {
+                    return StepOutcome::Finish;
+                }
+                StepOutcome::Apply(Box::new(ExplodeEntities::new("EXPLODE", targets)))
+            }
+            _ => StepOutcome::Reject("Enter で分解を実行してください".to_owned()),
         }
     }
 }

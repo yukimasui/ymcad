@@ -356,10 +356,13 @@ impl Session {
             return;
         };
 
-        if shift {
-            self.selection.remove(id);
-        } else {
-            self.selection.insert(id);
+        // グループの一員を選んだらグループ全体を対象にする（AutoCAD の既定）。
+        for member in selection::expand_to_group(doc, id) {
+            if shift {
+                self.selection.remove(member);
+            } else {
+                self.selection.insert(member);
+            }
         }
     }
 
@@ -376,10 +379,12 @@ impl Session {
         }
         let hits = selection::pick_in_rect(doc, rect, mode);
         for id in hits {
-            if shift {
-                self.selection.remove(id);
-            } else {
-                self.selection.insert(id);
+            for member in selection::expand_to_group(doc, id) {
+                if shift {
+                    self.selection.remove(member);
+                } else {
+                    self.selection.insert(member);
+                }
             }
         }
 
@@ -1330,5 +1335,162 @@ mod flow_tests {
         assert!(doc.entities().is_empty());
         assert!(s.has_active_tool(), "やり直せるはず");
         assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+    }
+
+    /// 線分を 2 本描いて両方選択した状態を用意する。
+    fn setup_with_two_selected_lines() -> (Session, Document, Vec<cad_core::EntityId>) {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "10,0");
+        enter(&mut s, &mut doc);
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "0,10");
+        feed(&mut s, &mut doc, "10,10");
+        enter(&mut s, &mut doc);
+
+        let ids: Vec<_> = doc.entities().ids().collect();
+        for id in &ids {
+            s.selection.insert(*id);
+        }
+        (s, doc, ids)
+    }
+
+    /// GROUP が選択をまとめ、既定名が付くこと。
+    #[test]
+    fn group_creates_a_group_with_a_default_name() {
+        let (mut s, mut doc, ids) = setup_with_two_selected_lines();
+        feed(&mut s, &mut doc, "G");
+        enter(&mut s, &mut doc); // 既定名
+
+        assert_eq!(doc.groups().len(), 1);
+        let gid = doc
+            .groups()
+            .by_name("グループ1")
+            .expect("既定名で作られるはず");
+        for id in &ids {
+            assert_eq!(doc.entities().get(*id).unwrap().group, Some(gid));
+        }
+    }
+
+    /// 名前を指定してグループ化できること。
+    #[test]
+    fn group_accepts_an_explicit_name() {
+        let (mut s, mut doc, _) = setup_with_two_selected_lines();
+        feed(&mut s, &mut doc, "G");
+        feed(&mut s, &mut doc, "WALL");
+        assert!(doc.groups().by_name("WALL").is_some());
+    }
+
+    /// **グループの一員をクリックすると全体が選択されること**（AutoCAD の既定）。
+    #[test]
+    fn clicking_one_member_selects_the_whole_group() {
+        let (mut s, mut doc, ids) = setup_with_two_selected_lines();
+        feed(&mut s, &mut doc, "G");
+        enter(&mut s, &mut doc);
+
+        s.selection.clear();
+        // 1 本目の線の上をクリックする。
+        s.handle_click(Point2::new(5.0, 0.0), false, 1.0, &mut doc);
+
+        assert_eq!(s.selection.len(), 2, "グループ全体が選ばれるはず");
+        for id in &ids {
+            assert!(s.selection.contains(*id));
+        }
+    }
+
+    /// UNGROUP で解除され、要素は残ること。
+    #[test]
+    fn ungroup_releases_the_group_but_keeps_entities() {
+        let (mut s, mut doc, ids) = setup_with_two_selected_lines();
+        feed(&mut s, &mut doc, "G");
+        enter(&mut s, &mut doc);
+        assert_eq!(doc.groups().len(), 1);
+
+        feed(&mut s, &mut doc, "UNG");
+        enter(&mut s, &mut doc);
+
+        assert_eq!(doc.groups().len(), 0, "グループは消える");
+        assert_eq!(doc.entities().len(), 2, "要素は残る");
+        for id in &ids {
+            assert!(doc.entities().get(*id).unwrap().group.is_none());
+        }
+    }
+
+    /// グループ操作が Undo で完全に戻ること。
+    #[test]
+    fn group_and_ungroup_round_trip_through_undo() {
+        let (mut s, mut doc, ids) = setup_with_two_selected_lines();
+
+        feed(&mut s, &mut doc, "G");
+        enter(&mut s, &mut doc);
+        let gid = doc.groups().by_name("グループ1").unwrap();
+
+        feed(&mut s, &mut doc, "U"); // グループ化を取り消す
+        assert_eq!(doc.groups().len(), 0);
+        for id in &ids {
+            assert!(doc.entities().get(*id).unwrap().group.is_none());
+        }
+
+        feed(&mut s, &mut doc, "REDO");
+        assert_eq!(doc.groups().len(), 1);
+        assert_eq!(doc.entities().get(ids[0]).unwrap().group, Some(gid));
+    }
+
+    /// EXPLODE がポリラインを線分へ分解すること。
+    #[test]
+    fn explode_splits_a_polyline_into_lines() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "REC");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "10,10");
+        assert_eq!(type_names(&doc), vec!["LWPOLYLINE"]);
+
+        let id = doc.entities().ids().next().unwrap();
+        s.selection.insert(id);
+        feed(&mut s, &mut doc, "X");
+
+        assert_eq!(doc.entities().len(), 4, "閉じた矩形なので 4 本");
+        assert!(type_names(&doc).iter().all(|n| *n == "LINE"));
+    }
+
+    /// EXPLODE が Undo で戻ること。
+    #[test]
+    fn explode_undo_restores_the_polyline() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "REC");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "10,10");
+        let id = doc.entities().ids().next().unwrap();
+        let before = doc.entities().get(id).unwrap().clone();
+
+        s.selection.insert(id);
+        feed(&mut s, &mut doc, "X");
+        feed(&mut s, &mut doc, "U");
+
+        assert_eq!(doc.entities().len(), 1);
+        assert_eq!(doc.entities().get(id), Some(&before), "同じ ID・内容で戻る");
+    }
+
+    /// 分解できないものを選んだらエラーになること。
+    #[test]
+    fn explode_rejects_entities_that_cannot_be_exploded() {
+        let (mut s, mut doc, _) = setup_with_two_selected_lines();
+        feed(&mut s, &mut doc, "X");
+
+        assert_eq!(doc.entities().len(), 2, "図面は変わらない");
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+    }
+
+    /// グループに属していない要素で UNGROUP を実行したらエラーになること。
+    #[test]
+    fn ungroup_without_a_group_reports_an_error() {
+        let (mut s, mut doc, _) = setup_with_two_selected_lines();
+        feed(&mut s, &mut doc, "UNG");
+        enter(&mut s, &mut doc);
+        assert!(s
+            .cmdline
+            .history()
+            .any(|l| l.text.contains("グループに属していません")));
     }
 }

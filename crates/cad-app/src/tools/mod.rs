@@ -237,6 +237,24 @@ pub static COMMANDS: &[CommandSpec] = &[
         kind: CommandKind::Tool(|| Box::new(edit::MirrorTool::default())),
     },
     CommandSpec {
+        name: "GROUP",
+        aliases: &["G"],
+        summary: "選択をグループ化",
+        kind: CommandKind::Tool(|| Box::new(edit::GroupTool::default())),
+    },
+    CommandSpec {
+        name: "UNGROUP",
+        aliases: &["UNG"],
+        summary: "グループを解除",
+        kind: CommandKind::Tool(|| Box::new(edit::UngroupTool)),
+    },
+    CommandSpec {
+        name: "EXPLODE",
+        aliases: &["X"],
+        summary: "ポリラインを線分へ分解",
+        kind: CommandKind::Tool(|| Box::new(edit::ExplodeTool)),
+    },
+    CommandSpec {
         name: "ZOOM",
         aliases: &["Z"],
         summary: "表示範囲（全体 / 範囲）",
