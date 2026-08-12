@@ -545,14 +545,50 @@ DXF は交換用の形式で、自分の図面を保持する器としては役�
 2026-08-13 にユーザーから報告。段階 1 の実装で入った退行の可能性が高い
 （`crates/cad-app/src/render.rs` の `draw_entities` / `draw_geometry` を触っている）。
 
-調査の出発点:
+### 調査済み — **原因は特定できていない**（2026-08-13）
 
-- `render.rs::draw_preview` → `draw_geometry` の経路。
-  `Geometry::Instance(_) => {}` の腕を足したときに何か壊していないか
-- `Session::preview(cursor, doc)` が空を返していないか
-  （`MoveTool::translated_selection` あたり）
-- `app.rs` の描画順。`draw_entities` にキャッシュ更新（`resolved.refresh`）を
-  足したので、`draw_preview` との前後関係が変わっていないか
+**同じ調査を繰り返さないこと。** 以下はすべて「異常なし」を確認済み。
+
+| 調べたところ | 結果 |
+|---|---|
+| `Session::preview` が図形を返すか | ✅ 正常。**回帰テスト 7 本を追加**（文字入力・クリックの両経路） |
+| `MoveTool::preview` / `translated_selection` | ✅ 正常 |
+| `render.rs::draw_preview` → `draw_geometry` → `draw_clipped_segment` → `draw_patterned_segment` | ✅ 全行読んだ。`Instance` の腕を足しただけで既存経路は無傷 |
+| `app.rs` の描画順（`draw_entities` の後に `draw_preview`） | ✅ 変わっていない |
+| `cursor_model` の算出、`handle_pointer`、`place_point` | ✅ 変わっていない |
+| `develop..HEAD` の `cad-app` 差分全部 | ✅ 機械的な引き回しのみ |
+| `snap/detect.rs`・`snap/index.rs` の差分 | ✅ 機械的な引き回しのみ |
+
+**手元では再現できない。** マウスの hover が要るため、
+自動テストでは `cursor_model` から先を再現できない。
+`xdotool` 等の合成入力ツールは無く、`/dev/uinput` は root 専用。
+
+### 次にやること — ユーザーに 2 つのバイナリを試してもらう
+
+1. **診断版**（`eprintln` でツール状態・カーソル・プレビュー件数を出す）
+   → どこで途切れているかが一発で分かる。ビルド方法は下記
+2. **`develop` 時点のバイナリ**
+   → **そもそも段階 1 の変更が原因なのか**を A/B で切り分ける
+
+診断版の作り方（`app.rs` の `draw_preview` 呼び出しの直前に入れる）:
+
+```rust
+let preview = self.session.preview(self.cursor_model, &self.doc);
+eprintln!(
+    "[診断] ツール={} 点待ち={} カーソル={} プレビュー={}件 選択={}件",
+    self.session.has_active_tool(), self.session.wants_point(),
+    self.cursor_model.is_some(), preview.len(), self.session.selection.len()
+);
+```
+
+読み方:
+
+| 出力 | 原因の場所 |
+|---|---|
+| `プレビュー=1件` なのに画面に出ない | **描画層**（クリップ・色・座標変換） |
+| `プレビュー=0件` | Session 層。ただし回帰テストは通るので、実機だけの状態差 |
+| `カーソル=false` | `response.hover_pos()` が取れていない（egui / ウィンドウ側） |
+| `ツール=false` | コマンドが途中で終わっている |
 
 **`develop` へのマージと PR はこの修正が済むまで進めない**
 （`CLAUDE.md`「ユーザーの不具合報告があれば修正してから PR 等を進める」）。
