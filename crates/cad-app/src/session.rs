@@ -1088,4 +1088,162 @@ mod flow_tests {
             );
         }
     }
+
+    /// 図形を 1 つ作って選択した状態を用意する。
+    fn setup_with_selected_line() -> (Session, Document, cad_core::EntityId) {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "10,0");
+        feed(&mut s, &mut doc, "20,0");
+        enter(&mut s, &mut doc);
+        let id = doc.entities().ids().next().unwrap();
+        s.selection.insert(id);
+        (s, doc, id)
+    }
+
+    fn line_of(doc: &Document, id: cad_core::EntityId) -> cad_core::geom::Line {
+        match &doc.entities().get(id).unwrap().geom {
+            cad_core::Geometry::Line(l) => *l,
+            other => panic!("線分のはず: {other:?}"),
+        }
+    }
+
+    /// ROTATE が原点まわりに 90 度回すこと。
+    #[test]
+    fn rotate_turns_the_selection_by_the_given_angle() {
+        let (mut s, mut doc, id) = setup_with_selected_line();
+        feed(&mut s, &mut doc, "RO");
+        feed(&mut s, &mut doc, "0,0"); // 基点
+        feed(&mut s, &mut doc, "90"); // 度で指定
+
+        let l = line_of(&doc, id);
+        // (10,0) -> (0,10) / (20,0) -> (0,20)
+        assert!(eq_len(l.a.x, 0.0) && eq_len(l.a.y, 10.0), "始点: {:?}", l.a);
+        assert!(eq_len(l.b.x, 0.0) && eq_len(l.b.y, 20.0), "終点: {:?}", l.b);
+
+        feed(&mut s, &mut doc, "U");
+        let l = line_of(&doc, id);
+        assert!(eq_len(l.a.x, 10.0) && eq_len(l.a.y, 0.0), "Undo で戻る");
+    }
+
+    /// ROTATE の C オプションで元図形が残ること。
+    #[test]
+    fn rotate_copy_option_keeps_the_original() {
+        let (mut s, mut doc, id) = setup_with_selected_line();
+        feed(&mut s, &mut doc, "RO");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "C");
+        feed(&mut s, &mut doc, "90");
+
+        assert_eq!(doc.entities().len(), 2, "複製されて 2 つになるはず");
+        let l = line_of(&doc, id);
+        assert!(
+            eq_len(l.a.x, 10.0) && eq_len(l.a.y, 0.0),
+            "元は動かない: {:?}",
+            l.a
+        );
+    }
+
+    /// SCALE が基点を中心に倍率をかけること。
+    #[test]
+    fn scale_resizes_about_the_base_point() {
+        let (mut s, mut doc, id) = setup_with_selected_line();
+        feed(&mut s, &mut doc, "SC");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "2");
+
+        let l = line_of(&doc, id);
+        assert!(eq_len(l.a.x, 20.0), "始点 x: {}", l.a.x);
+        assert!(eq_len(l.b.x, 40.0), "終点 x: {}", l.b.x);
+    }
+
+    /// 0 と負の尺度は拒否され、コマンドは続くこと。
+    #[test]
+    fn scale_rejects_zero_and_negative_factors() {
+        for bad in ["0", "-2"] {
+            let (mut s, mut doc, id) = setup_with_selected_line();
+            feed(&mut s, &mut doc, "SC");
+            feed(&mut s, &mut doc, "0,0");
+            feed(&mut s, &mut doc, bad);
+
+            assert!(s.has_active_tool(), "{bad}: エラーでもコマンドは続く");
+            assert!(
+                s.cmdline.history().any(|l| l.kind == LineKind::Error),
+                "{bad}: エラーが出るはず"
+            );
+            let l = line_of(&doc, id);
+            assert!(eq_len(l.a.x, 10.0), "{bad}: 図形は変わらない");
+
+            // 続けて正しい値を入れれば通る。
+            feed(&mut s, &mut doc, "2");
+            assert!(eq_len(line_of(&doc, id).a.x, 20.0));
+        }
+    }
+
+    /// MIRROR の既定は「元を残す」こと（AutoCAD と同じ）。
+    #[test]
+    fn mirror_keeps_the_original_by_default() {
+        let (mut s, mut doc, id) = setup_with_selected_line();
+        feed(&mut s, &mut doc, "MI");
+        feed(&mut s, &mut doc, "0,0"); // 軸 1 点目
+        feed(&mut s, &mut doc, "0,10"); // 軸 2 点目（Y 軸）
+        enter(&mut s, &mut doc); // 既定 = 残す
+
+        assert_eq!(doc.entities().len(), 2, "鏡像が増えて 2 つになる");
+        let l = line_of(&doc, id);
+        assert!(eq_len(l.a.x, 10.0), "元は動かない: {}", l.a.x);
+
+        // 追加されたほうが反転している。
+        let mirrored = doc.entities().iter().last().unwrap().1;
+        let cad_core::Geometry::Line(m) = &mirrored.geom else {
+            panic!("線分のはず");
+        };
+        assert!(eq_len(m.a.x, -10.0), "鏡像の x が反転: {}", m.a.x);
+    }
+
+    /// MIRROR で Y を指定すると元が消えること。
+    #[test]
+    fn mirror_with_yes_erases_the_original() {
+        let (mut s, mut doc, id) = setup_with_selected_line();
+        feed(&mut s, &mut doc, "MI");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "0,10");
+        feed(&mut s, &mut doc, "Y");
+
+        assert_eq!(doc.entities().len(), 1, "増えない");
+        let l = line_of(&doc, id);
+        assert!(eq_len(l.a.x, -10.0), "元の図形が反転している: {}", l.a.x);
+    }
+
+    /// 3 コマンドともエイリアスで起動し、Undo で完全に戻ること。
+    #[test]
+    fn transform_commands_round_trip_through_undo() {
+        let cases: Vec<(&str, Vec<&str>)> = vec![
+            ("RO", vec!["0,0", "45"]),
+            ("SC", vec!["0,0", "3"]),
+            ("MI", vec!["0,0", "0,10", "Y"]),
+        ];
+
+        for (alias, inputs) in cases {
+            let (mut s, mut doc, id) = setup_with_selected_line();
+            let before = doc.entities().get(id).unwrap().geom.clone();
+
+            feed(&mut s, &mut doc, alias);
+            for i in inputs {
+                feed(&mut s, &mut doc, i);
+            }
+            assert_ne!(
+                doc.entities().get(id).unwrap().geom,
+                before,
+                "{alias}: 変換されていない"
+            );
+
+            feed(&mut s, &mut doc, "U");
+            assert_eq!(
+                doc.entities().get(id).unwrap().geom,
+                before,
+                "{alias}: Undo で戻らない"
+            );
+        }
+    }
 }
