@@ -231,9 +231,15 @@ impl FileOps {
 
     fn save_to(doc: &mut Document, path: &Path) -> FileOutcome {
         match dxf::write::write_to_file(doc, path) {
-            Ok(()) => {
+            Ok(warnings) => {
                 doc.mark_saved(Some(path.to_path_buf()));
-                FileOutcome::Ok(format!("保存しました: {}", path.display()))
+                let mut msg = format!("保存しました: {}", path.display());
+                // DXF R12 で表現できず近似したものは黙って落とさず必ず伝える (ADR-0021)。
+                for w in warnings {
+                    msg.push_str("\n  警告: ");
+                    msg.push_str(&w);
+                }
+                FileOutcome::Ok(msg)
             }
             Err(e) => FileOutcome::Failed(format!("保存に失敗しました: {e}")),
         }

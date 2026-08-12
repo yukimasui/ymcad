@@ -1246,4 +1246,89 @@ mod flow_tests {
             );
         }
     }
+
+    /// XLINE が 2 点指定で作れること。
+    #[test]
+    fn xline_from_two_points() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "XL");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "10,10");
+
+        assert_eq!(type_names(&doc), vec!["XLINE"]);
+        assert!(!s.has_active_tool());
+    }
+
+    /// 水平・垂直・角度のオプションが動くこと。
+    #[test]
+    fn xline_options_produce_the_expected_direction() {
+        use cad_core::geom::tolerance::eq_angle;
+        use std::f64::consts::{FRAC_PI_2, FRAC_PI_4};
+
+        for (inputs, expected) in [
+            (vec!["H", "0,0"], 0.0),
+            (vec!["V", "0,0"], FRAC_PI_2),
+            (vec!["A", "45", "0,0"], FRAC_PI_4),
+        ] {
+            let (mut s, mut doc) = setup();
+            feed(&mut s, &mut doc, "XL");
+            for i in &inputs {
+                feed(&mut s, &mut doc, i);
+            }
+            let cad_core::Geometry::Xline(x) = &doc.entities().iter().next().unwrap().1.geom else {
+                panic!("作図線のはず（入力: {inputs:?}）");
+            };
+            assert!(
+                eq_angle(x.angle(), expected),
+                "{inputs:?}: 角度が {} で期待は {expected}",
+                x.angle()
+            );
+        }
+    }
+
+    /// **作図線は図面範囲に影響しないこと。**
+    ///
+    /// 影響すると ZOOM EXTENTS が無限に飛んで使い物にならなくなる。
+    #[test]
+    fn xline_does_not_affect_drawing_extents() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "10,0");
+        enter(&mut s, &mut doc);
+        let before = doc.bbox();
+
+        feed(&mut s, &mut doc, "XL");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "1,1");
+
+        assert_eq!(doc.entities().len(), 2, "作図線は追加されている");
+        assert_eq!(doc.bbox(), before, "図面範囲は変わらない");
+    }
+
+    /// 作図線が Undo で消えること。
+    #[test]
+    fn xline_undo() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "XL");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "1,1");
+        assert_eq!(doc.entities().len(), 1);
+
+        feed(&mut s, &mut doc, "U");
+        assert!(doc.entities().is_empty());
+    }
+
+    /// 同じ点を 2 回指定すると拒否され、コマンドが続くこと。
+    #[test]
+    fn xline_rejects_identical_points() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "XL");
+        feed(&mut s, &mut doc, "5,5");
+        feed(&mut s, &mut doc, "5,5");
+
+        assert!(doc.entities().is_empty());
+        assert!(s.has_active_tool(), "やり直せるはず");
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+    }
 }

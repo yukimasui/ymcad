@@ -186,6 +186,7 @@ fn intersections(edge: &Line, geom: &Geometry) -> Vec<Point2> {
         Geometry::Line(l) => intersect::line_line(edge, l),
         Geometry::Circle(c) => intersect::line_circle(edge, c),
         Geometry::Arc(a) => intersect::line_arc(edge, a),
+        Geometry::Xline(x) => intersect::xline_line(x, edge),
         Geometry::Polyline(p) => p
             .segments()
             .flat_map(|seg| intersect::line_line(edge, &seg))

@@ -189,6 +189,12 @@ pub static COMMANDS: &[CommandSpec] = &[
         kind: CommandKind::Tool(|| Box::new(draw::PolylineTool::default())),
     },
     CommandSpec {
+        name: "XLINE",
+        aliases: &["XL"],
+        summary: "無限長の作図線",
+        kind: CommandKind::Tool(|| Box::new(draw::XlineTool::default())),
+    },
+    CommandSpec {
         name: "ERASE",
         aliases: &["E", "DEL"],
         summary: "選択オブジェクトの削除",
