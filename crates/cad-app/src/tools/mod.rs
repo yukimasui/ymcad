@@ -365,6 +365,12 @@ pub static COMMANDS: &[CommandSpec] = &[
         kind: CommandKind::Tool(|| Box::new(component::RedefineTool::default())),
     },
     CommandSpec {
+        name: "COMPONENTS",
+        aliases: &["CS"],
+        summary: "コンポーネントのパネルを開閉（配置・パラメータ）",
+        kind: CommandKind::Immediate(Immediate::ComponentPanel),
+    },
+    CommandSpec {
         name: "PARAM",
         aliases: &["PA"],
         summary: "コンポーネントにパラメータを宣言する",
@@ -510,6 +516,8 @@ pub enum Immediate {
     Redo,
     /// レイヤパネルの開閉。
     LayerPanel,
+    /// コンポーネントパネルの開閉。
+    ComponentPanel,
     /// ファイル操作。
     File(FileAction),
 }
@@ -522,6 +530,7 @@ impl Immediate {
             Self::Undo => "UNDO",
             Self::Redo => "REDO",
             Self::LayerPanel => "LAYER",
+            Self::ComponentPanel => "COMPONENTS",
             Self::File(a) => a.command_name(),
         }
     }

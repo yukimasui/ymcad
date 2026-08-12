@@ -17,6 +17,8 @@ use crate::tools::{self, Immediate, StepInput, StepOutcome, Tool, ToolCtx, ToolS
 pub enum UiAction {
     /// レイヤパネルの開閉。
     ToggleLayerPanel,
+    /// コンポーネントパネルの開閉。
+    ToggleComponentPanel,
     /// ファイル操作。
     File(crate::file_ops::FileAction),
 }
@@ -254,6 +256,15 @@ impl Session {
         ))
     }
 
+    /// できあがったツールをそのまま起動する。
+    ///
+    /// パネルのボタンから、名前を打たせずにコマンドを始めるために使う。
+    /// コマンドラインから起動したときと同じ経路（`start_tool`）を通す。
+    pub fn start_tool_directly(&mut self, tool: Box<dyn Tool>, doc: &mut Document) {
+        self.cancel();
+        self.begin_tool(tool, doc);
+    }
+
     /// コマンド名からツールを起動する。
     fn start(&mut self, name: &str, doc: &mut Document) {
         if let Some(cmd) = tools::immediate(name) {
@@ -267,6 +278,11 @@ impl Session {
             return;
         };
 
+        self.begin_tool(tool, doc);
+    }
+
+    /// ツールを実際に走らせる。`start` とパネルからの起動が共有する。
+    fn begin_tool(&mut self, tool: Box<dyn Tool>, doc: &mut Document) {
         self.cmdline.remember_command(tool.name());
         let wants_selection = tool.wants_selection();
         self.tool = Some(tool);
@@ -286,6 +302,10 @@ impl Session {
         match cmd {
             Immediate::LayerPanel => {
                 self.ui_actions.push(UiAction::ToggleLayerPanel);
+                return;
+            }
+            Immediate::ComponentPanel => {
+                self.ui_actions.push(UiAction::ToggleComponentPanel);
                 return;
             }
             Immediate::File(action) => {
