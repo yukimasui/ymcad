@@ -349,6 +349,50 @@
 
 ---
 
+## Issue #7 の結果（追加コマンド 11 種・完了）
+
+3 段階に分け、段階ごとに `develop` へマージして動作確認してもらった。
+
+| 段階 | ブランチ | コマンド | 確認 |
+|---|---|---|---|
+| 1 | `feature/issue-7-transform-commands` | ROTATE / SCALE / MIRROR | ✅ |
+| 2 | `feature/issue-7-xline-group` | XLINE / GROUP / UNGROUP / EXPLODE | ✅ |
+| 3 | `feature/issue-7-trim-extend-fillet` | TRIM / EXTEND / FILLET / CHAMFER | 未 |
+
+### 段階 3 で足した土台
+
+計画の段階で「ツールを書く前に埋める必要がある穴」を 5 つ洗い出していた。結果は以下。
+
+| 穴 | 埋め方 |
+|---|---|
+| コマンド実行中の図形ピック | `StepInput::Entity { id, at }` と `Tool::wants_entity()`。拾うのは `Session`（ADR-0024） |
+| 交点が「点」しか返らない | `intersect::line_params_against` を追加。線分上のパラメータ `t ∈ [0,1]` を返す |
+| 無限直線の交点が無い | `intersect::line_params_extended`。`t > 1` が終点の先、`t < 0` が始点の手前 |
+| 接円弧の構成が無い | `geom/corner.rs` を新設。`fillet` / `chamfer` |
+| 値の記憶場所が無い | `ToolSettings` を `Session` が持ち、`StepOutcome::Setting` で書き戻す（ADR-0025） |
+
+段階 2 の XLINE オフセットで暫定に使っていた `nearest_line_at` は、
+1 番目の穴が埋まったので削除し、`StepInput::Entity` に置き換えた。
+
+### 踏んだ落とし穴
+
+- **角の「残す側」の判定で頂点を選んでしまう。** 交点そのものが線分の端点でもある場合
+  （`0,0`-`10,0` と `0,0`-`0,10` のような普通の角）、
+  「クリック位置に近いほうの端点」を選ぶと交点自身が選ばれ、方向ベクトルが零になる。
+  `away = (pick - apex).normalized()` を先に決め、**その向きで遠いほうの端点**を採る形に直した
+- **`EXPLODE` のロールバック漏れ。** `?` による早期リターンだと、
+  途中で失敗したとき既に分解済みの要素が図面に残る。`let ... else` で明示的に巻き戻す形に直した
+- **`CreateGroup` の Redo で `GroupId` が変わる。** ADR-0004 と同じ問題。
+  確保した ID を Undo でも捨てず `restore_group` で戻す（ADR-0022）
+- いずれも**自分で書いたテストが先に見つけた**。UI からは再現しにくい経路だった
+
+### 積み残し
+- `ROTATE` / `SCALE` の `R`（参照）オプション。対話が 2 段増えるので基本形の確認を優先した
+- ポリラインの部分トリム。`EXPLODE` で分解すれば代替できる
+- 円・円弧を含む角の `FILLET` / `CHAMFER`
+
+---
+
 ## 死守する設計原則（Phase 1 で組み込み、以降変更しない）
 
 1. **座標は f64。** `f32` は描画直前の画面座標変換のみ。

@@ -81,6 +81,9 @@ impl Tool for LineTool {
                 StepOutcome::Reject("座標を指定してください (例: 100,50 / @100<45)".to_owned())
             }
             StepInput::Enter | StepInput::SelectionReady => StepOutcome::Finish,
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
         }
     }
 
@@ -195,6 +198,9 @@ impl Tool for CircleTool {
             (_, StepInput::Enter | StepInput::SelectionReady) => StepOutcome::Finish,
             (_, StepInput::Word(w)) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             (_, StepInput::Number(_)) => StepOutcome::Reject("点を指定してください".to_owned()),
+            (_, StepInput::Entity { .. }) => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
         }
     }
 
@@ -275,6 +281,9 @@ impl Tool for ArcTool {
             }
             StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             StepInput::Number(_) => StepOutcome::Reject("点を指定してください".to_owned()),
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
             StepInput::Enter | StepInput::SelectionReady => StepOutcome::Finish,
         }
     }
@@ -333,6 +342,9 @@ impl Tool for RectangleTool {
             }
             StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             StepInput::Number(_) => StepOutcome::Reject("点を指定してください".to_owned()),
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
             StepInput::Enter | StepInput::SelectionReady => StepOutcome::Finish,
         }
     }
@@ -382,6 +394,9 @@ impl Tool for PolylineTool {
             StepInput::Word(w) if w == "C" => self.commit(true, ctx),
             StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             StepInput::Number(_) => StepOutcome::Reject("点を指定してください".to_owned()),
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
             StepInput::Enter | StepInput::SelectionReady => self.commit(false, ctx),
         }
     }
@@ -472,6 +487,11 @@ impl Tool for XlineTool {
         }
     }
 
+    /// オフセット元の線分を選ぶ段階だけ、クリックを図形の指定として受け取る。
+    fn wants_entity(&self) -> bool {
+        matches!(self.state, XlineState::OffsetBase { .. })
+    }
+
     fn step(&mut self, input: StepInput, ctx: &ToolCtx<'_>) -> StepOutcome {
         match (&self.state, input) {
             // ---- オプション ----
@@ -537,17 +557,22 @@ impl Tool for XlineTool {
                 self.state = XlineState::OffsetBase { distance: d };
                 StepOutcome::Continue
             }
-            (XlineState::OffsetBase { distance }, StepInput::Point(p)) => {
-                match nearest_line_at(ctx, p) {
-                    Some(source) => {
+            (XlineState::OffsetBase { distance }, StepInput::Entity { id, .. }) => {
+                match ctx.doc.entities().get(id).map(|e| &e.geom) {
+                    Some(Geometry::Line(source)) => {
                         self.state = XlineState::OffsetSide {
                             distance: *distance,
-                            source,
+                            source: *source,
                         };
                         StepOutcome::Continue
                     }
-                    None => StepOutcome::Reject("その位置に線分が見つかりません".to_owned()),
+                    // 線分以外（円・円弧・作図線）は等距離線を一意に決められない。
+                    _ => StepOutcome::Reject("線分をクリックしてください".to_owned()),
                 }
+            }
+            // 拾い半径の内側に何も無かったクリック。
+            (XlineState::OffsetBase { .. }, StepInput::Point(_)) => {
+                StepOutcome::Reject("線分の上をクリックしてください".to_owned())
             }
             (XlineState::OffsetSide { distance, source }, StepInput::Point(p)) => {
                 match offset_xline(source, *distance, p) {
@@ -561,6 +586,9 @@ impl Tool for XlineTool {
             // 数値を待っている状態（角度・オフセット距離）で点が来た場合。
             (_, StepInput::Point(_)) => StepOutcome::Reject("数値を指定してください".to_owned()),
             (_, StepInput::Number(_)) => StepOutcome::Reject("点を指定してください".to_owned()),
+            (_, StepInput::Entity { .. }) => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
         }
     }
 
@@ -579,27 +607,6 @@ impl Tool for XlineTool {
         let _ = ctx;
         xline.map(|x| vec![Geometry::Xline(x)]).unwrap_or_default()
     }
-}
-
-/// 点の近くにある線分を 1 つ拾う。オフセットの元図形を選ぶのに使う。
-///
-/// ツールから図形を指す仕組み（`StepInput::Entity`）がまだ無いので、
-/// 点から最も近い線分を自前で探している。段階 3 で TRIM / EXTEND を作るときに
-/// 枠組みごと入れ替える予定。
-fn nearest_line_at(ctx: &ToolCtx<'_>, p: Point2) -> Option<Line> {
-    ctx.doc
-        .entities()
-        .iter()
-        .filter(|(_, e)| ctx.doc.layers().is_entity_editable(e))
-        .filter_map(|(_, e)| match &e.geom {
-            Geometry::Line(l) => Some(*l),
-            _ => None,
-        })
-        .min_by(|a, b| {
-            a.dist_to(p)
-                .partial_cmp(&b.dist_to(p))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
 }
 
 /// 線分を `distance` だけ `side` の側へずらした作図線。
