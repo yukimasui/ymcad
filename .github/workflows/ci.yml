@@ -32,6 +32,43 @@ jobs:
       - run: cargo test --workspace
       - run: cargo build --workspace --release
 
+      # ラウンドトリップテストは「自分で書いて自分で読む」ため、書き手と読み手が
+      # 同じ誤解をしていれば往復が成立してしまい、書き出しのバグを見逃す。
+      # tools/ の検証スクリプトは Rust とは別ロジックで構造を読むことでこの盲点を埋める。
+      # **バイナリ形式では目で見て気づけないぶん、この検査がより重要になる。**
+      - name: 書き出したファイルを別ロジックで検査
+        run: |
+          set -euo pipefail
+          out=$(mktemp -d)
+
+          cargo run -q -p cad-core --example write_sample -- "$out/sample.ymc"
+          python3 tools/validate_ymc.py "$out/sample.ymc" \
+            --expect line=1,circle=1,arc=1,xline=1,polyline=1
+
+          cargo run -q -p cad-core --example write_sample -- "$out/sample.dxf"
+          python3 tools/validate_dxf_r12.py "$out/sample.dxf"
+
+      # 検証スクリプト自体が壊れていないことを確かめる。
+      #
+      # 「壊したファイルで失敗すること」を確認しないと、スクリプトが何を渡しても
+      # 合格を返す状態（fail-open）になっていても気づけない。
+      # 正常なファイルが**合格すること**も併せて見て、両方向を固定する。
+      - name: 検証スクリプトが壊れを検出できること
+        run: |
+          set -euo pipefail
+          out=$(mktemp -d)
+          cargo run -q -p cad-core --example write_sample -- "$out/sample.ymc"
+
+          # 末尾に余分なバイトを足す（書き出し漏れ・過剰と同じ壊れ方）。
+          cp "$out/sample.ymc" "$out/broken.ymc"
+          printf '\0\0\0\0' >> "$out/broken.ymc"
+
+          if python3 tools/validate_ymc.py "$out/broken.ymc" > /dev/null 2>&1; then
+            echo "::error::validate_ymc.py が壊れたファイルを合格させました（fail-open）"
+            exit 1
+          fi
+          echo "OK: 壊れたファイルを検出できます"
+
   invariants:
     name: アーキテクチャ不変条件
     runs-on: ubuntu-24.04

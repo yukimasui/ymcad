@@ -42,6 +42,18 @@ pub enum CadError {
         /// 人間向けの説明。
         message: String,
     },
+
+    /// ネイティブ形式（`.ymc`）として成立しない入力。
+    ///
+    /// バイナリなので行番号を持たず、代わりに先頭からのバイトオフセットを持つ。
+    /// テキスト形式の [`Self::Parse`] と分けているのは、
+    /// 「N 行目」という説明がバイナリでは意味を持たないため。
+    Format {
+        /// エラー箇所の先頭からのバイトオフセット（0 始まり）。
+        offset: usize,
+        /// 人間向けの説明。
+        message: String,
+    },
 }
 
 impl fmt::Display for CadError {
@@ -57,6 +69,9 @@ impl fmt::Display for CadError {
             Self::NotEditable(why) => write!(f, "編集できません: {why}"),
             Self::Io(msg) => write!(f, "入出力エラー: {msg}"),
             Self::Parse { line, message } => write!(f, "{line} 行目: {message}"),
+            Self::Format { offset, message } => {
+                write!(f, "{offset} バイト目: {message}")
+            }
         }
     }
 }

@@ -1,4 +1,7 @@
-//! ymcad のコア。ジオメトリ、エンティティ、コマンド、DXF 入出力を担う。
+//! ymcad のコア。ジオメトリ、エンティティ、コマンド、ファイル入出力を担う。
+//!
+//! ファイル形式は 2 つある。[`native`] がネイティブ（`.ymc`、無損失）で、
+//! [`dxf`] は交換専用（R12、非可逆）。
 //!
 //! # 不変条件
 //!
@@ -24,6 +27,7 @@ pub mod error;
 pub mod geom;
 pub mod group;
 pub mod layer;
+pub mod native;
 pub mod snap;
 
 pub use command::{Command, EditCtx, UndoStack};
