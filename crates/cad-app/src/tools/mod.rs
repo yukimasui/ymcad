@@ -12,6 +12,7 @@
 //!   「途中の図形をとりあえず図面に入れて後で消す」ことは絶対にしない
 //!   （Undo 履歴が汚れ、`EditCtx` を唯一の変更経路にした意味が失われる）。
 
+pub mod component;
 pub mod draw;
 pub mod edit;
 
@@ -326,8 +327,26 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "EXPLODE",
         aliases: &["X"],
-        summary: "ポリラインを線分へ分解",
+        summary: "ポリライン・コンポーネントを分解",
         kind: CommandKind::Tool(|| Box::new(edit::ExplodeTool)),
+    },
+    CommandSpec {
+        name: "COMPONENT",
+        aliases: &["B", "BLOCK"],
+        summary: "選択をコンポーネント化（その場でインスタンスに置き換わる）",
+        kind: CommandKind::Tool(|| Box::new(component::ComponentTool::default())),
+    },
+    CommandSpec {
+        name: "INSERT",
+        aliases: &["I"],
+        summary: "コンポーネントを配置",
+        kind: CommandKind::Tool(|| Box::new(component::InsertTool::default())),
+    },
+    CommandSpec {
+        name: "REDEFINE",
+        aliases: &["RD"],
+        summary: "コンポーネント定義の中身を差し替える（全インスタンスに反映）",
+        kind: CommandKind::Tool(|| Box::new(component::RedefineTool::default())),
     },
     CommandSpec {
         name: "ZOOM",
