@@ -1,6 +1,7 @@
 //! 図形要素の定義。
 
 use crate::geom::{Aabb, Arc, Circle, Line, Point2, Polyline, Vec2, Xline};
+use crate::group::GroupId;
 use crate::layer::{ColorSpec, LayerId};
 
 /// 図形の実体。
@@ -237,6 +238,11 @@ pub struct Entity {
     pub layer: LayerId,
     /// 色。既定はレイヤの色に従う。
     pub color: ColorSpec,
+    /// 所属グループ。属していなければ `None`。
+    ///
+    /// 所属は **エンティティ側だけが持つ**。グループ側にメンバー一覧を持たせると
+    /// 削除や Undo のたびに両方を更新する必要があり、片方だけ直し損ねる事故が起きる。
+    pub group: Option<GroupId>,
 }
 
 impl Entity {
@@ -247,6 +253,7 @@ impl Entity {
             geom,
             layer,
             color: ColorSpec::ByLayer,
+            group: None,
         }
     }
 
@@ -263,6 +270,7 @@ impl Entity {
             geom: self.geom.translated(v),
             layer: self.layer,
             color: self.color,
+            group: self.group,
         }
     }
 
@@ -273,6 +281,7 @@ impl Entity {
             geom: self.geom.stretched(regions, delta),
             layer: self.layer,
             color: self.color,
+            group: self.group,
         }
     }
 
@@ -283,6 +292,7 @@ impl Entity {
             geom: self.geom.rotated(center, angle),
             layer: self.layer,
             color: self.color,
+            group: self.group,
         }
     }
 
@@ -293,6 +303,7 @@ impl Entity {
             geom: self.geom.scaled(center, factor),
             layer: self.layer,
             color: self.color,
+            group: self.group,
         }
     }
 
@@ -303,6 +314,7 @@ impl Entity {
             geom: self.geom.mirrored(axis),
             layer: self.layer,
             color: self.color,
+            group: self.group,
         }
     }
 }
