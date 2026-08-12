@@ -284,6 +284,20 @@ pub fn draw_geometry(
 ) {
     match geom {
         Geometry::Line(l) => draw_clipped_segment(painter, vp, l, stroke, linetype),
+        // 作図線は無限に伸びるので、表示範囲へクリップした線分として描く。
+        // 長さは表示範囲から導かれるので、どれだけズームしても巨大座標にならない。
+        Geometry::Xline(x) => {
+            let margin = vp.px_to_model_len(stroke.width);
+            if let Some(seg) = x.clip_to(vp.visible_model_rect().expanded(margin)) {
+                draw_patterned_segment(
+                    painter,
+                    vp.model_to_screen(seg.a),
+                    vp.model_to_screen(seg.b),
+                    stroke,
+                    linetype.dash_pattern_px(),
+                );
+            }
+        }
         Geometry::Polyline(p) => {
             for seg in p.segments() {
                 draw_clipped_segment(painter, vp, &seg, stroke, linetype);

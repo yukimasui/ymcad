@@ -5,6 +5,8 @@
 
 pub mod basic;
 pub mod edit_ctx;
+pub mod edit_geometry;
+pub mod group_ops;
 pub mod layer_ops;
 pub mod stack;
 pub mod stretch;
@@ -12,12 +14,17 @@ pub mod transform;
 
 pub use basic::{AddEntities, DeleteEntities};
 pub use edit_ctx::EditCtx;
+pub use edit_geometry::{CornerEntities, CornerKind, ExtendEntity, TrimEntity};
+pub use group_ops::{CreateGroup, ExplodeEntities, Ungroup};
 pub use layer_ops::{
     AddLayer, DeleteLayer, MoveEntitiesToLayer, RenameLayer, SetCurrentLayer, SetLayerProperties,
 };
 pub use stack::UndoStack;
 pub use stretch::StretchEntities;
-pub use transform::{CopyEntities, MoveEntities};
+pub use transform::{
+    CopyEntities, MirrorCopyEntities, MirrorEntities, MoveEntities, RotateCopyEntities,
+    RotateEntities, ScaleCopyEntities, ScaleEntities,
+};
 
 use crate::error::Result;
 

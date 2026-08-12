@@ -3,10 +3,11 @@
 use crate::document::Document;
 use crate::entity::{EntityId, Geometry};
 use crate::geom::intersect::{
-    arc_arc, circle_arc, circle_circle, line_arc, line_circle, line_line,
+    arc_arc, circle_arc, circle_circle, line_arc, line_circle, line_line, xline_arc, xline_circle,
+    xline_line, xline_xline,
 };
 use crate::geom::tolerance::{gt_len, is_zero_len, lt_len};
-use crate::geom::{Aabb, Arc, Circle, Line, Point2, Polyline};
+use crate::geom::{Aabb, Arc, Circle, Line, Point2, Polyline, Xline};
 
 use super::index::SpatialIndex;
 use super::{SnapCandidate, SnapKind, SnapModes};
@@ -161,6 +162,18 @@ fn collect_point_candidates(
                 maybe_push(out, q, id, SnapKind::Nearest, nearest_on_arc(a, q.cursor));
             }
         }
+        // 作図線は無限に伸びるので端点・中点・中心を持たない。
+        // 垂線（基準点からの足）と最近点だけを候補にする。
+        Geometry::Xline(x) => {
+            if q.modes.is_enabled(SnapKind::Perpendicular) {
+                if let Some(base) = q.from {
+                    maybe_push(out, q, id, SnapKind::Perpendicular, x.closest_point(base));
+                }
+            }
+            if q.modes.is_enabled(SnapKind::Nearest) {
+                maybe_push(out, q, id, SnapKind::Nearest, x.closest_point(q.cursor));
+            }
+        }
         Geometry::Polyline(pl) => {
             if q.modes.is_enabled(SnapKind::Endpoint) {
                 for v in &pl.vertices {
@@ -277,6 +290,7 @@ enum Curve {
     Line(Line),
     Circle(Circle),
     Arc(Arc),
+    Xline(Xline),
 }
 
 /// エンティティを [`Curve`] へ平坦化して `out` に積む。
@@ -285,6 +299,7 @@ fn push_curves(id: EntityId, geom: &Geometry, out: &mut Vec<(EntityId, Curve)>) 
         Geometry::Line(l) => out.push((id, Curve::Line(*l))),
         Geometry::Circle(c) => out.push((id, Curve::Circle(*c))),
         Geometry::Arc(a) => out.push((id, Curve::Arc(*a))),
+        Geometry::Xline(x) => out.push((id, Curve::Xline(*x))),
         Geometry::Polyline(pl) => {
             for s in pl.segments() {
                 out.push((id, Curve::Line(s)));
@@ -306,6 +321,12 @@ fn curve_intersect(a: &Curve, b: &Curve) -> Vec<Point2> {
             circle_arc(c, ar)
         }
         (Curve::Arc(a1), Curve::Arc(a2)) => arc_arc(a1, a2),
+        (Curve::Xline(x), Curve::Line(l)) | (Curve::Line(l), Curve::Xline(x)) => xline_line(x, l),
+        (Curve::Xline(x), Curve::Circle(c)) | (Curve::Circle(c), Curve::Xline(x)) => {
+            xline_circle(x, c)
+        }
+        (Curve::Xline(x), Curve::Arc(ar)) | (Curve::Arc(ar), Curve::Xline(x)) => xline_arc(x, ar),
+        (Curve::Xline(x1), Curve::Xline(x2)) => xline_xline(x1, x2),
     }
 }
 

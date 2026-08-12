@@ -2,6 +2,7 @@
 
 use crate::entity::{Entity, EntityId, EntityStore};
 use crate::error::{CadError, Result};
+use crate::group::{Group, GroupId, GroupTable};
 use crate::layer::{Layer, LayerId, LayerTable};
 
 /// 構築を封じるためのゼロサイズ型。
@@ -34,15 +35,21 @@ struct Seal;
 pub struct EditCtx<'a> {
     entities: &'a mut EntityStore,
     layers: &'a mut LayerTable,
+    groups: &'a mut GroupTable,
     _seal: Seal,
 }
 
 impl<'a> EditCtx<'a> {
     /// [`Document`](crate::Document) だけが呼ぶ。
-    pub(crate) fn new(entities: &'a mut EntityStore, layers: &'a mut LayerTable) -> Self {
+    pub(crate) fn new(
+        entities: &'a mut EntityStore,
+        layers: &'a mut LayerTable,
+        groups: &'a mut GroupTable,
+    ) -> Self {
         Self {
             entities,
             layers,
+            groups,
             _seal: Seal,
         }
     }
@@ -114,6 +121,48 @@ impl<'a> EditCtx<'a> {
     /// 現在レイヤを切り替える。
     pub fn set_current_layer(&mut self, id: LayerId) {
         self.layers.set_current(id);
+    }
+
+    // ---- グループの変更 ---------------------------------------------------
+
+    /// グループの読み取り。
+    #[must_use]
+    pub fn groups(&self) -> &GroupTable {
+        self.groups
+    }
+
+    /// グループを追加する（同名があればその ID を返す）。
+    pub fn add_group(&mut self, group: Group) -> GroupId {
+        self.groups.insert(group)
+    }
+
+    /// グループを取り除く。
+    ///
+    /// # Errors
+    ///
+    /// 存在しない ID の場合 [`CadError::GroupNotFound`]。
+    pub fn remove_group(&mut self, id: GroupId) -> Result<Group> {
+        self.groups.remove(id)
+    }
+
+    /// 取り除いたグループを **元の ID のまま** 戻す。Undo で使う。
+    ///
+    /// # Errors
+    ///
+    /// スロットが埋まっている場合 [`CadError::SlotOccupied`]。
+    pub fn restore_group(&mut self, id: GroupId, group: Group) -> Result<()> {
+        self.groups.restore(id, group)
+    }
+
+    /// グループ名を変更する。古い名前を返す。
+    ///
+    /// # Errors
+    ///
+    /// 存在しない ID の場合 [`CadError::GroupNotFound`]。
+    pub fn rename_group(&mut self, id: GroupId, new_name: impl Into<String>) -> Result<String> {
+        self.groups
+            .rename(id, new_name)
+            .ok_or(CadError::GroupNotFound)
     }
 
     /// レイヤを取り除き、中身を返す。Undo で戻せるよう必ず受け取ること。

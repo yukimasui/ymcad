@@ -12,6 +12,18 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+/// 書き出しの結果。
+///
+/// `warnings` には、DXF R12 で表現できずに近似したものの説明が入る。
+/// 呼び出し側はこれをユーザーへ見せること。黙って情報を落とさないための仕組み。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WriteReport {
+    /// DXF 本文。
+    pub text: String,
+    /// 近似・欠落の警告。
+    pub warnings: Vec<String>,
+}
+
 use super::{rad_to_deg, ACAD_VERSION};
 use crate::document::Document;
 use crate::entity::{Entity, EntityId, Geometry};
@@ -150,7 +162,33 @@ fn write_layer_table(w: &mut Writer, doc: &Document, names: &HashMap<LayerId, St
     w.pair(0, "ENDSEC");
 }
 
-fn write_entity(w: &mut Writer, id: EntityId, entity: &Entity, layer_name: &str) {
+/// 作図線を書き出すときの線分の長さを、図面範囲の何倍にするか。
+///
+/// 読み手が「実質的に無限の直線」と受け取れる程度に長く、かつ座標が
+/// 桁あふれしない程度に抑える。
+const XLINE_SPAN_FACTOR: f64 = 10.0;
+
+/// 図面が空のときに使う作図線の長さ。
+const XLINE_FALLBACK_SPAN: f64 = 1000.0;
+
+/// 作図線を有限の線分へ落とすときの長さ（片側）。
+///
+/// 定数ではなく図面範囲から導く。極端に大きい定数を使うと、
+/// 読み込んだ側で図面範囲が壊れてしまうため。
+fn xline_span(doc: &Document) -> f64 {
+    let b = doc.bbox();
+    if b.is_empty() {
+        return XLINE_FALLBACK_SPAN;
+    }
+    let diagonal = b.size().len();
+    if diagonal > 0.0 {
+        diagonal * XLINE_SPAN_FACTOR
+    } else {
+        XLINE_FALLBACK_SPAN
+    }
+}
+
+fn write_entity(w: &mut Writer, id: EntityId, entity: &Entity, layer_name: &str, xline_span: f64) {
     match &entity.geom {
         Geometry::Line(l) => {
             w.pair(0, "LINE");
@@ -161,6 +199,20 @@ fn write_entity(w: &mut Writer, id: EntityId, entity: &Entity, layer_name: &str)
             w.pair_f64(20, l.a.y);
             w.pair_f64(11, l.b.x);
             w.pair_f64(21, l.b.y);
+        }
+        // R12 に XLINE は存在しない（R13 以降）。十分長い LINE として書き出す。
+        // 呼び出し側が警告を出すので、ここでは黙って近似してよい。
+        Geometry::Xline(x) => {
+            let a = x.point_at(-xline_span);
+            let b = x.point_at(xline_span);
+            w.pair(0, "LINE");
+            w.pair(5, &id.to_dxf_handle());
+            w.pair(8, layer_name);
+            write_entity_color(w, entity.color);
+            w.pair_f64(10, a.x);
+            w.pair_f64(20, a.y);
+            w.pair_f64(11, b.x);
+            w.pair_f64(21, b.y);
         }
         Geometry::Circle(c) => {
             w.pair(0, "CIRCLE");
@@ -202,13 +254,31 @@ fn write_entity(w: &mut Writer, id: EntityId, entity: &Entity, layer_name: &str)
     }
 }
 
-fn write_entities(w: &mut Writer, doc: &Document, names: &HashMap<LayerId, String>) {
+fn write_entities(
+    w: &mut Writer,
+    doc: &Document,
+    names: &HashMap<LayerId, String>,
+    warnings: &mut Vec<String>,
+) {
     w.pair(0, "SECTION");
     w.pair(2, "ENTITIES");
 
+    let span = xline_span(doc);
+    let mut xline_count = 0usize;
+
     for (id, entity) in doc.entities().iter() {
+        if matches!(entity.geom, Geometry::Xline(_)) {
+            xline_count += 1;
+        }
         let layer_name = layer_name_for(names, entity.layer);
-        write_entity(w, id, entity, layer_name);
+        write_entity(w, id, entity, layer_name, span);
+    }
+
+    // 何本あっても警告は 1 行にまとめる。
+    if xline_count > 0 {
+        warnings.push(format!(
+            "作図線 {xline_count} 本は DXF R12 に無いため、十分長い線分として書き出しました（読み戻すと線分になります）"
+        ));
     }
 
     w.pair(0, "ENDSEC");
@@ -216,16 +286,20 @@ fn write_entities(w: &mut Writer, doc: &Document, names: &HashMap<LayerId, Strin
 
 /// 図面を DXF R12（AC1009）として書き出す。
 #[must_use]
-pub fn write_to_string(doc: &Document) -> String {
+pub fn write_to_string(doc: &Document) -> WriteReport {
     let names = sanitized_layer_names(doc);
 
     let mut w = Writer::new();
+    let mut warnings = Vec::new();
     write_header(&mut w, doc);
     write_layer_table(&mut w, doc, &names);
-    write_entities(&mut w, doc, &names);
+    write_entities(&mut w, doc, &names, &mut warnings);
     w.pair(0, "EOF");
 
-    w.finish()
+    WriteReport {
+        text: w.finish(),
+        warnings,
+    }
 }
 
 /// 図面を DXF R12 としてファイルへ書き出す。
@@ -233,7 +307,8 @@ pub fn write_to_string(doc: &Document) -> String {
 /// # Errors
 ///
 /// ファイルの書き込みに失敗した場合 [`CadError::Io`]。
-pub fn write_to_file(doc: &Document, path: &Path) -> Result<()> {
-    let text = write_to_string(doc);
-    std::fs::write(path, text).map_err(|e| CadError::Io(e.to_string()))
+pub fn write_to_file(doc: &Document, path: &Path) -> Result<Vec<String>> {
+    let report = write_to_string(doc);
+    std::fs::write(path, report.text).map_err(|e| CadError::Io(e.to_string()))?;
+    Ok(report.warnings)
 }

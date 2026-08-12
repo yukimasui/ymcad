@@ -30,6 +30,22 @@ impl Aabb {
         },
     };
 
+    /// 全平面を覆う範囲。
+    ///
+    /// 作図線（[`Xline`](crate::geom::Xline)）のように無限に伸びる図形の
+    /// 境界ボックスとして使う。[`Self::EMPTY`] とは逆に、
+    /// **あらゆる有限の範囲と交差し、あらゆる点を含む**。
+    pub const UNBOUNDED: Self = Self {
+        min: Point2 {
+            x: f64::NEG_INFINITY,
+            y: f64::NEG_INFINITY,
+        },
+        max: Point2 {
+            x: f64::INFINITY,
+            y: f64::INFINITY,
+        },
+    };
+
     /// 2 点からボックスを作る。コーナーの大小関係は自動的に正規化される。
     #[inline]
     #[must_use]
@@ -80,6 +96,10 @@ impl Aabb {
         if self.is_empty() {
             return false;
         }
+        // 無限の範囲はあらゆる有限の点を含む（理由は `is_unbounded` を参照）。
+        if self.is_unbounded() {
+            return p.x.is_finite() && p.y.is_finite();
+        }
         !lt_len(p.x, self.min.x)
             && !gt_len(p.x, self.max.x)
             && !lt_len(p.y, self.min.y)
@@ -90,6 +110,13 @@ impl Aabb {
     #[must_use]
     pub fn contains_aabb(&self, o: &Self) -> bool {
         if self.is_empty() || o.is_empty() {
+            return false;
+        }
+        // 無限の範囲は何でも含む。逆に、無限の相手を有限の範囲が含むことはない。
+        if self.is_unbounded() {
+            return true;
+        }
+        if o.is_unbounded() {
             return false;
         }
         !gt_len(self.min.x, o.min.x)
@@ -103,6 +130,12 @@ impl Aabb {
     pub fn intersects(&self, o: &Self) -> bool {
         if self.is_empty() || o.is_empty() {
             return false;
+        }
+        // 無限の範囲は空でない何とでも交差する。
+        // 無限値を下の比較に通すと、相対トレランスが無限大になって
+        // 結果が偶然正しくなるだけなので、先に片付ける。
+        if self.is_unbounded() || o.is_unbounded() {
+            return true;
         }
         !gt_len(self.min.x, o.max.x)
             && !gt_len(o.min.x, self.max.x)
@@ -148,6 +181,21 @@ impl Aabb {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.min.x > self.max.x || self.min.y > self.max.y
+    }
+
+    /// 無限に広がる範囲か（[`Self::UNBOUNDED`]）。
+    ///
+    /// 無限値どうしの比較は相対トレランスが無限大になり、判定が
+    /// 「たまたま正しく動く」状態になりやすい。そこに正しさを預けたくないので、
+    /// **無限は明示的に別扱いする**ための述語を用意している。
+    #[must_use]
+    pub fn is_unbounded(&self) -> bool {
+        self.min.x.is_infinite()
+            && self.min.y.is_infinite()
+            && self.max.x.is_infinite()
+            && self.max.y.is_infinite()
+            && self.min.x.is_sign_negative()
+            && self.max.x.is_sign_positive()
     }
 }
 
@@ -294,5 +342,56 @@ mod tests {
         );
         assert!(!b.is_empty());
         assert!(b.contains(Point2::new(0.0, 0.0)));
+    }
+
+    /// 無限の範囲は「空」ではないこと。
+    #[test]
+    fn unbounded_is_not_empty() {
+        assert!(!Aabb::UNBOUNDED.is_empty());
+        assert!(Aabb::UNBOUNDED.is_unbounded());
+        assert!(!Aabb::EMPTY.is_unbounded());
+        assert!(!Aabb::new(Point2::ORIGIN, Point2::new(1.0, 1.0)).is_unbounded());
+    }
+
+    /// 無限の範囲は空でない何とでも交差すること。
+    ///
+    /// 描画のカリングと選択がこの性質に依存している。
+    /// これが偽になると作図線が描かれず、選択もできなくなる。
+    #[test]
+    fn unbounded_intersects_everything_non_empty() {
+        for finite in [
+            Aabb::new(Point2::ORIGIN, Point2::new(1.0, 1.0)),
+            Aabb::new(Point2::new(-1e6, -1e6), Point2::new(-1e6, -1e6)),
+            Aabb::new(
+                Point2::new(EPS_LEN, EPS_LEN),
+                Point2::new(EPS_LEN * 2.0, EPS_LEN * 2.0),
+            ),
+        ] {
+            assert!(Aabb::UNBOUNDED.intersects(&finite), "{finite:?}");
+            assert!(finite.intersects(&Aabb::UNBOUNDED), "{finite:?} (逆向き)");
+        }
+        assert!(Aabb::UNBOUNDED.intersects(&Aabb::UNBOUNDED));
+        // 空とは交差しない。
+        assert!(!Aabb::UNBOUNDED.intersects(&Aabb::EMPTY));
+    }
+
+    /// 無限の範囲はあらゆる有限の点を含むこと。
+    #[test]
+    fn unbounded_contains_every_finite_point() {
+        for p in [
+            Point2::ORIGIN,
+            Point2::new(1e6, -1e6),
+            Point2::new(-EPS_LEN, EPS_LEN),
+        ] {
+            assert!(Aabb::UNBOUNDED.contains(p), "{p:?}");
+        }
+    }
+
+    /// 無限の範囲は何でも内包し、有限の範囲が無限を内包することはないこと。
+    #[test]
+    fn unbounded_containment_is_one_way() {
+        let finite = Aabb::new(Point2::ORIGIN, Point2::new(10.0, 10.0));
+        assert!(Aabb::UNBOUNDED.contains_aabb(&finite));
+        assert!(!finite.contains_aabb(&Aabb::UNBOUNDED));
     }
 }

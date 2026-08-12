@@ -15,6 +15,9 @@ pub enum CadError {
     /// 指定された ID のレイヤが存在しない。
     LayerNotFound,
 
+    /// 指定された ID のグループが存在しない。
+    GroupNotFound,
+
     /// 復元しようとしたスロットが既に埋まっている。
     ///
     /// Undo でエンティティを元の ID のまま戻せなかったことを意味し、
@@ -46,6 +49,7 @@ impl fmt::Display for CadError {
         match self {
             Self::EntityNotFound => write!(f, "エンティティが見つかりません"),
             Self::LayerNotFound => write!(f, "レイヤが見つかりません"),
+            Self::GroupNotFound => write!(f, "グループが見つかりません"),
             Self::SlotOccupied => write!(f, "復元先のスロットが既に使用されています"),
             Self::DegenerateGeometry(what) => {
                 write!(f, "ジオメトリとして成立しません: {what}")

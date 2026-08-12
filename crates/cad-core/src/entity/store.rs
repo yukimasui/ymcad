@@ -104,9 +104,13 @@ impl EntityStore {
     }
 
     /// 全エンティティを含む境界ボックス。空なら [`Aabb::EMPTY`]。
+    ///
+    /// **無限に伸びる図形（作図線）は含めない。** 含めると図面範囲が無限になり、
+    /// ZOOM EXTENTS が意味を失う。AutoCAD も作図線を図面範囲に含めない。
     #[must_use]
     pub fn bbox(&self) -> Aabb {
         self.iter()
+            .filter(|(_, e)| e.geom.is_bounded())
             .fold(Aabb::EMPTY, |acc, (_, e)| acc.union(e.bbox()))
     }
 
@@ -331,5 +335,39 @@ mod tests {
 
         let stale = EntityId::new(id.index(), id.generation() + 1);
         assert!(s.get_mut(stale).is_none());
+    }
+
+    /// 作図線は図面範囲に含めないこと。
+    ///
+    /// 含めると `Document::bbox()` が無限になり ZOOM EXTENTS が意味を失う。
+    #[test]
+    fn bbox_ignores_unbounded_geometry() {
+        use crate::geom::{Vec2, Xline};
+
+        let mut s = EntityStore::new();
+        s.insert(line_entity(0.0));
+        s.insert(line_entity(10.0));
+        let bounded = s.bbox();
+
+        s.insert(Entity::new(
+            Geometry::Xline(Xline::new(Point2::ORIGIN, Vec2::new(1.0, 1.0)).unwrap()),
+            LayerId::ZERO,
+        ));
+
+        assert_eq!(s.bbox(), bounded, "作図線を足しても図面範囲は変わらない");
+        assert!(!s.bbox().is_unbounded());
+    }
+
+    /// 作図線しか無い図面の範囲は空であること。
+    #[test]
+    fn bbox_of_only_unbounded_geometry_is_empty() {
+        use crate::geom::{Vec2, Xline};
+
+        let mut s = EntityStore::new();
+        s.insert(Entity::new(
+            Geometry::Xline(Xline::new(Point2::ORIGIN, Vec2::X).unwrap()),
+            LayerId::ZERO,
+        ));
+        assert!(s.bbox().is_empty(), "{:?}", s.bbox());
     }
 }

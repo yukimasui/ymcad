@@ -4,7 +4,7 @@
 //! 確定前の図形は [`Tool::preview`] が返すラバーバンドとして描くだけ。
 
 use cad_core::command::AddEntities;
-use cad_core::geom::{Arc, Circle, Line, Point2, Polyline};
+use cad_core::geom::{Arc, Circle, Line, Point2, Polyline, Vec2, Xline};
 use cad_core::{Entity, Geometry};
 
 use super::{StepInput, StepOutcome, Tool, ToolCtx};
@@ -81,6 +81,9 @@ impl Tool for LineTool {
                 StepOutcome::Reject("座標を指定してください (例: 100,50 / @100<45)".to_owned())
             }
             StepInput::Enter | StepInput::SelectionReady => StepOutcome::Finish,
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
         }
     }
 
@@ -195,6 +198,9 @@ impl Tool for CircleTool {
             (_, StepInput::Enter | StepInput::SelectionReady) => StepOutcome::Finish,
             (_, StepInput::Word(w)) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             (_, StepInput::Number(_)) => StepOutcome::Reject("点を指定してください".to_owned()),
+            (_, StepInput::Entity { .. }) => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
         }
     }
 
@@ -275,6 +281,9 @@ impl Tool for ArcTool {
             }
             StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             StepInput::Number(_) => StepOutcome::Reject("点を指定してください".to_owned()),
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
             StepInput::Enter | StepInput::SelectionReady => StepOutcome::Finish,
         }
     }
@@ -333,6 +342,9 @@ impl Tool for RectangleTool {
             }
             StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             StepInput::Number(_) => StepOutcome::Reject("点を指定してください".to_owned()),
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
             StepInput::Enter | StepInput::SelectionReady => StepOutcome::Finish,
         }
     }
@@ -382,6 +394,9 @@ impl Tool for PolylineTool {
             StepInput::Word(w) if w == "C" => self.commit(true, ctx),
             StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             StepInput::Number(_) => StepOutcome::Reject("点を指定してください".to_owned()),
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
             StepInput::Enter | StepInput::SelectionReady => self.commit(false, ctx),
         }
     }
@@ -407,4 +422,203 @@ impl PolylineTool {
         }
         add_one_and_finish("POLYLINE", Geometry::Polyline(poly), ctx)
     }
+}
+
+// ---------------------------------------------------------------------------
+// XLINE（作図線）
+// ---------------------------------------------------------------------------
+
+/// 無限に伸びる作図線。AutoCAD の XLINE。
+///
+/// 既定は 2 点指定。オプションで水平・垂直・角度・オフセットを選べる。
+///
+/// 作図線は図面範囲（ZOOM EXTENTS）に影響しない。AutoCAD と同じ扱い。
+#[derive(Debug, Default)]
+pub struct XlineTool {
+    state: XlineState,
+}
+
+#[derive(Debug, Default, PartialEq)]
+enum XlineState {
+    /// 通過点（またはオプション）待ち。
+    #[default]
+    Root,
+    /// 2 点指定の 2 点目待ち。
+    ThroughSecond { first: Point2 },
+    /// 水平線の通過点待ち。
+    Horizontal,
+    /// 垂直線の通過点待ち。
+    Vertical,
+    /// 角度の入力待ち。
+    AngleValue,
+    /// 角度が決まり、通過点待ち。
+    AnglePoint { angle: f64 },
+    /// オフセット距離の入力待ち。
+    OffsetDistance,
+    /// オフセット元の図形（線分）を指す点の待ち。
+    OffsetBase { distance: f64 },
+    /// オフセットの向きを示す点の待ち。
+    OffsetSide { distance: f64, source: Line },
+}
+
+impl Tool for XlineTool {
+    fn name(&self) -> &'static str {
+        "XLINE"
+    }
+
+    fn prompt(&self) -> String {
+        match self.state {
+            XlineState::Root => "点を指定 [水平(H)/垂直(V)/角度(A)/オフセット(O)]:".to_owned(),
+            XlineState::ThroughSecond { .. } => "通過点を指定:".to_owned(),
+            XlineState::Horizontal => "水平な作図線の通過点を指定:".to_owned(),
+            XlineState::Vertical => "垂直な作図線の通過点を指定:".to_owned(),
+            XlineState::AngleValue => "作図線の角度を指定:".to_owned(),
+            XlineState::AnglePoint { .. } => "作図線の通過点を指定:".to_owned(),
+            XlineState::OffsetDistance => "オフセット距離を指定:".to_owned(),
+            XlineState::OffsetBase { .. } => "オフセット元の線分上の点を指定:".to_owned(),
+            XlineState::OffsetSide { .. } => "オフセットする側を指定:".to_owned(),
+        }
+    }
+
+    fn last_point(&self) -> Option<Point2> {
+        match self.state {
+            XlineState::ThroughSecond { first } => Some(first),
+            _ => None,
+        }
+    }
+
+    /// オフセット元の線分を選ぶ段階だけ、クリックを図形の指定として受け取る。
+    fn wants_entity(&self) -> bool {
+        matches!(self.state, XlineState::OffsetBase { .. })
+    }
+
+    fn step(&mut self, input: StepInput, ctx: &ToolCtx<'_>) -> StepOutcome {
+        match (&self.state, input) {
+            // ---- オプション ----
+            (XlineState::Root, StepInput::Word(w)) => match w.as_str() {
+                "H" => {
+                    self.state = XlineState::Horizontal;
+                    StepOutcome::Continue
+                }
+                "V" => {
+                    self.state = XlineState::Vertical;
+                    StepOutcome::Continue
+                }
+                "A" => {
+                    self.state = XlineState::AngleValue;
+                    StepOutcome::Continue
+                }
+                "O" => {
+                    self.state = XlineState::OffsetDistance;
+                    StepOutcome::Continue
+                }
+                other => StepOutcome::Reject(format!("不明なオプションです: {other}")),
+            },
+
+            // ---- 2 点指定 ----
+            (XlineState::Root, StepInput::Point(p)) => {
+                self.state = XlineState::ThroughSecond { first: p };
+                StepOutcome::Continue
+            }
+            (XlineState::ThroughSecond { first }, StepInput::Point(p)) => {
+                match Xline::through(*first, p) {
+                    Some(x) => add_one_and_finish("XLINE", Geometry::Xline(x), ctx),
+                    None => StepOutcome::Reject("同じ点が指定されました".to_owned()),
+                }
+            }
+
+            // ---- 水平 / 垂直 ----
+            (XlineState::Horizontal, StepInput::Point(p)) => {
+                add_one_and_finish("XLINE", Geometry::Xline(Xline::horizontal(p)), ctx)
+            }
+            (XlineState::Vertical, StepInput::Point(p)) => {
+                add_one_and_finish("XLINE", Geometry::Xline(Xline::vertical(p)), ctx)
+            }
+
+            // ---- 角度 ----
+            // 角度は度で入力する（座標入力の @100<45 と同じ約束）。
+            (XlineState::AngleValue, StepInput::Number(deg)) => {
+                self.state = XlineState::AnglePoint {
+                    angle: deg.to_radians(),
+                };
+                StepOutcome::Continue
+            }
+            (XlineState::AnglePoint { angle }, StepInput::Point(p)) => {
+                add_one_and_finish("XLINE", Geometry::Xline(Xline::at_angle(p, *angle)), ctx)
+            }
+
+            // ---- オフセット ----
+            (XlineState::OffsetDistance, StepInput::Number(d)) => {
+                if !d.is_finite() || d <= 0.0 {
+                    return StepOutcome::Reject(
+                        "オフセット距離は 0 より大きい値を指定してください".to_owned(),
+                    );
+                }
+                self.state = XlineState::OffsetBase { distance: d };
+                StepOutcome::Continue
+            }
+            (XlineState::OffsetBase { distance }, StepInput::Entity { id, .. }) => {
+                match ctx.doc.entities().get(id).map(|e| &e.geom) {
+                    Some(Geometry::Line(source)) => {
+                        self.state = XlineState::OffsetSide {
+                            distance: *distance,
+                            source: *source,
+                        };
+                        StepOutcome::Continue
+                    }
+                    // 線分以外（円・円弧・作図線）は等距離線を一意に決められない。
+                    _ => StepOutcome::Reject("線分をクリックしてください".to_owned()),
+                }
+            }
+            // 拾い半径の内側に何も無かったクリック。
+            (XlineState::OffsetBase { .. }, StepInput::Point(_)) => {
+                StepOutcome::Reject("線分の上をクリックしてください".to_owned())
+            }
+            (XlineState::OffsetSide { distance, source }, StepInput::Point(p)) => {
+                match offset_xline(source, *distance, p) {
+                    Some(x) => add_one_and_finish("XLINE", Geometry::Xline(x), ctx),
+                    None => StepOutcome::Reject("オフセットできませんでした".to_owned()),
+                }
+            }
+
+            (_, StepInput::Enter | StepInput::SelectionReady) => StepOutcome::Finish,
+            (_, StepInput::Word(w)) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
+            // 数値を待っている状態（角度・オフセット距離）で点が来た場合。
+            (_, StepInput::Point(_)) => StepOutcome::Reject("数値を指定してください".to_owned()),
+            (_, StepInput::Number(_)) => StepOutcome::Reject("点を指定してください".to_owned()),
+            (_, StepInput::Entity { .. }) => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
+        }
+    }
+
+    fn preview(&self, cursor: Point2, ctx: &ToolCtx<'_>) -> Vec<Geometry> {
+        let xline = match &self.state {
+            XlineState::Root => return Vec::new(),
+            XlineState::ThroughSecond { first } => Xline::through(*first, cursor),
+            XlineState::Horizontal => Some(Xline::horizontal(cursor)),
+            XlineState::Vertical => Some(Xline::vertical(cursor)),
+            XlineState::AngleValue | XlineState::OffsetDistance | XlineState::OffsetBase { .. } => {
+                None
+            }
+            XlineState::AnglePoint { angle } => Some(Xline::at_angle(cursor, *angle)),
+            XlineState::OffsetSide { distance, source } => offset_xline(source, *distance, cursor),
+        };
+        let _ = ctx;
+        xline.map(|x| vec![Geometry::Xline(x)]).unwrap_or_default()
+    }
+}
+
+/// 線分を `distance` だけ `side` の側へずらした作図線。
+fn offset_xline(source: &Line, distance: f64, side: Point2) -> Option<Xline> {
+    let dir = source.dir()?;
+    let normal = dir.perp();
+    // side がどちら側にあるかで法線の向きを決める。
+    let sign = if (side - source.a).dot(normal) < 0.0 {
+        -1.0
+    } else {
+        1.0
+    };
+    let origin = source.a + normal * (distance * sign);
+    Xline::new(origin, Vec2::new(dir.x, dir.y))
 }

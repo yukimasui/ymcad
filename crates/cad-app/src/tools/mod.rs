@@ -16,7 +16,7 @@ pub mod draw;
 pub mod edit;
 
 use cad_core::geom::{Aabb, Point2};
-use cad_core::{Command, Document, Geometry, LayerId};
+use cad_core::{Command, Document, EntityId, Geometry, LayerId};
 
 use crate::file_ops::FileAction;
 use crate::input::ViewAction;
@@ -38,6 +38,12 @@ pub enum StepInput {
     /// [`Tool::wants_selection`] が真のツールにだけ送られる。
     /// これを受け取った時点で `ctx.selection` に対象が入っている。
     SelectionReady,
+    /// 図形が指された。
+    ///
+    /// [`Tool::wants_entity`] が真のときだけ送られる。
+    /// TRIM / EXTEND / FILLET のように「どの図形の、どのあたり」を指す必要が
+    /// あるコマンドのために、拾った図形と実際にクリックされた点の両方を渡す。
+    Entity { id: EntityId, at: Point2 },
 }
 
 /// ツールが 1 手を処理した結果。
@@ -57,6 +63,8 @@ pub enum StepOutcome {
     Finish,
     /// 入力を受け付けず、メッセージを出して同じ状態のまま待つ。
     Reject(String),
+    /// コマンド間で覚える設定を更新し、同じツールのまま入力を続ける。
+    Setting(ToolSettings),
 }
 
 /// ツールが図面を読むための文脈。
@@ -74,6 +82,37 @@ pub struct ToolCtx<'a> {
     /// AutoCAD は交差窓を複数回重ねられるので、1 つではなくスライスで持つ。
     /// クリックや窓選択だけで選ばれた場合は空になり、STRETCH は丸ごと移動になる。
     pub crossing_rects: &'a [Aabb],
+    /// コマンド間で覚えておく設定（FILLET の半径など）。
+    ///
+    /// AutoCAD はこれらをシステム変数として保持し、次回起動時の既定値にする。
+    /// `CommandKind::Tool` は引数を取らない関数ポインタなので生成時に渡せず、
+    /// ツールは `ToolCtx` 経由で読む。書き戻しは [`StepOutcome::Setting`] で行う。
+    pub settings: ToolSettings,
+}
+
+/// コマンド間で保持する設定。
+///
+/// AutoCAD の `FILLETRAD` / `CHAMFERA` / `CHAMFERB` に相当する。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ToolSettings {
+    /// FILLET の半径。
+    pub fillet_radius: f64,
+    /// CHAMFER の 1 本目の距離。
+    pub chamfer_d1: f64,
+    /// CHAMFER の 2 本目の距離。
+    pub chamfer_d2: f64,
+}
+
+impl Default for ToolSettings {
+    fn default() -> Self {
+        // AutoCAD の初期値は 0 だが、0 だと最初の実行が必ず失敗して分かりにくい。
+        // すぐ試せるよう 10 から始める。
+        Self {
+            fillet_radius: 10.0,
+            chamfer_d1: 10.0,
+            chamfer_d2: 10.0,
+        }
+    }
 }
 
 /// 対話的コマンドの状態機械。
@@ -91,6 +130,18 @@ pub trait Tool: std::fmt::Debug {
 
     /// 開始時に選択を必要とするか（ERASE / MOVE / COPY）。
     fn wants_selection(&self) -> bool {
+        false
+    }
+
+    /// クリックを「点」ではなく「図形の指定」として受け取りたいか。
+    ///
+    /// 真を返すと、キャンバスのクリックは [`StepInput::Entity`] になる。
+    /// 図形が拾えなかったクリックは [`StepInput::Point`] のまま届くので、
+    /// ツール側で「外した」ことを案内できる。
+    ///
+    /// TRIM / EXTEND / FILLET / CHAMFER のように、対象を選択フェーズではなく
+    /// コマンド実行中に指すコマンドで使う。
+    fn wants_entity(&self) -> bool {
         false
     }
 
@@ -189,6 +240,12 @@ pub static COMMANDS: &[CommandSpec] = &[
         kind: CommandKind::Tool(|| Box::new(draw::PolylineTool::default())),
     },
     CommandSpec {
+        name: "XLINE",
+        aliases: &["XL"],
+        summary: "無限長の作図線",
+        kind: CommandKind::Tool(|| Box::new(draw::XlineTool::default())),
+    },
+    CommandSpec {
         name: "ERASE",
         aliases: &["E", "DEL"],
         summary: "選択オブジェクトの削除",
@@ -211,6 +268,66 @@ pub static COMMANDS: &[CommandSpec] = &[
         aliases: &["S"],
         summary: "交差範囲内の点だけを移動",
         kind: CommandKind::Tool(|| Box::new(edit::StretchTool::default())),
+    },
+    CommandSpec {
+        name: "ROTATE",
+        aliases: &["RO"],
+        summary: "回転（基点+角度）",
+        kind: CommandKind::Tool(|| Box::new(edit::RotateTool::default())),
+    },
+    CommandSpec {
+        name: "SCALE",
+        aliases: &["SC"],
+        summary: "拡大縮小（基点+尺度）",
+        kind: CommandKind::Tool(|| Box::new(edit::ScaleTool::default())),
+    },
+    CommandSpec {
+        name: "MIRROR",
+        aliases: &["MI"],
+        summary: "鏡像（対称軸の2点）",
+        kind: CommandKind::Tool(|| Box::new(edit::MirrorTool::default())),
+    },
+    CommandSpec {
+        name: "TRIM",
+        aliases: &["TR"],
+        summary: "切り取り（他の全図形が境界）",
+        kind: CommandKind::Tool(|| Box::new(edit::TrimTool)),
+    },
+    CommandSpec {
+        name: "EXTEND",
+        aliases: &["EX"],
+        summary: "伸ばす（他の全図形が境界）",
+        kind: CommandKind::Tool(|| Box::new(edit::ExtendTool)),
+    },
+    CommandSpec {
+        name: "FILLET",
+        aliases: &["F"],
+        summary: "角丸め（線分同士）",
+        kind: CommandKind::Tool(|| Box::new(edit::CornerTool::fillet())),
+    },
+    CommandSpec {
+        name: "CHAMFER",
+        aliases: &["CHA"],
+        summary: "面取り（線分同士）",
+        kind: CommandKind::Tool(|| Box::new(edit::CornerTool::chamfer())),
+    },
+    CommandSpec {
+        name: "GROUP",
+        aliases: &["G"],
+        summary: "選択をグループ化",
+        kind: CommandKind::Tool(|| Box::new(edit::GroupTool::default())),
+    },
+    CommandSpec {
+        name: "UNGROUP",
+        aliases: &["UNG"],
+        summary: "グループを解除",
+        kind: CommandKind::Tool(|| Box::new(edit::UngroupTool)),
+    },
+    CommandSpec {
+        name: "EXPLODE",
+        aliases: &["X"],
+        summary: "ポリラインを線分へ分解",
+        kind: CommandKind::Tool(|| Box::new(edit::ExplodeTool)),
     },
     CommandSpec {
         name: "ZOOM",
