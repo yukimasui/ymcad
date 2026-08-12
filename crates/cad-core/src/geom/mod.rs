@@ -13,6 +13,7 @@ pub mod line;
 pub mod point;
 pub mod polyline;
 pub mod tolerance;
+pub mod xline;
 
 pub use aabb::Aabb;
 pub use arc::{Arc, Circle};
@@ -20,3 +21,4 @@ pub use line::Line;
 pub use point::{Point2, Vec2};
 pub use polyline::Polyline;
 pub use tolerance::{EPS_ANGLE, EPS_LEN, EPS_REL};
+pub use xline::Xline;
