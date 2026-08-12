@@ -365,13 +365,19 @@ impl Command for CornerEntities {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::DefinitionTable;
     use crate::entity::EntityStore;
     use crate::geom::tolerance::eq_len;
     use crate::group::GroupTable;
     use crate::layer::{LayerId, LayerTable};
 
-    fn new_parts() -> (EntityStore, LayerTable, GroupTable) {
-        (EntityStore::new(), LayerTable::new(), GroupTable::new())
+    fn new_parts() -> (EntityStore, LayerTable, GroupTable, DefinitionTable) {
+        (
+            EntityStore::new(),
+            LayerTable::new(),
+            GroupTable::new(),
+            DefinitionTable::new(),
+        )
     }
 
     fn line(x0: f64, y0: f64, x1: f64, y1: f64) -> Line {
@@ -489,9 +495,9 @@ mod tests {
 
     #[test]
     fn trim_execute_replaces_the_target_with_the_remaining_pieces() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let target = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             let t = ctx.add_entity(line_entity(line(0.0, 0.0, 10.0, 0.0)));
             ctx.add_entity(line_entity(line(3.0, -1.0, 3.0, 1.0)));
             ctx.add_entity(line_entity(line(7.0, -1.0, 7.0, 1.0)));
@@ -499,7 +505,7 @@ mod tests {
         };
 
         let mut cmd = TrimEntity::new("TRIM", target, Point2::new(5.0, 0.0));
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
 
         assert!(ctx.entities().get(target).is_none(), "元の線分は消える");
@@ -509,9 +515,9 @@ mod tests {
 
     #[test]
     fn trim_undo_restores_the_original_line_with_the_same_id() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let target = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             let t = ctx.add_entity(line_entity(line(0.0, 0.0, 10.0, 0.0)));
             ctx.add_entity(line_entity(line(4.0, -1.0, 4.0, 1.0)));
             t
@@ -519,7 +525,7 @@ mod tests {
         let original = e.get(target).unwrap().clone();
 
         let mut cmd = TrimEntity::new("TRIM", target, Point2::new(1.0, 0.0));
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
         cmd.undo(&mut ctx).unwrap();
 
@@ -532,15 +538,15 @@ mod tests {
 
     #[test]
     fn trim_redo_after_undo_works() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let target = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             let t = ctx.add_entity(line_entity(line(0.0, 0.0, 10.0, 0.0)));
             ctx.add_entity(line_entity(line(4.0, -1.0, 4.0, 1.0)));
             t
         };
         let mut cmd = TrimEntity::new("TRIM", target, Point2::new(1.0, 0.0));
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
 
         cmd.execute(&mut ctx).unwrap();
         cmd.undo(&mut ctx).unwrap();
@@ -550,15 +556,15 @@ mod tests {
 
     #[test]
     fn trim_missing_target_fails() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let dead = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             let d = ctx.add_entity(line_entity(line(0.0, 0.0, 1.0, 0.0)));
             ctx.remove_entity(d).unwrap();
             d
         };
         let mut cmd = TrimEntity::new("TRIM", dead, Point2::ORIGIN);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         assert_eq!(cmd.execute(&mut ctx), Err(CadError::EntityNotFound));
     }
 
@@ -566,16 +572,16 @@ mod tests {
     #[test]
     fn trim_rejects_non_line_geometry() {
         use crate::geom::Circle;
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let id = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             ctx.add_entity(Entity::new(
                 Geometry::Circle(Circle::new(Point2::ORIGIN, 5.0)),
                 LayerId::ZERO,
             ))
         };
         let mut cmd = TrimEntity::new("TRIM", id, Point2::new(5.0, 0.0));
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         assert!(matches!(
             cmd.execute(&mut ctx),
             Err(CadError::NotEditable(_))
@@ -586,16 +592,16 @@ mod tests {
 
     #[test]
     fn extend_execute_grows_the_line_and_keeps_its_id() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let target = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             let t = ctx.add_entity(line_entity(line(0.0, 0.0, 5.0, 0.0)));
             ctx.add_entity(line_entity(line(8.0, -1.0, 8.0, 1.0)));
             t
         };
 
         let mut cmd = ExtendEntity::new("EXTEND", target, Point2::new(4.0, 0.0));
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
 
         let l = geom_line(&ctx.entities().get(target).unwrap().geom);
@@ -605,9 +611,9 @@ mod tests {
 
     #[test]
     fn extend_undo_restores_the_original_geometry() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let target = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             let t = ctx.add_entity(line_entity(line(0.0, 0.0, 5.0, 0.0)));
             ctx.add_entity(line_entity(line(8.0, -1.0, 8.0, 1.0)));
             t
@@ -615,7 +621,7 @@ mod tests {
         let original = e.get(target).unwrap().geom.clone();
 
         let mut cmd = ExtendEntity::new("EXTEND", target, Point2::new(4.0, 0.0));
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
         cmd.undo(&mut ctx).unwrap();
 
@@ -624,13 +630,13 @@ mod tests {
 
     #[test]
     fn extend_without_a_reachable_edge_fails() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let target = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             ctx.add_entity(line_entity(line(0.0, 0.0, 5.0, 0.0)))
         };
         let mut cmd = ExtendEntity::new("EXTEND", target, Point2::new(4.0, 0.0));
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         assert!(matches!(
             cmd.execute(&mut ctx),
             Err(CadError::NotEditable(_))
@@ -642,9 +648,9 @@ mod tests {
     /// 直角の角丸めで、2 線分が切り詰められ円弧が 1 本入ること。
     #[test]
     fn fillet_execute_trims_both_lines_and_inserts_an_arc() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let (a, b) = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             (
                 ctx.add_entity(line_entity(line(10.0, 0.0, 0.0, 0.0))),
                 ctx.add_entity(line_entity(line(0.0, 0.0, 0.0, 10.0))),
@@ -659,7 +665,7 @@ mod tests {
             Point2::new(0.0, 9.0),
             CornerKind::Fillet { radius: 3.0 },
         );
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
 
         assert_eq!(ctx.entities().len(), 3, "2 線分 + 円弧");
@@ -675,9 +681,9 @@ mod tests {
 
     #[test]
     fn chamfer_execute_inserts_a_line() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let (a, b) = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             (
                 ctx.add_entity(line_entity(line(10.0, 0.0, 0.0, 0.0))),
                 ctx.add_entity(line_entity(line(0.0, 0.0, 0.0, 10.0))),
@@ -692,7 +698,7 @@ mod tests {
             Point2::new(0.0, 9.0),
             CornerKind::Chamfer { d1: 3.0, d2: 4.0 },
         );
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
 
         let bridge = geom_line(&ctx.entities().get(cmd.created().unwrap()).unwrap().geom);
@@ -702,9 +708,9 @@ mod tests {
 
     #[test]
     fn corner_undo_restores_both_lines_and_removes_the_bridge() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let (a, b) = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             (
                 ctx.add_entity(line_entity(line(10.0, 0.0, 0.0, 0.0))),
                 ctx.add_entity(line_entity(line(0.0, 0.0, 0.0, 10.0))),
@@ -723,7 +729,7 @@ mod tests {
             Point2::new(0.0, 9.0),
             CornerKind::Fillet { radius: 3.0 },
         );
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
         cmd.undo(&mut ctx).unwrap();
 
@@ -734,9 +740,9 @@ mod tests {
 
     #[test]
     fn corner_redo_after_undo_works() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let (a, b) = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             (
                 ctx.add_entity(line_entity(line(10.0, 0.0, 0.0, 0.0))),
                 ctx.add_entity(line_entity(line(0.0, 0.0, 0.0, 10.0))),
@@ -750,7 +756,7 @@ mod tests {
             Point2::new(0.0, 9.0),
             CornerKind::Fillet { radius: 3.0 },
         );
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
 
         cmd.execute(&mut ctx).unwrap();
         cmd.undo(&mut ctx).unwrap();
@@ -760,9 +766,9 @@ mod tests {
 
     #[test]
     fn corner_with_the_same_line_twice_is_rejected() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let a = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             ctx.add_entity(line_entity(line(10.0, 0.0, 0.0, 0.0)))
         };
         let mut cmd = CornerEntities::new(
@@ -773,7 +779,7 @@ mod tests {
             Point2::new(1.0, 0.0),
             CornerKind::Fillet { radius: 1.0 },
         );
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         assert!(matches!(
             cmd.execute(&mut ctx),
             Err(CadError::NotEditable(_))
@@ -783,9 +789,9 @@ mod tests {
     /// 半径が大きすぎて成立しない場合、図面が変わらないこと。
     #[test]
     fn corner_that_does_not_fit_leaves_document_unchanged() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let (a, b) = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             (
                 ctx.add_entity(line_entity(line(10.0, 0.0, 0.0, 0.0))),
                 ctx.add_entity(line_entity(line(0.0, 0.0, 0.0, 10.0))),
@@ -801,7 +807,7 @@ mod tests {
             Point2::new(0.0, 9.0),
             CornerKind::Fillet { radius: 1000.0 },
         );
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         assert!(cmd.execute(&mut ctx).is_err());
         assert_eq!(ctx.entities().len(), 2, "何も増えていない");
         assert_eq!(ctx.entities().get(a).unwrap().geom, ga, "線分も変わらない");
@@ -809,10 +815,10 @@ mod tests {
 
     #[test]
     fn corner_at_large_coordinates() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let o = Point2::new(1_000_000.0, 1_000_000.0);
         let (a, b) = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             (
                 ctx.add_entity(line_entity(Line::new(Point2::new(o.x + 100.0, o.y), o))),
                 ctx.add_entity(line_entity(Line::new(o, Point2::new(o.x, o.y + 100.0)))),
@@ -826,7 +832,7 @@ mod tests {
             Point2::new(o.x, o.y + 90.0),
             CornerKind::Fillet { radius: 10.0 },
         );
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
         assert_eq!(ctx.entities().len(), 3);
     }

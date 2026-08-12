@@ -20,6 +20,7 @@
 mod atomic_write;
 
 pub mod command;
+pub mod component;
 pub mod document;
 pub mod dxf;
 pub mod entity;
@@ -31,6 +32,7 @@ pub mod native;
 pub mod snap;
 
 pub use command::{Command, EditCtx, UndoStack};
+pub use component::{Definition, DefinitionId, DefinitionTable, Instance, Placement};
 pub use document::Document;
 pub use entity::{Entity, EntityId, EntityStore, Geometry};
 pub use error::{CadError, Result};

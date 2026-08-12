@@ -535,3 +535,242 @@ fn find_first_entity_tag_offset(doc: &Document) -> usize {
     at += 4; // entity_count
     at
 }
+
+// ---- コンポーネント（形式 v2） ---------------------------------------------
+
+/// 定義とインスタンスを含む図面。
+fn build_component_doc() -> Document {
+    use cad_core::command::{DefineComponent, InsertInstance};
+    use cad_core::component::Placement;
+
+    let mut doc = Document::new();
+    let walls = add_layer(&mut doc, "壁 outer", AciColor(1));
+
+    // 内側の定義（線分 + 円）。中身はレイヤを混ぜる。
+    let inner_contents = vec![
+        Entity::new(Geometry::Line(Line::new(p(0.0, 0.0), p(10.0, 0.0))), walls),
+        Entity::new(
+            Geometry::Circle(Circle::new(p(5.0, 0.0), 2.0)),
+            LayerId::ZERO,
+        ),
+    ];
+    doc.apply(Box::new(DefineComponent::new(
+        "COMPONENT",
+        "内部品",
+        p(1.0, 1.0),
+        inner_contents,
+    )))
+    .expect("内側の定義");
+    let inner = doc.definitions().by_name("内部品").expect("あるはず");
+
+    // 外側の定義は内側のインスタンスを含む（入れ子）。
+    let nested = Entity::new(
+        Geometry::Instance(cad_core::Instance::new(
+            inner,
+            Placement::new(p(20.0, 0.0), 0.5, 2.0, true).expect("妥当な配置"),
+        )),
+        LayerId::ZERO,
+    );
+    doc.apply(Box::new(DefineComponent::new(
+        "COMPONENT",
+        "外 assembly",
+        Point2::ORIGIN,
+        vec![nested],
+    )))
+    .expect("外側の定義");
+    let outer = doc.definitions().by_name("外 assembly").expect("あるはず");
+
+    // 図面には両方を配置する。反転・回転・倍率を混ぜる。
+    for (def, pl) in [
+        (inner, Placement::at(p(100.0, 0.0))),
+        (
+            outer,
+            Placement::new(p(200.0, 50.0), 1.25, 0.5, true).expect("妥当な配置"),
+        ),
+    ] {
+        doc.apply(Box::new(InsertInstance::new("INSERT", def, pl, walls)))
+            .expect("配置できるはず");
+    }
+
+    doc
+}
+
+/// 定義・入れ子・配置（反転含む）が完全に往復すること。
+#[test]
+fn components_survive_a_round_trip() {
+    let doc = build_component_doc();
+    let loaded = roundtrip(&doc);
+    assert_same_drawing(&doc, &loaded);
+
+    assert_eq!(loaded.definitions().len(), 2, "定義が 2 件戻る");
+    assert!(
+        loaded.definitions().by_name("外 assembly").is_some(),
+        "**日本語 + 空白を含む定義名がサニタイズされずに戻る**"
+    );
+}
+
+/// 入れ子の解決結果が往復後も一致すること。
+///
+/// 定義の添字と ID の対応が崩れていたらここで露見する。
+#[test]
+fn nested_component_resolution_is_unchanged_by_a_round_trip() {
+    let doc = build_component_doc();
+    let loaded = roundtrip(&doc);
+
+    let resolve_all = |d: &Document| -> Vec<Point2> {
+        d.entities()
+            .iter()
+            .filter_map(|(_, e)| match &e.geom {
+                Geometry::Instance(i) => Some(cad_core::component::resolve(i, d.definitions())),
+                _ => None,
+            })
+            .flatten()
+            .flat_map(|g| match g {
+                Geometry::Line(l) => vec![l.a, l.b],
+                Geometry::Circle(c) => vec![c.center],
+                _ => Vec::new(),
+            })
+            .collect()
+    };
+
+    let before = resolve_all(&doc);
+    let after = resolve_all(&loaded);
+    assert!(!before.is_empty(), "解決結果が空でないこと");
+    assert_eq!(before.len(), after.len());
+    for (i, (a, b)) in before.iter().zip(after.iter()).enumerate() {
+        assert_eq!(a.x.to_bits(), b.x.to_bits(), "{i} 番目の x がビット一致");
+        assert_eq!(a.y.to_bits(), b.y.to_bits(), "{i} 番目の y がビット一致");
+    }
+}
+
+/// **反転フラグが往復すること。**
+///
+/// フラグを落とすと鏡像のコンポーネントが元に戻ってしまう。
+#[test]
+fn the_flipped_flag_survives() {
+    let doc = build_component_doc();
+    let loaded = roundtrip(&doc);
+
+    let flags: Vec<bool> = loaded
+        .entities()
+        .iter()
+        .filter_map(|(_, e)| match &e.geom {
+            Geometry::Instance(i) => Some(i.placement.flipped),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(flags, vec![false, true], "配置ごとの反転が保たれる");
+}
+
+/// 定義の中身のレイヤが往復すること。
+#[test]
+fn the_layers_inside_a_definition_survive() {
+    let doc = build_component_doc();
+    let loaded = roundtrip(&doc);
+
+    let walls = loaded
+        .layers()
+        .by_name("壁 outer")
+        .expect("レイヤがあるはず");
+    let inner = loaded.definitions().by_name("内部品").expect("定義");
+    let def = loaded.definitions().get(inner).expect("引ける");
+    assert_eq!(def.entities.len(), 2);
+    assert_eq!(def.entities[0].layer, walls, "中身のレイヤが保たれる");
+    assert_eq!(def.entities[1].layer, LayerId::ZERO);
+}
+
+/// **形式 v1 のファイルが引き続き読めること（後方互換）。**
+///
+/// v1 には定義セクションが無い。前半の表現は変えていないので、
+/// 「そこで終わり」として読めなければならない。
+#[test]
+fn a_version_1_file_is_still_readable() {
+    // コンポーネントを含まない図面を書き、ヘッダのバージョンを 1 に落として
+    // 定義セクション（末尾の 4 バイト = 定義数 0）を削る。
+    let doc = build_sample_doc();
+    let v2 = write::write_to_bytes(&doc);
+
+    let mut v1 = v2[..v2.len() - 4].to_vec();
+    v1[8..12].copy_from_slice(&1u32.to_le_bytes());
+    assert_eq!(
+        &v2[v2.len() - 4..],
+        &0u32.to_le_bytes(),
+        "削ったのは「定義 0 件」の 4 バイトであること"
+    );
+
+    let loaded = read::read_from_bytes(&v1).expect("v1 として読めるはず");
+    assert_same_drawing(&doc, &loaded);
+    assert_eq!(loaded.definitions().len(), 0);
+}
+
+/// v1 のファイルを読んで書き直すと v2 になること（保存で最新版に上がる）。
+#[test]
+fn reading_a_version_1_file_and_saving_writes_version_2() {
+    let doc = build_sample_doc();
+    let v2 = write::write_to_bytes(&doc);
+    let mut v1 = v2[..v2.len() - 4].to_vec();
+    v1[8..12].copy_from_slice(&1u32.to_le_bytes());
+
+    let loaded = read::read_from_bytes(&v1).expect("読めるはず");
+    let written = write::write_to_bytes(&loaded);
+    assert_eq!(&written[8..12], &2u32.to_le_bytes(), "書き出しは常に現行版");
+    // 内容は変わらない。
+    assert_same_drawing(&loaded, &read::read_from_bytes(&written).expect("読める"));
+}
+
+/// 範囲外の定義参照を拒否すること。
+#[test]
+fn an_out_of_range_definition_reference_is_rejected() {
+    let doc = build_component_doc();
+    let mut bytes = write::write_to_bytes(&doc);
+
+    // 最初のインスタンスの定義添字を、あり得ない値へ書き換える。
+    // インスタンスは種別タグ 5 なので、そのバイトを探して直後の u32 を潰す。
+    let at = bytes
+        .iter()
+        .position(|b| *b == 5)
+        .expect("インスタンスの種別タグがあるはず");
+    bytes[at + 1..at + 5].copy_from_slice(&99u32.to_le_bytes());
+
+    let err = read::read_from_bytes(&bytes).expect_err("範囲外の参照は読めない");
+    match err {
+        CadError::Format { message, .. } => {
+            assert!(
+                message.contains("コンポーネント定義の参照が範囲外"),
+                "何が悪いか分かる説明であること: {message}"
+            );
+        }
+        other => panic!("形式エラーのはず: {other:?}"),
+    }
+}
+
+/// 倍率 0 の配置を拒否すること（不変条件を外から壊せないこと）。
+#[test]
+fn a_zero_scale_placement_is_rejected() {
+    let doc = build_component_doc();
+    let mut bytes = write::write_to_bytes(&doc);
+
+    // インスタンスのペイロードは: 種別 1 + 定義添字 4 + 基点 16 + 回転 8 + 倍率 8。
+    let at = bytes
+        .iter()
+        .position(|b| *b == 5)
+        .expect("インスタンスの種別タグ");
+    let scale_at = at + 1 + 4 + 16 + 8;
+    bytes[scale_at..scale_at + 8].copy_from_slice(&0.0f64.to_le_bytes());
+
+    let err = read::read_from_bytes(&bytes).expect_err("倍率 0 は読めない");
+    assert!(matches!(err, CadError::Format { .. }), "{err:?}");
+}
+
+/// **コンポーネントを含む図面でも、どこで切られても panic しないこと。**
+#[test]
+fn every_truncation_of_a_component_file_is_an_error() {
+    let bytes = write::write_to_bytes(&build_component_doc());
+    for n in 0..bytes.len() {
+        assert!(
+            read::read_from_bytes(&bytes[..n]).is_err(),
+            "{n} バイトに切り詰めたものが読めてしまった（完全な長さは {}）",
+            bytes.len()
+        );
+    }
+}

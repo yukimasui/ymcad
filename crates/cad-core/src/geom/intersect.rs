@@ -269,6 +269,10 @@ pub fn line_params_extended(target: &Line, cutter: &Geometry) -> Vec<f64> {
             .segments()
             .flat_map(|seg| xline_line(&infinite, &seg))
             .collect(),
+        // インスタンスは**呼び出し側が事前に展開する**約束
+        // （`command::edit_geometry::cutters_except` を参照）。
+        // ここで定義を引けるようにすると、交点計算が図面の状態に依存してしまう。
+        Geometry::Instance(_) => Vec::new(),
     };
 
     // 無限直線のパラメータ（距離）を、線分のパラメータ（0..1）へ直す。
@@ -292,6 +296,8 @@ fn intersections_with(target: &Line, cutter: &Geometry) -> Vec<Point2> {
             .segments()
             .flat_map(|seg| line_line(target, &seg))
             .collect(),
+        // 上と同じ。インスタンスは呼び出し側が展開してから渡す。
+        Geometry::Instance(_) => Vec::new(),
     }
 }
 

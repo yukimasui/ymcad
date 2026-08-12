@@ -20,6 +20,7 @@
 //! 2D 作図のセッションで消費するメモリは無視できるため、単調増加で問題ない。
 //! スロットの回収は Undo 履歴を捨てるとき（新規作成・ファイル読み込み）にのみ行う。
 
+use crate::component::DefinitionTable;
 use crate::entity::{Entity, EntityId};
 use crate::error::{CadError, Result};
 use crate::geom::Aabb;
@@ -107,11 +108,14 @@ impl EntityStore {
     ///
     /// **無限に伸びる図形（作図線）は含めない。** 含めると図面範囲が無限になり、
     /// ZOOM EXTENTS が意味を失う。AutoCAD も作図線を図面範囲に含めない。
+    /// 作図線を含むコンポーネントのインスタンスも同様に外れる。
+    ///
+    /// `defs` が必要な理由は [`Geometry::bbox`](crate::Geometry::bbox) を参照。
     #[must_use]
-    pub fn bbox(&self) -> Aabb {
+    pub fn bbox(&self, defs: &DefinitionTable) -> Aabb {
         self.iter()
-            .filter(|(_, e)| e.geom.is_bounded())
-            .fold(Aabb::EMPTY, |acc, (_, e)| acc.union(e.bbox()))
+            .filter(|(_, e)| e.geom.is_bounded(defs))
+            .fold(Aabb::EMPTY, |acc, (_, e)| acc.union(e.bbox(defs)))
     }
 
     // ---- 変更系（`pub(crate)` — EditCtx からのみ到達可能） ----------------
@@ -202,6 +206,15 @@ impl EntityStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::DefinitionTable;
+
+    /// テスト用の空の定義テーブル。
+    ///
+    /// インスタンスを含まない図形の `bbox` / `dist_to` は定義を引かないので、
+    /// 空でよい。インスタンスを扱うテストは `component` 側にある。
+    fn defs() -> DefinitionTable {
+        DefinitionTable::new()
+    }
     use crate::entity::Geometry;
     use crate::geom::{Line, Point2};
     use crate::layer::LayerId;
@@ -314,7 +327,7 @@ mod tests {
 
     #[test]
     fn bbox_of_empty_store_is_empty() {
-        assert!(EntityStore::new().bbox().is_empty());
+        assert!(EntityStore::new().bbox(&defs()).is_empty());
     }
 
     #[test]
@@ -322,7 +335,7 @@ mod tests {
         let mut s = EntityStore::new();
         s.insert(line_entity(0.0));
         s.insert(line_entity(10.0));
-        let b = s.bbox();
+        let b = s.bbox(&defs());
         assert!(b.contains(Point2::new(0.0, 0.0)));
         assert!(b.contains(Point2::new(10.0, 1.0)));
     }
@@ -347,15 +360,19 @@ mod tests {
         let mut s = EntityStore::new();
         s.insert(line_entity(0.0));
         s.insert(line_entity(10.0));
-        let bounded = s.bbox();
+        let bounded = s.bbox(&defs());
 
         s.insert(Entity::new(
             Geometry::Xline(Xline::new(Point2::ORIGIN, Vec2::new(1.0, 1.0)).unwrap()),
             LayerId::ZERO,
         ));
 
-        assert_eq!(s.bbox(), bounded, "作図線を足しても図面範囲は変わらない");
-        assert!(!s.bbox().is_unbounded());
+        assert_eq!(
+            s.bbox(&defs()),
+            bounded,
+            "作図線を足しても図面範囲は変わらない"
+        );
+        assert!(!s.bbox(&defs()).is_unbounded());
     }
 
     /// 作図線しか無い図面の範囲は空であること。
@@ -368,6 +385,6 @@ mod tests {
             Geometry::Xline(Xline::new(Point2::ORIGIN, Vec2::X).unwrap()),
             LayerId::ZERO,
         ));
-        assert!(s.bbox().is_empty(), "{:?}", s.bbox());
+        assert!(s.bbox(&defs()).is_empty(), "{:?}", s.bbox(&defs()));
     }
 }

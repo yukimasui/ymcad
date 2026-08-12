@@ -44,7 +44,18 @@
 //!                | layer_index u32
 //!                | color_tag u8   (0=ByLayer, 1=Aci[+u8])
 //!                | group_tag u8   (0=None,    1=Some[+u32 group_index])
+//!
+//! --- 以下は形式 v2 以降 ---
+//! definition_count u32
+//!   per definition: name | origin(2×f64) | entity_count u32 → エンティティと同じ形
 //! ```
+//!
+//! **定義はエンティティより後に置く。** v1 のファイルは定義セクションが無いだけで
+//! 前半がそのまま読めるので、後方互換の分岐が「最後まで読んだら終わり」で済む。
+//!
+//! 定義の中のエンティティも入れ子のインスタンスを持てるので、
+//! **定義セクションは自分より後ろの定義を参照できる**（前方参照）。
+//! 添字で参照しているだけなので読み込み順に依存しない。
 //!
 //! **レイヤとグループは ID 値ではなくファイル内の添字で参照する。**
 //! 読み込み側が「ファイル添字 → 実際の ID」の対応表を作って解決するので、
@@ -73,7 +84,18 @@ pub(crate) const MAGIC: &[u8; 8] = b"YMCAD\x1a\0\0";
 ///
 /// これより大きいバージョンのファイルは**読まずに断る**。
 /// 中途半端に読んで壊れた図面を見せるより、開けないと言うほうがよい。
-pub(crate) const FORMAT_VERSION: u32 = 1;
+///
+/// | 版 | 追加されたもの |
+/// |---|---|
+/// | 1 | 最初の形式（レイヤ・グループ・エンティティ） |
+/// | 2 | コンポーネント定義とインスタンス |
+///
+/// **古い版は読めるまま保つ。** v1 のファイルには定義セクションが無いだけで、
+/// エンティティの表現は変わっていない。
+pub(crate) const FORMAT_VERSION: u32 = 2;
+
+/// コンポーネント定義セクションが入った最初の版。
+pub(crate) const VERSION_WITH_COMPONENTS: u32 = 2;
 
 /// 標準のファイル拡張子（ドットなし）。
 pub const EXTENSION: &str = "ymc";
@@ -93,6 +115,27 @@ pub(crate) mod kind {
     pub const XLINE: u8 = 3;
     /// [`crate::Geometry::Polyline`]。
     pub const POLYLINE: u8 = 4;
+    /// [`crate::Geometry::Instance`]（形式 v2 以降）。
+    pub const INSTANCE: u8 = 5;
+}
+
+/// インスタンスの配置に付くフラグのビット位置。
+pub(crate) mod placement_flags {
+    /// 鏡像反転しているか。
+    ///
+    /// **2 次元の相似変換では反射を (基点・回転・正の倍率) で表せない**ので、
+    /// 独立したフラグが必要（`component::Placement` のドキュメントを参照）。
+    pub const FLIPPED: u8 = 1 << 0;
+}
+
+/// パラメータ値の型を表すタグ（形式 v2 以降）。
+pub(crate) mod value_tag {
+    /// 数値。`f64` が続く。
+    pub const NUMBER: u8 = 0;
+    /// 真偽。`u8` が続く。
+    pub const BOOL: u8 = 1;
+    /// 選択肢。文字列が続く。
+    pub const CHOICE: u8 = 2;
 }
 
 /// 色の指定方法を表すタグ。

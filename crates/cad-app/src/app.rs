@@ -10,6 +10,7 @@ use crate::file_ops::{self, FileOps, FileOutcome};
 use crate::input::{self, ViewAction};
 use crate::layer_panel::LayerPanel;
 use crate::render;
+use crate::resolved::ResolvedInstances;
 use crate::selection::WindowMode;
 use crate::session::{Session, UiAction};
 use crate::snap::SnapState;
@@ -92,6 +93,11 @@ pub struct CadApp {
     session: Session,
     /// オブジェクトスナップ。
     snap: SnapState,
+    /// コンポーネントインスタンスの展開結果。
+    ///
+    /// 派生データなので `Document` ではなくここに持ち、
+    /// `Document::revision()` をキーに再構築する（ADR-0011）。
+    resolved: ResolvedInstances,
     /// レイヤパネル。
     layer_panel: LayerPanel,
     /// ファイル操作と未保存確認。
@@ -121,6 +127,7 @@ impl CadApp {
             viewport: Viewport::default(),
             session: Session::new(),
             snap: SnapState::new(),
+            resolved: ResolvedInstances::new(),
             layer_panel: LayerPanel::new(),
             files: FileOps::new(),
             quitting: false,
@@ -299,10 +306,16 @@ impl CadApp {
         painter.rect_filled(response.rect, 0.0, ui.visuals().extreme_bg_color);
         render::draw_grid(&painter, &self.viewport, ui.visuals());
         render::draw_origin_marker(&painter, &self.viewport);
-        render::draw_entities(&painter, &self.doc, &self.viewport, &self.session.selection);
+        render::draw_entities(
+            &painter,
+            &self.doc,
+            &self.viewport,
+            &self.session.selection,
+            &mut self.resolved,
+        );
 
         let preview = self.session.preview(self.cursor_model, &self.doc);
-        render::draw_preview(&painter, &self.viewport, &preview);
+        render::draw_preview(&painter, &self.viewport, self.doc.definitions(), &preview);
 
         if let Some(candidate) = &self.snapped {
             render::draw_snap_marker(&painter, &self.viewport, candidate, true);

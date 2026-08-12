@@ -14,10 +14,13 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use cad_core::command::{AddEntities, AddLayer, CreateGroup, SetLayerProperties};
+use cad_core::command::{
+    AddEntities, AddLayer, CreateGroup, DefineComponent, InsertInstance, SetLayerProperties,
+};
+use cad_core::component::Placement;
 use cad_core::geom::{Arc, Circle, Line, Point2, Polyline, Vec2, Xline};
 use cad_core::layer::LineType;
-use cad_core::{AciColor, ColorSpec, Document, Entity, EntityId, Geometry, LayerId};
+use cad_core::{AciColor, ColorSpec, Document, Entity, EntityId, Geometry, Instance, LayerId};
 
 fn main() -> ExitCode {
     let Some(arg) = std::env::args().nth(1) else {
@@ -125,6 +128,63 @@ fn build() -> cad_core::Result<Document> {
     // 先頭 2 つをグループにする。
     let ids: Vec<EntityId> = doc.entities().ids().take(2).collect();
     doc.apply(Box::new(CreateGroup::new("GROUP", "外周 ring", ids)))?;
+
+    // ---- コンポーネント（形式 v2 以降） ----
+    //
+    // 入れ子・反転・回転・倍率を混ぜて、検証スクリプトに一通り通させる。
+    let inner_contents = vec![
+        Entity::new(
+            Geometry::Line(Line::new(Point2::new(0.0, 0.0), Point2::new(4.0, 0.0))),
+            walls,
+        ),
+        Entity::new(
+            Geometry::Circle(Circle::new(Point2::new(2.0, 0.0), 1.0)),
+            LayerId::ZERO,
+        ),
+    ];
+    doc.apply(Box::new(DefineComponent::new(
+        "COMPONENT",
+        "内部品",
+        Point2::new(1.0, 0.0),
+        inner_contents,
+    )))?;
+    let inner = doc
+        .definitions()
+        .by_name("内部品")
+        .ok_or(cad_core::CadError::DefinitionNotFound)?;
+
+    let nested = Entity::new(
+        Geometry::Instance(Instance::new(
+            inner,
+            Placement::new(Point2::new(8.0, 0.0), 0.5, 2.0, true)
+                .map_err(|_| cad_core::CadError::DegenerateGeometry("配置"))?,
+        )),
+        LayerId::ZERO,
+    );
+    doc.apply(Box::new(DefineComponent::new(
+        "COMPONENT",
+        "外 assembly",
+        Point2::ORIGIN,
+        vec![nested],
+    )))?;
+    let outer = doc
+        .definitions()
+        .by_name("外 assembly")
+        .ok_or(cad_core::CadError::DefinitionNotFound)?;
+
+    doc.apply(Box::new(InsertInstance::new(
+        "INSERT",
+        inner,
+        Placement::at(Point2::new(30.0, 0.0)),
+        walls,
+    )))?;
+    doc.apply(Box::new(InsertInstance::new(
+        "INSERT",
+        outer,
+        Placement::new(Point2::new(50.0, 10.0), 1.25, 0.5, true)
+            .map_err(|_| cad_core::CadError::DegenerateGeometry("配置"))?,
+        LayerId::ZERO,
+    )))?;
 
     Ok(doc)
 }
