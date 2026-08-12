@@ -18,6 +18,14 @@ pub enum CadError {
     /// 指定された ID のグループが存在しない。
     GroupNotFound,
 
+    /// 指定された ID のコンポーネント定義が存在しない。
+    DefinitionNotFound,
+
+    /// コンポーネントの入れ子が循環する（定義が自分自身を含む）。
+    ///
+    /// 循環した定義は解決を無限再帰させるので、**挿入前にコマンドが弾く**。
+    DefinitionCycle,
+
     /// 復元しようとしたスロットが既に埋まっている。
     ///
     /// Undo でエンティティを元の ID のまま戻せなかったことを意味し、
@@ -62,6 +70,10 @@ impl fmt::Display for CadError {
             Self::EntityNotFound => write!(f, "エンティティが見つかりません"),
             Self::LayerNotFound => write!(f, "レイヤが見つかりません"),
             Self::GroupNotFound => write!(f, "グループが見つかりません"),
+            Self::DefinitionNotFound => write!(f, "コンポーネント定義が見つかりません"),
+            Self::DefinitionCycle => {
+                write!(f, "コンポーネントの入れ子が循環します")
+            }
             Self::SlotOccupied => write!(f, "復元先のスロットが既に使用されています"),
             Self::DegenerateGeometry(what) => {
                 write!(f, "ジオメトリとして成立しません: {what}")

@@ -1918,4 +1918,551 @@ mod flow_tests {
         feed(&mut s, &mut doc, "-1");
         assert!(s.has_active_tool(), "断られてもコマンドは続く");
     }
+
+    // ---- コンポーネント ---------------------------------------------------
+
+    /// 線分 2 本を引いて、両方を選択した状態を作る。
+    fn setup_two_lines_selected() -> (Session, Document) {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "10,0");
+        draw_line(&mut s, &mut doc, "0,5", "10,5");
+        for id in doc.entities().ids().collect::<Vec<_>>() {
+            s.selection.insert(id);
+        }
+        (s, doc)
+    }
+
+    /// 図面内のインスタンスの数。
+    fn instance_count(doc: &Document) -> usize {
+        doc.entities()
+            .iter()
+            .filter(|(_, e)| matches!(e.geom, cad_core::Geometry::Instance(_)))
+            .count()
+    }
+
+    /// **`COMPONENT` は選択をその場でインスタンスに置き換えること。**
+    ///
+    /// AutoCAD の `BLOCK` は選択を消すだけで画面から図形が無くなる。
+    /// Figma と同じく置き換える形にしたことの確認。
+    #[test]
+    fn component_replaces_the_selection_with_one_instance() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+
+        // 選択が既にあるので、`B` の直後に `SelectionReady` が届いて基点待ちになる
+        // （`Session::start_tool` の `wants_selection` の分岐）。
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0"); // 基点
+        feed(&mut s, &mut doc, "枠"); // 名前
+
+        assert_eq!(doc.definitions().len(), 1, "定義ができる");
+        assert!(doc.definitions().by_name("枠").is_some());
+        assert_eq!(
+            doc.entities().len(),
+            1,
+            "線分 2 本がインスタンス 1 つに置き換わる"
+        );
+        assert_eq!(instance_count(&doc), 1);
+        let def = doc.definitions().by_name("枠").expect("あるはず");
+        assert_eq!(
+            doc.definitions().get(def).expect("引ける").entities.len(),
+            2,
+            "定義の中身は線分 2 本"
+        );
+    }
+
+    /// 名前を省略すると既定名が付くこと。
+    #[test]
+    fn component_uses_a_default_name_on_enter() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        enter(&mut s, &mut doc); // 既定名
+
+        assert!(
+            doc.definitions().by_name("コンポーネント1").is_some(),
+            "既定名が付く。実際: {:?}",
+            doc.definitions()
+                .iter()
+                .map(|(_, d)| d.name.clone())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// **`COMPONENT` の Undo が 1 回で戻ること。**
+    ///
+    /// 定義作成・選択削除・配置の 3 コマンドを `MacroCommand` で 1 手にまとめている。
+    /// 別々に積むと Undo が 3 回必要になり「1 操作 = 1 Undo」が崩れる。
+    #[test]
+    fn component_undoes_in_a_single_step() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "枠");
+
+        feed(&mut s, &mut doc, "U");
+
+        assert_eq!(doc.entities().len(), 2, "線分 2 本が戻る");
+        assert_eq!(instance_count(&doc), 0);
+        assert_eq!(doc.definitions().len(), 0, "定義も消える");
+    }
+
+    /// 同名のコンポーネントを断ること。
+    #[test]
+    fn component_rejects_a_duplicate_name() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "枠");
+
+        // もう一度、線分を引いて同じ名前で作ろうとする。
+        draw_line(&mut s, &mut doc, "0,20", "10,20");
+        let id = doc.entities().ids().last().expect("あるはず");
+        s.selection.clear();
+        s.selection.insert(id);
+
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,20");
+        feed(&mut s, &mut doc, "枠");
+
+        assert_eq!(doc.definitions().len(), 1, "定義は増えない");
+        assert!(s.cmdline.history().any(|l| l.text.contains("既にあります")));
+    }
+
+    /// `INSERT` で配置でき、回転と倍率が効くこと。
+    #[test]
+    fn insert_places_a_second_instance_with_rotation_and_scale() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "枠");
+        assert_eq!(instance_count(&doc), 1);
+
+        feed(&mut s, &mut doc, "I");
+        feed(&mut s, &mut doc, "枠");
+        feed(&mut s, &mut doc, "100,0"); // 位置
+        feed(&mut s, &mut doc, "90"); // 回転（度）
+        feed(&mut s, &mut doc, "2"); // 倍率
+
+        assert_eq!(instance_count(&doc), 2, "2 つ目が置かれる");
+        let placed = doc
+            .entities()
+            .iter()
+            .filter_map(|(_, e)| match &e.geom {
+                cad_core::Geometry::Instance(i) => Some(i.placement),
+                _ => None,
+            })
+            .last()
+            .expect("あるはず");
+        assert!(eq_len(placed.origin.x, 100.0));
+        assert!(
+            eq_len(placed.rotation, std::f64::consts::FRAC_PI_2),
+            "度で入力した 90 がラジアンになる: {}",
+            placed.rotation
+        );
+        assert!(eq_len(placed.scale, 2.0));
+        assert!(!placed.flipped);
+    }
+
+    /// `INSERT` の回転と倍率は Enter で既定値になること。
+    #[test]
+    fn insert_defaults_rotation_to_zero_and_scale_to_one() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "枠");
+
+        feed(&mut s, &mut doc, "I");
+        feed(&mut s, &mut doc, "枠");
+        feed(&mut s, &mut doc, "50,50");
+        enter(&mut s, &mut doc); // 回転 0
+        enter(&mut s, &mut doc); // 倍率 1
+
+        let placed = doc
+            .entities()
+            .iter()
+            .filter_map(|(_, e)| match &e.geom {
+                cad_core::Geometry::Instance(i) => Some(i.placement),
+                _ => None,
+            })
+            .last()
+            .expect("あるはず");
+        assert!(eq_len(placed.rotation, 0.0));
+        assert!(eq_len(placed.scale, 1.0));
+    }
+
+    /// 存在しないコンポーネント名を断り、あるものを案内すること。
+    #[test]
+    fn insert_reports_the_available_component_names() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "枠");
+
+        feed(&mut s, &mut doc, "I");
+        feed(&mut s, &mut doc, "ない名前");
+
+        assert!(
+            s.cmdline.history().any(|l| l.text.contains("枠")),
+            "あるコンポーネント名を案内する"
+        );
+        assert!(s.has_active_tool(), "断られてもコマンドは続く");
+    }
+
+    /// 倍率 0 と負値を断ること（反転は MIRROR）。
+    #[test]
+    fn insert_rejects_zero_and_negative_scale() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "枠");
+        let before = instance_count(&doc);
+
+        for bad in ["0", "-2"] {
+            feed(&mut s, &mut doc, "I");
+            feed(&mut s, &mut doc, "枠");
+            feed(&mut s, &mut doc, "10,10");
+            enter(&mut s, &mut doc); // 回転は 0
+            feed(&mut s, &mut doc, bad);
+
+            assert_eq!(instance_count(&doc), before, "倍率 {bad} では置かれない");
+            assert!(s.has_active_tool(), "断られてもコマンドは続く");
+            // **Reject 後もツールは生きている。** 中断しないと次の入力が
+            // このツールに食われる。
+            s.cancel();
+        }
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+    }
+
+    /// **`REDEFINE` で定義を差し替えると全インスタンスが変わること。**
+    ///
+    /// これが「ブロックの再定義」の中核。
+    #[test]
+    fn redefine_updates_every_instance() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "枠");
+
+        // 2 つ目を配置。
+        feed(&mut s, &mut doc, "I");
+        feed(&mut s, &mut doc, "枠");
+        feed(&mut s, &mut doc, "100,0");
+        enter(&mut s, &mut doc);
+        enter(&mut s, &mut doc);
+        assert_eq!(instance_count(&doc), 2);
+
+        let def = doc.definitions().by_name("枠").expect("あるはず");
+        assert_eq!(
+            doc.definitions().get(def).expect("引ける").entities.len(),
+            2
+        );
+
+        // 新しい中身（円 1 つ）を描いて選び、定義を差し替える。
+        feed(&mut s, &mut doc, "C");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "3");
+        let circle = doc.entities().ids().last().expect("あるはず");
+        s.selection.clear();
+        s.selection.insert(circle);
+
+        feed(&mut s, &mut doc, "RD");
+        feed(&mut s, &mut doc, "0,0"); // 基点
+        feed(&mut s, &mut doc, "枠"); // 差し替え先
+
+        let def = doc.definitions().by_name("枠").expect("あるはず");
+        assert_eq!(
+            doc.definitions().get(def).expect("引ける").entities.len(),
+            1,
+            "定義の中身が円 1 つになる"
+        );
+        assert_eq!(
+            instance_count(&doc),
+            2,
+            "**インスタンスは 2 つのまま**（触っていない）"
+        );
+
+        // 解決結果が円になっていること = 両方のインスタンスに反映されている。
+        for (_, e) in doc.entities().iter() {
+            let cad_core::Geometry::Instance(i) = &e.geom else {
+                continue;
+            };
+            let parts = cad_core::component::resolve(i, doc.definitions());
+            assert_eq!(parts.len(), 1, "中身は 1 つ");
+            assert!(
+                matches!(parts[0], cad_core::Geometry::Circle(_)),
+                "円に変わっている: {:?}",
+                parts[0]
+            );
+        }
+    }
+
+    /// 差し替え先のコンポーネント自身を中身にしようとしたら断ること（循環）。
+    #[test]
+    fn redefine_rejects_a_self_reference() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "枠");
+
+        // 置き換わったインスタンス自身を選んで、同じ定義へ差し替えようとする。
+        let inst = doc.entities().ids().next().expect("あるはず");
+        s.selection.clear();
+        s.selection.insert(inst);
+
+        feed(&mut s, &mut doc, "RD");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "枠");
+
+        let def = doc.definitions().by_name("枠").expect("あるはず");
+        assert_eq!(
+            doc.definitions().get(def).expect("引ける").entities.len(),
+            2,
+            "定義は変わらない"
+        );
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+    }
+
+    /// **`EXPLODE` でインスタンスが中身へ戻ること。**
+    #[test]
+    fn explode_expands_a_component_instance() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "枠");
+        assert_eq!(doc.entities().len(), 1);
+
+        let inst = doc.entities().ids().next().expect("あるはず");
+        s.selection.clear();
+        s.selection.insert(inst);
+        feed(&mut s, &mut doc, "X");
+        enter(&mut s, &mut doc);
+
+        assert_eq!(doc.entities().len(), 2, "線分 2 本に戻る");
+        assert_eq!(instance_count(&doc), 0);
+        assert_eq!(doc.definitions().len(), 1, "定義は残る");
+    }
+
+    /// インスタンスに MOVE / ROTATE / MIRROR が効くこと。
+    #[test]
+    fn transforms_apply_to_an_instance() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "枠");
+
+        let inst = doc.entities().ids().next().expect("あるはず");
+        let placement_of = |d: &Document| {
+            d.entities()
+                .iter()
+                .filter_map(|(_, e)| match &e.geom {
+                    cad_core::Geometry::Instance(i) => Some(i.placement),
+                    _ => None,
+                })
+                .next()
+                .expect("インスタンスがあるはず")
+        };
+
+        // MOVE
+        s.selection.clear();
+        s.selection.insert(inst);
+        feed(&mut s, &mut doc, "M");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "10,20");
+        let pl = placement_of(&doc);
+        assert!(
+            eq_len(pl.origin.x, 10.0) && eq_len(pl.origin.y, 20.0),
+            "{pl:?}"
+        );
+
+        // ROTATE 90 度
+        let inst = doc.entities().ids().next().expect("あるはず");
+        s.selection.clear();
+        s.selection.insert(inst);
+        feed(&mut s, &mut doc, "RO");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "90");
+        let pl = placement_of(&doc);
+        assert!(
+            eq_len(pl.rotation, std::f64::consts::FRAC_PI_2),
+            "回転が配置へ合成される: {}",
+            pl.rotation
+        );
+
+        // MIRROR（既定で元を残すので、反転したものが 1 つ増える）
+        let inst = doc.entities().ids().next().expect("あるはず");
+        s.selection.clear();
+        s.selection.insert(inst);
+        feed(&mut s, &mut doc, "MI");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "0,1");
+        enter(&mut s, &mut doc); // 既定 = 元を残す
+        assert_eq!(instance_count(&doc), 2, "鏡像が増える");
+        assert!(
+            doc.entities().iter().any(|(_, e)| matches!(
+                &e.geom,
+                cad_core::Geometry::Instance(i) if i.placement.flipped
+            )),
+            "**反転フラグが立ったインスタンスができる**"
+        );
+    }
+
+    /// インスタンスをクリックで選択できること（`dist_to` が中身へ届いている）。
+    #[test]
+    fn an_instance_can_be_picked_by_clicking_its_contents() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "枠");
+        s.selection.clear();
+
+        // 定義の中身の線分（0,0)-(10,0) の上をクリックする。
+        click(&mut s, &mut doc, 5.0, 0.0);
+        assert_eq!(s.selection.len(), 1, "インスタンスが選ばれる");
+    }
+
+    /// ZOOM EXTENTS がインスタンスの範囲を含むこと。
+    #[test]
+    fn the_drawing_bbox_covers_instances() {
+        let (mut s, mut doc) = setup_two_lines_selected();
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "枠");
+
+        // 遠くにもう 1 つ置く。
+        feed(&mut s, &mut doc, "I");
+        feed(&mut s, &mut doc, "枠");
+        feed(&mut s, &mut doc, "1000,0");
+        enter(&mut s, &mut doc);
+        enter(&mut s, &mut doc);
+
+        let b = doc.bbox();
+        assert!(!b.is_empty(), "範囲が空でない");
+        assert!(
+            b.max.x >= 1000.0,
+            "遠くのインスタンスが含まれる: max.x = {}",
+            b.max.x
+        );
+    }
+
+    // ---- ラバーバンド（確定前のプレビュー） -------------------------------
+    //
+    // 2026-08-13 に「MOVE で確定前のプレビューが出ない」との報告を受けて追加。
+    // 描画そのものは目で見るしかないが、**`Session::preview` が図形を返すか**は
+    // ここで固定できる。返ってさえいれば、あとは描画経路の問題に絞り込める。
+
+    /// 線分 1 本を選択した状態を作る。
+    fn setup_one_line_selected() -> (Session, Document) {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "10,0");
+        let id = doc.entities().ids().next().expect("あるはず");
+        s.selection.insert(id);
+        (s, doc)
+    }
+
+    /// **MOVE の基点を指定したあと、プレビューが返ること。**
+    #[test]
+    fn move_returns_a_preview_after_the_base_point() {
+        let (mut s, mut doc) = setup_one_line_selected();
+
+        feed(&mut s, &mut doc, "M");
+        feed(&mut s, &mut doc, "0,0"); // 基点
+
+        let preview = s.preview(Some(Point2::new(5.0, 5.0)), &doc);
+        assert_eq!(preview.len(), 1, "選択 1 件ぶんのラバーバンドが返る");
+        let cad_core::Geometry::Line(l) = &preview[0] else {
+            panic!("線分のはず: {:?}", preview[0]);
+        };
+        assert!(
+            eq_len(l.a.x, 5.0) && eq_len(l.a.y, 5.0),
+            "カーソルまで動く: {:?}",
+            l.a
+        );
+    }
+
+    /// 基点を指定する前はプレビューが空であること（動かす量が決まらない）。
+    #[test]
+    fn move_has_no_preview_before_the_base_point() {
+        let (mut s, mut doc) = setup_one_line_selected();
+        feed(&mut s, &mut doc, "M");
+        assert!(s.preview(Some(Point2::new(5.0, 5.0)), &doc).is_empty());
+    }
+
+    /// カーソルが画面外なら空であること。
+    #[test]
+    fn no_preview_without_a_cursor() {
+        let (mut s, mut doc) = setup_one_line_selected();
+        feed(&mut s, &mut doc, "M");
+        feed(&mut s, &mut doc, "0,0");
+        assert!(s.preview(None, &doc).is_empty());
+    }
+
+    /// COPY / STRETCH / ROTATE / SCALE でもプレビューが返ること。
+    #[test]
+    fn transform_tools_return_a_preview() {
+        for (cmd, steps) in [
+            ("CO", vec!["0,0"]),
+            ("S", vec!["0,0"]),
+            ("RO", vec!["0,0"]),
+            ("SC", vec!["0,0"]),
+        ] {
+            let (mut s, mut doc) = setup_one_line_selected();
+            feed(&mut s, &mut doc, cmd);
+            for step in &steps {
+                feed(&mut s, &mut doc, step);
+            }
+            assert!(
+                !s.preview(Some(Point2::new(5.0, 5.0)), &doc).is_empty(),
+                "{cmd} でプレビューが返らない"
+            );
+        }
+    }
+
+    /// 作図コマンドでもプレビューが返ること。
+    #[test]
+    fn draw_tools_return_a_preview() {
+        for (cmd, steps) in [
+            ("L", vec!["0,0"]),
+            ("C", vec!["0,0"]),
+            ("REC", vec!["0,0"]),
+            ("PL", vec!["0,0"]),
+        ] {
+            let (mut s, mut doc) = setup();
+            feed(&mut s, &mut doc, cmd);
+            for step in &steps {
+                feed(&mut s, &mut doc, step);
+            }
+            assert!(
+                !s.preview(Some(Point2::new(5.0, 5.0)), &doc).is_empty(),
+                "{cmd} でプレビューが返らない"
+            );
+        }
+    }
+
+    /// **クリックで基点を置いた場合もプレビューが返ること。**
+    ///
+    /// 実際の操作はクリックなので、文字入力とは別に経路を押さえる
+    /// （`handle_click` は `wants_entity` の分岐を通るため、文字入力と経路が違う）。
+    #[test]
+    fn move_returns_a_preview_when_the_base_point_is_clicked() {
+        let (mut s, mut doc) = setup_one_line_selected();
+
+        feed(&mut s, &mut doc, "M");
+        click(&mut s, &mut doc, 0.0, 0.0); // 基点をクリックで置く
+
+        let preview = s.preview(Some(Point2::new(5.0, 5.0)), &doc);
+        assert_eq!(preview.len(), 1, "クリック経路でもラバーバンドが返る");
+    }
+
+    /// **オブジェクト選択を待っている間はプレビューを出さないこと。**
+    ///
+    /// 選択中にラバーバンドが出ると邪魔になる。
+    #[test]
+    fn no_preview_while_awaiting_selection() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "10,0");
+        // 選択せずに MOVE を始めると、選択待ちになる。
+        feed(&mut s, &mut doc, "M");
+        assert!(s.preview(Some(Point2::new(5.0, 5.0)), &doc).is_empty());
+    }
 }

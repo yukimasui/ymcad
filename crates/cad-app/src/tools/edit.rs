@@ -665,7 +665,7 @@ impl Tool for GroupTool {
 ///
 /// `1` のような入力は `Session::interpret` が数値にしてしまうので、
 /// 名前として扱えるよう文字列へ直す。整数なら小数点を付けない。
-fn format_number_name(n: f64) -> String {
+pub(super) fn format_number_name(n: f64) -> String {
     if n.fract() == 0.0 && n.is_finite() {
         format!("{n:.0}")
     } else {

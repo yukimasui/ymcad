@@ -2,6 +2,7 @@
 
 use std::collections::BTreeSet;
 
+use cad_core::component::{self, DefinitionTable};
 use cad_core::geom::{intersect, Aabb, Line, Point2};
 use cad_core::{Document, EntityId, Geometry};
 
@@ -108,7 +109,7 @@ pub fn pick_at(doc: &Document, pos: Point2, tolerance: f64) -> Option<EntityId> 
         if !doc.layers().is_entity_editable(entity) {
             continue;
         }
-        let d = entity.geom.dist_to(pos);
+        let d = entity.geom.dist_to(doc.definitions(), pos);
         if d > tolerance {
             continue;
         }
@@ -146,8 +147,8 @@ pub fn pick_in_rect(doc: &Document, rect: Aabb, mode: WindowMode) -> Vec<EntityI
         .iter()
         .filter(|(_, e)| doc.layers().is_entity_editable(e))
         .filter(|(_, e)| match mode {
-            WindowMode::Window => rect.contains_aabb(&e.bbox()),
-            WindowMode::Crossing => crosses_rect(&e.geom, rect),
+            WindowMode::Window => rect.contains_aabb(&e.bbox(doc.definitions())),
+            WindowMode::Crossing => crosses_rect(&e.geom, rect, doc.definitions()),
         })
         .map(|(id, _)| id)
         .collect()
@@ -162,25 +163,27 @@ pub fn pick_in_rect(doc: &Document, rect: Aabb, mode: WindowMode) -> Vec<EntityI
 /// 2. そうでなければ矩形の 4 辺と実際に交点を持つか調べる
 ///
 /// の 2 段で厳密に判定する。
+/// `defs` はコンポーネントインスタンスを中身へ展開するために必要
+/// （[`cad_core::Geometry::bbox`] と同じ理由）。
 #[must_use]
-pub fn crosses_rect(geom: &Geometry, rect: Aabb) -> bool {
+pub fn crosses_rect(geom: &Geometry, rect: Aabb, defs: &DefinitionTable) -> bool {
     if rect.is_empty() {
         return false;
     }
 
     // 境界ボックスすら重ならないなら確実に掛かっていない（安価な足切り）。
-    if !rect.intersects(&geom.bbox()) {
+    if !rect.intersects(&geom.bbox(defs)) {
         return false;
     }
 
     // 完全に内側なら掛かっている。
-    if rect.contains_aabb(&geom.bbox()) {
+    if rect.contains_aabb(&geom.bbox(defs)) {
         return true;
     }
 
     rect_edges(rect)
         .iter()
-        .any(|edge| !intersections(edge, geom).is_empty())
+        .any(|edge| !intersections(edge, geom, defs).is_empty())
 }
 
 /// 矩形の 4 辺。
@@ -199,7 +202,7 @@ fn rect_edges(rect: Aabb) -> [Line; 4] {
 }
 
 /// 線分と図形の交点。
-fn intersections(edge: &Line, geom: &Geometry) -> Vec<Point2> {
+fn intersections(edge: &Line, geom: &Geometry, defs: &DefinitionTable) -> Vec<Point2> {
     match geom {
         Geometry::Line(l) => intersect::line_line(edge, l),
         Geometry::Circle(c) => intersect::line_circle(edge, c),
@@ -209,12 +212,26 @@ fn intersections(edge: &Line, geom: &Geometry) -> Vec<Point2> {
             .segments()
             .flat_map(|seg| intersect::line_line(edge, &seg))
             .collect(),
+        // 中身をワールド座標へ展開して、その各図形との交点を集める。
+        // 展開結果にインスタンスは含まれないので、再帰は 1 段で止まる。
+        Geometry::Instance(i) => component::resolve(i, defs)
+            .iter()
+            .flat_map(|g| intersections(edge, g, defs))
+            .collect(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// テスト用の空の定義テーブル。
+    ///
+    /// ここのテストはコンポーネントを含まないので空でよい。
+    /// インスタンスの選択は `resolved.rs` と結合テストで確かめる。
+    fn defs() -> DefinitionTable {
+        DefinitionTable::new()
+    }
     use cad_core::command::AddEntities;
     use cad_core::geom::{Circle, Polyline};
     use cad_core::{Entity, LayerId};
@@ -322,15 +339,15 @@ mod tests {
         // 円の左上の「角」にある小さな矩形。bbox とは重なるが円周とは交わらない。
         let corner = rect(-10.0, 9.5, -9.5, 10.0);
         assert!(
-            c.bbox().intersects(&corner),
+            c.bbox(&defs()).intersects(&corner),
             "前提: bbox は重なっている（この判定だけだと誤検出する）"
         );
-        assert!(!crosses_rect(&c, corner), "円周には掛かっていない");
+        assert!(!crosses_rect(&c, corner, &defs()), "円周には掛かっていない");
 
         // 円周をまたぐ矩形は掛かっている。
-        assert!(crosses_rect(&c, rect(9.0, -1.0, 11.0, 1.0)));
+        assert!(crosses_rect(&c, rect(9.0, -1.0, 11.0, 1.0), &defs()));
         // 円を完全に含む矩形も掛かっている。
-        assert!(crosses_rect(&c, rect(-20.0, -20.0, 20.0, 20.0)));
+        assert!(crosses_rect(&c, rect(-20.0, -20.0, 20.0, 20.0), &defs()));
     }
 
     #[test]
@@ -340,9 +357,9 @@ mod tests {
             Point2::new(10.0, 10.0),
         ));
         // 左辺だけをまたぐ矩形。
-        assert!(crosses_rect(&p, rect(-1.0, 4.0, 1.0, 6.0)));
+        assert!(crosses_rect(&p, rect(-1.0, 4.0, 1.0, 6.0), &defs()));
         // ポリラインの内側だけにある矩形は、辺に触れないので掛かっていない。
-        assert!(!crosses_rect(&p, rect(4.0, 4.0, 6.0, 6.0)));
+        assert!(!crosses_rect(&p, rect(4.0, 4.0, 6.0, 6.0), &defs()));
     }
 
     #[test]

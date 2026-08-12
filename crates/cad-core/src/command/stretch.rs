@@ -79,6 +79,7 @@ impl Command for StretchEntities {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::DefinitionTable;
     use crate::entity::{Entity, EntityStore};
     use crate::error::CadError;
     use crate::geom::tolerance::eq_len;
@@ -102,8 +103,13 @@ mod tests {
 
     /// テスト用の `EntityStore` / `LayerTable` の組。`EditCtx` はこの 2 つの
     /// `&mut` からしか作れない。
-    fn new_parts() -> (EntityStore, LayerTable, GroupTable) {
-        (EntityStore::new(), LayerTable::new(), GroupTable::new())
+    fn new_parts() -> (EntityStore, LayerTable, GroupTable, DefinitionTable) {
+        (
+            EntityStore::new(),
+            LayerTable::new(),
+            GroupTable::new(),
+            DefinitionTable::new(),
+        )
     }
 
     /// `(0,0)-(10,10)` の範囲。
@@ -113,10 +119,10 @@ mod tests {
 
     #[test]
     fn stretch_execute_moves_only_points_inside_region() {
-        let (mut entities, mut layers, mut groups) = new_parts();
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
         // a は region 内、b は外。
         let id = entities.insert(line_entity(1.0, 1.0, 50.0, 50.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
 
         let mut cmd =
             StretchEntities::new("STRETCH", vec![id], vec![region()], Vec2::new(5.0, 5.0));
@@ -129,9 +135,9 @@ mod tests {
 
     #[test]
     fn stretch_undo_restores_original_geometry_exactly() {
-        let (mut entities, mut layers, mut groups) = new_parts();
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
         let id = entities.insert(line_entity(1.0, 1.0, 50.0, 50.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let original = ctx.entities().get(id).unwrap().geom.clone();
 
         let mut cmd =
@@ -144,9 +150,9 @@ mod tests {
 
     #[test]
     fn stretch_redo_after_undo_moves_again() {
-        let (mut entities, mut layers, mut groups) = new_parts();
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
         let id = entities.insert(line_entity(1.0, 1.0, 50.0, 50.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
 
         let mut cmd =
             StretchEntities::new("STRETCH", vec![id], vec![region()], Vec2::new(5.0, 5.0));
@@ -161,11 +167,11 @@ mod tests {
 
     #[test]
     fn stretch_missing_target_fails_and_leaves_document_unchanged() {
-        let (mut entities, mut layers, mut groups) = new_parts();
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
         let survivor = entities.insert(line_entity(1.0, 1.0, 50.0, 50.0));
         let doomed = entities.insert(line_entity(2.0, 2.0, 3.0, 3.0));
         entities.remove(doomed).unwrap();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
 
         let mut cmd = StretchEntities::new(
             "STRETCH",
@@ -183,9 +189,9 @@ mod tests {
 
     #[test]
     fn stretch_empty_regions_behaves_like_move() {
-        let (mut entities, mut layers, mut groups) = new_parts();
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
         let id = entities.insert(line_entity(1.0, 1.0, 50.0, 50.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
 
         let mut cmd = StretchEntities::new("STRETCH", vec![id], vec![], Vec2::new(5.0, 5.0));
         cmd.execute(&mut ctx).unwrap();
@@ -197,9 +203,9 @@ mod tests {
 
     #[test]
     fn stretch_keeps_entity_id() {
-        let (mut entities, mut layers, mut groups) = new_parts();
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
         let id = entities.insert(line_entity(1.0, 1.0, 50.0, 50.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
 
         let mut cmd =
             StretchEntities::new("STRETCH", vec![id], vec![region()], Vec2::new(5.0, 5.0));
@@ -211,11 +217,11 @@ mod tests {
 
     #[test]
     fn stretch_multiple_regions_moves_points_inside_either() {
-        let (mut entities, mut layers, mut groups) = new_parts();
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
         // a は region() 内、b は other 内。
         let other = Aabb::new(Point2::new(100.0, 100.0), Point2::new(110.0, 110.0));
         let id = entities.insert(line_entity(1.0, 1.0, 105.0, 105.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
 
         let mut cmd = StretchEntities::new(
             "STRETCH",
@@ -232,10 +238,10 @@ mod tests {
 
     #[test]
     fn stretch_large_coordinates() {
-        let (mut entities, mut layers, mut groups) = new_parts();
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
         let big_region = Aabb::new(Point2::new(0.0, 0.0), Point2::new(2.0e6, 2.0e6));
         let id = entities.insert(line_entity(1.0e6, 1.0e6, 5.0e6, 5.0e6));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
 
         let mut cmd =
             StretchEntities::new("STRETCH", vec![id], vec![big_region], Vec2::new(1.0e6, 0.0));
@@ -252,12 +258,12 @@ mod tests {
 
     #[test]
     fn stretch_partial_rollback_with_multiple_targets_on_missing_id() {
-        let (mut entities, mut layers, mut groups) = new_parts();
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
         let first = entities.insert(line_entity(1.0, 1.0, 50.0, 50.0));
         let second = entities.insert(line_entity(2.0, 2.0, 60.0, 60.0));
         let doomed = entities.insert(line_entity(3.0, 3.0, 70.0, 70.0));
         entities.remove(doomed).unwrap();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
 
         let mut cmd = StretchEntities::new(
             "STRETCH",
