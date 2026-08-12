@@ -1,6 +1,6 @@
 //! 図形要素の定義。
 
-use crate::geom::{Aabb, Arc, Circle, Line, Point2, Polyline, Vec2};
+use crate::geom::{Aabb, Arc, Circle, Line, Point2, Polyline, Vec2, Xline};
 use crate::layer::{ColorSpec, LayerId};
 
 /// 図形の実体。
@@ -12,6 +12,8 @@ pub enum Geometry {
     Circle(Circle),
     /// 円弧。
     Arc(Arc),
+    /// 無限に伸びる作図線。
+    Xline(Xline),
     /// ポリライン（連結した線分列）。
     Polyline(Polyline),
 }
@@ -24,6 +26,9 @@ impl Geometry {
             Self::Line(l) => l.bbox(),
             Self::Circle(c) => c.bbox(),
             Self::Arc(a) => a.bbox(),
+            // 無限に伸びるので全平面を返す。図面範囲（ZOOM EXTENTS）からは
+            // `EntityStore::bbox` が `is_bounded` を見て除外する。
+            Self::Xline(_) => Aabb::UNBOUNDED,
             Self::Polyline(p) => p.bbox(),
         }
     }
@@ -35,8 +40,18 @@ impl Geometry {
             Self::Line(l) => l.dist_to(p),
             Self::Circle(c) => c.dist_to(p),
             Self::Arc(a) => a.dist_to(p),
+            Self::Xline(x) => x.dist_to(p),
             Self::Polyline(pl) => pl.dist_to(p),
         }
+    }
+
+    /// 有界な図形か。作図線だけが `false`。
+    ///
+    /// 図面範囲（ZOOM EXTENTS）の計算から無限図形を外すために使う。
+    /// AutoCAD も作図線を図面範囲に含めない。
+    #[must_use]
+    pub fn is_bounded(&self) -> bool {
+        !matches!(self, Self::Xline(_))
     }
 
     /// コマンド名などに使う種別名。
@@ -46,6 +61,7 @@ impl Geometry {
             Self::Line(_) => "LINE",
             Self::Circle(_) => "CIRCLE",
             Self::Arc(_) => "ARC",
+            Self::Xline(_) => "XLINE",
             // DXF R12 での LWPOLYLINE 相当の名前（Phase 6 の DXF 出力で使う）。
             Self::Polyline(_) => "LWPOLYLINE",
         }
@@ -58,6 +74,7 @@ impl Geometry {
             Self::Line(l) => Self::Line(l.translated(v)),
             Self::Circle(c) => Self::Circle(c.translated(v)),
             Self::Arc(a) => Self::Arc(a.translated(v)),
+            Self::Xline(x) => Self::Xline(x.translated(v)),
             Self::Polyline(p) => Self::Polyline(p.translated(v)),
         }
     }
@@ -90,6 +107,15 @@ impl Geometry {
                     Self::Arc(*a)
                 }
             }
+            // 無限直線に「範囲内の定義点」という概念が無いので、円や円弧と同じく
+            // 通過点が範囲に入っているときだけ全体を動かす。
+            Self::Xline(x) => {
+                if inside(x.origin) {
+                    Self::Xline(x.translated(delta))
+                } else {
+                    Self::Xline(*x)
+                }
+            }
             Self::Polyline(p) => {
                 let vertices = p.vertices.iter().copied().map(move_if_inside).collect();
                 Self::Polyline(Polyline::new(vertices, p.closed))
@@ -112,6 +138,7 @@ impl Geometry {
                 a.start_angle + angle,
                 a.end_angle + angle,
             )),
+            Self::Xline(x) => Self::Xline(x.rotated(center, angle)),
             Self::Polyline(p) => {
                 let vertices = p.vertices.iter().copied().map(rot).collect();
                 Self::Polyline(Polyline::new(vertices, p.closed))
@@ -141,6 +168,7 @@ impl Geometry {
                 a.start_angle,
                 a.end_angle,
             )),
+            Self::Xline(x) => Self::Xline(x.scaled(center, factor)),
             Self::Polyline(p) => {
                 let vertices = p.vertices.iter().copied().map(scale).collect();
                 Self::Polyline(Polyline::new(vertices, p.closed))
@@ -178,6 +206,7 @@ impl Geometry {
                 let new_end = 2.0 * axis_angle - a.start_angle;
                 Self::Arc(Arc::new(new_center, a.radius, new_start, new_end))
             }
+            Self::Xline(x) => Self::Xline(x.mirrored(axis)),
             Self::Polyline(p) => {
                 let vertices = p
                     .vertices
