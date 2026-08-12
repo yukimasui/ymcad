@@ -322,6 +322,26 @@ impl CadApp {
     }
 
     /// マウス操作を処理し、描画すべき選択矩形があれば返す。
+    ///
+    /// # クリック判定に `clicked_by()` だけを使わない理由
+    ///
+    /// egui が押下〜解放を「クリック」と認めるのは、**押した位置から 6.0px 以内**かつ
+    /// **押していた時間が 0.8 秒未満**のときだけ
+    /// （`egui::InputOptions` の `max_click_dist` / `max_click_duration`）。
+    /// どちらかを外れると `Response::clicked_by()` は `false` になり、
+    /// egui はその操作をドラッグとして扱う。
+    ///
+    /// CAD の作図では、狙いを定めてゆっくり押す・押しながら微妙に手が動く、が日常的に起きる。
+    /// `clicked_by()` だけで点を拾っていると、そうした操作が**黙って捨てられる**。
+    ///
+    /// そこで **「キャンバス上で主ボタンが離された」ことを合図にする**。
+    /// `drag_stopped_by()` は距離超過でも時間超過でも発火するので、両方の原因を一度に塞げる。
+    ///
+    /// なお egui 側の閾値（`ctx.options_mut`）を緩める案は採らない。
+    /// ダブルクリック判定にも影響し、時間の条件は別途上げる必要があるため。
+    ///
+    /// この判定は `egui::Response` の状態に依存するため単体テストで再現できない。
+    /// 変更したら手動で確認すること。
     fn handle_pointer(
         &mut self,
         response: &egui::Response,
@@ -330,61 +350,83 @@ impl CadApp {
         let shift = ui.input(|i| i.modifiers.shift);
         let pick_tolerance = self.viewport.px_to_model_len(PICK_RADIUS_PX);
 
-        // ---- 左ドラッグによる矩形選択 ----
+        // 主ボタンが離されたか。クリックと判定されなかった解放もここで拾う。
+        let released = response.clicked_by(egui::PointerButton::Primary)
+            || response.drag_stopped_by(egui::PointerButton::Primary);
+
+        // 座標は「離した位置」を使う。スナップはその時点のカーソル位置から
+        // 計算されているので、離した位置なら**マーカーの出ている点と実際に入る点が一致する**。
+        // 押した位置を使うと、スナップ表示と入力結果がずれる。
+        let released_pos = response.interact_pointer_pos();
+
+        // ---- 点の入力待ち中 ----
         //
-        // 点の入力待ち中は矩形選択に入らない（作図の邪魔をしない）。
-        if !self.session.wants_point() {
-            if response.drag_started_by(egui::PointerButton::Primary) {
-                if let Some(from) = response.interact_pointer_pos() {
-                    self.rect_drag = Some(RectDrag { from, shift });
+        // この状態では矩形選択に入らないので、離されたら常に点として拾ってよい。
+        // 距離の閾値は設けない（手が動いていても拾えるようにするのが目的）。
+        if self.session.wants_point() {
+            if released {
+                if let Some(pos) = released_pos {
+                    self.place_point(pos, shift, pick_tolerance);
                 }
             }
+            return None;
+        }
 
-            if let Some(drag) = self.rect_drag {
-                let current = response
-                    .interact_pointer_pos()
-                    .or_else(|| response.hover_pos())
-                    .unwrap_or(drag.from);
-                let mode = WindowMode::from_drag(f64::from(drag.from.x), f64::from(current.x));
-                let rect = egui::Rect::from_two_pos(drag.from, current);
-
-                if response.drag_stopped_by(egui::PointerButton::Primary) {
-                    self.rect_drag = None;
-                    // 動きが小さいならクリック扱い（後段のクリック処理に任せる）。
-                    if rect.width() > DRAG_THRESHOLD_PX || rect.height() > DRAG_THRESHOLD_PX {
-                        let model_rect = Aabb::new(
-                            self.viewport.screen_to_model(rect.min),
-                            self.viewport.screen_to_model(rect.max),
-                        );
-                        self.session.handle_rect_select(
-                            model_rect,
-                            mode,
-                            drag.shift,
-                            &mut self.doc,
-                        );
-                        return None;
-                    }
-                } else {
-                    return Some((rect, mode));
-                }
+        // ---- 左ドラッグによる矩形選択 ----
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            if let Some(from) = response.interact_pointer_pos() {
+                self.rect_drag = Some(RectDrag { from, shift });
             }
         }
 
-        // ---- クリック ----
-        if response.clicked_by(egui::PointerButton::Primary) {
-            if let Some(pos) = response.interact_pointer_pos() {
-                // 吸着していればその点を使う。クリック位置そのままではなく
-                // スナップ点が入力されるのが OSNAP の要点。
-                let model = self
-                    .snapped
-                    .map_or_else(|| self.viewport.screen_to_model(pos), |s| s.point);
-                self.session
-                    .handle_click(model, shift, pick_tolerance, &mut self.doc);
-                self.snap.release();
+        if let Some(drag) = self.rect_drag {
+            let current = released_pos
+                .or_else(|| response.hover_pos())
+                .unwrap_or(drag.from);
+            let mode = WindowMode::from_drag(f64::from(drag.from.x), f64::from(current.x));
+            let rect = egui::Rect::from_two_pos(drag.from, current);
+
+            if response.drag_stopped_by(egui::PointerButton::Primary) {
+                self.rect_drag = None;
+                if rect.width() > DRAG_THRESHOLD_PX || rect.height() > DRAG_THRESHOLD_PX {
+                    let model_rect = Aabb::new(
+                        self.viewport.screen_to_model(rect.min),
+                        self.viewport.screen_to_model(rect.max),
+                    );
+                    self.session
+                        .handle_rect_select(model_rect, mode, drag.shift, &mut self.doc);
+                } else {
+                    // 動きが小さいならクリック扱い。ここで自分で処理する。
+                    // 後段の clicked_by() に任せると、egui がドラッグと判定していた場合に
+                    // 取りこぼす（DRAG_THRESHOLD_PX 4.0 は egui の 6.0 より小さいので、
+                    // この閾値では egui の判定を肩代わりできない）。
+                    self.place_point(current, drag.shift, pick_tolerance);
+                }
+                return None;
+            }
+            return Some((rect, mode));
+        }
+
+        // ---- ドラッグを伴わない素のクリック ----
+        if released {
+            if let Some(pos) = released_pos {
+                self.place_point(pos, shift, pick_tolerance);
             }
         }
 
         None
+    }
+
+    /// スクリーン座標を入力点として `Session` へ渡す。
+    fn place_point(&mut self, pos: egui::Pos2, shift: bool, pick_tolerance: f64) {
+        // 吸着していればその点を使う。クリック位置そのままではなく
+        // スナップ点が入力されるのが OSNAP の要点。
+        let model = self
+            .snapped
+            .map_or_else(|| self.viewport.screen_to_model(pos), |s| s.point);
+        self.session
+            .handle_click(model, shift, pick_tolerance, &mut self.doc);
+        self.snap.release();
     }
 }
 
