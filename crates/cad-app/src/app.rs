@@ -224,7 +224,10 @@ impl CadApp {
 
     fn command_area(&mut self, ui: &mut egui::Ui) {
         let prompt = self.session.prompt();
-        let submission = self.session.cmdline.show(ui, &prompt);
+        // ツール実行中と選択待ち中は候補を出さない。座標やオプションを打つ段階なので、
+        // コマンド名の候補が出ると邪魔になる。
+        let allow_suggestions = !self.session.has_active_tool();
+        let submission = self.session.cmdline.show(ui, &prompt, allow_suggestions);
         if submission != Submission::None {
             self.session.handle_submission(submission, &mut self.doc);
             for action in self.session.take_view_actions() {
