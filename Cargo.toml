@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["crates/cad-core", "crates/cad-app"]
+# spikes/ は Phase 0 の検証用で独立した Cargo.lock を持つ。ワークスペースに含めない。
+exclude = ["spikes/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/yukimasui/ymcad"
+
+[workspace.dependencies]
+cad-core = { path = "crates/cad-core" }
+eframe = "0.36"
+egui = "0.36"
+rfd = "0.17"
+
+[profile.release]
+# 10,000 エンティティで 60fps という性能目標があるため、リリースビルドは
+# クレート横断の最適化を効かせる。
+lto = "thin"
+codegen-units = 1

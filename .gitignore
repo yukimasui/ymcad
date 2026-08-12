@@ -1,0 +1,19 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+*.pdb
+
+# 作業用 CAD ファイル
+*.dxf
+!tests/**/*.dxf
+!crates/cad-core/tests/data/*.dxf
+# 動作確認用のサンプル（R12 の書き出し例）
+!docs/sample.dxf
+
+# エディタ / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store

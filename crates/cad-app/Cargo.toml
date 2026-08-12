@@ -1,0 +1,20 @@
+[package]
+name = "cad-app"
+description = "ymcad の egui アプリケーション。入力処理と描画を担う。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cad-core.workspace = true
+eframe.workspace = true
+egui.workspace = true
+rfd.workspace = true
+
+[lints.clippy]
+# f64 → f32 の縮小変換は viewport.rs の変換関数だけに許す。
+# それ以外の場所での `as f32` はこの lint で検出する。
+cast_possible_truncation = "warn"
+cast_precision_loss = "warn"
