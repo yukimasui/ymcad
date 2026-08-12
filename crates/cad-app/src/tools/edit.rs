@@ -1,15 +1,15 @@
 //! 編集コマンドとビュー操作コマンド。
 
 use cad_core::command::{
-    CopyEntities, CreateGroup, DeleteEntities, ExplodeEntities, MirrorCopyEntities, MirrorEntities,
-    MoveEntities, RotateCopyEntities, RotateEntities, ScaleCopyEntities, ScaleEntities,
-    StretchEntities, Ungroup,
+    CopyEntities, CornerEntities, CornerKind, CreateGroup, DeleteEntities, ExplodeEntities,
+    ExtendEntity, MirrorCopyEntities, MirrorEntities, MoveEntities, RotateCopyEntities,
+    RotateEntities, ScaleCopyEntities, ScaleEntities, StretchEntities, TrimEntity, Ungroup,
 };
 use cad_core::geom::tolerance::is_zero_len;
 use cad_core::geom::{Aabb, Line, Point2};
 use cad_core::Geometry;
 
-use super::{StepInput, StepOutcome, Tool, ToolCtx};
+use super::{StepInput, StepOutcome, Tool, ToolCtx, ToolSettings};
 use crate::input::ViewAction;
 
 /// 選択したオブジェクトを削除する。
@@ -87,6 +87,9 @@ impl Tool for MoveTool {
             StepInput::Enter => StepOutcome::Finish,
             StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             StepInput::Number(_) => StepOutcome::Reject("点を指定してください".to_owned()),
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
         }
     }
 
@@ -146,6 +149,9 @@ impl Tool for CopyTool {
             StepInput::Enter => StepOutcome::Finish,
             StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             StepInput::Number(_) => StepOutcome::Reject("点を指定してください".to_owned()),
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
         }
     }
 
@@ -240,6 +246,9 @@ impl Tool for StretchTool {
             StepInput::Enter => StepOutcome::Finish,
             StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             StepInput::Number(_) => StepOutcome::Reject("点を指定してください".to_owned()),
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
         }
     }
 
@@ -335,6 +344,9 @@ impl Tool for RotateTool {
             }
             StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             StepInput::Enter => StepOutcome::Finish,
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
         }
     }
 
@@ -426,6 +438,9 @@ impl Tool for ScaleTool {
             }
             StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             StepInput::Enter => StepOutcome::Finish,
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
         }
     }
 
@@ -532,6 +547,9 @@ impl Tool for MirrorTool {
             StepInput::Enter => StepOutcome::Finish,
             StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
             StepInput::Number(_) => StepOutcome::Reject("点を指定してください".to_owned()),
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
         }
     }
 
@@ -636,6 +654,9 @@ impl Tool for GroupTool {
             // 数字だけの名前も許す（`interpret` が数値として渡してくるため）。
             StepInput::Number(n) => self.commit(format_number_name(n), ctx),
             StepInput::Point(_) => StepOutcome::Reject("グループ名を入力してください".to_owned()),
+            StepInput::Entity { .. } => {
+                StepOutcome::Reject("図形ではなく点を指定してください".to_owned())
+            }
         }
     }
 }
@@ -748,6 +769,240 @@ impl Tool for ExplodeTool {
                 StepOutcome::Apply(Box::new(ExplodeEntities::new("EXPLODE", targets)))
             }
             _ => StepOutcome::Reject("Enter で分解を実行してください".to_owned()),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// TRIM / EXTEND / FILLET / CHAMFER
+// ---------------------------------------------------------------------------
+
+/// 線分を切り取る。
+///
+/// AutoCAD の TRIM。**切断エッジは選ばない。** 図面上の他のすべての図形を
+/// 暗黙のエッジとして使い、いきなり「切る部分をクリック」で始める
+/// （近年の AutoCAD のクイックモード相当）。
+///
+/// 続けて何本でも切れる。`Enter` か `Esc` で終わる。
+#[derive(Debug, Default)]
+pub struct TrimTool;
+
+impl Tool for TrimTool {
+    fn name(&self) -> &'static str {
+        "TRIM"
+    }
+
+    fn prompt(&self) -> String {
+        "切り取る部分をクリック <Enter で終了>:".to_owned()
+    }
+
+    fn wants_entity(&self) -> bool {
+        true
+    }
+
+    fn step(&mut self, input: StepInput, _ctx: &ToolCtx<'_>) -> StepOutcome {
+        match input {
+            StepInput::Entity { id, at } => {
+                StepOutcome::ApplyAndContinue(Box::new(TrimEntity::new("TRIM", id, at)))
+            }
+            // 図形を拾えなかったクリック。外したことを伝えて続行する。
+            StepInput::Point(_) => StepOutcome::Reject("図形の上をクリックしてください".to_owned()),
+            StepInput::Enter | StepInput::SelectionReady => StepOutcome::Finish,
+            StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
+            StepInput::Number(_) => {
+                StepOutcome::Reject("図形の上をクリックしてください".to_owned())
+            }
+        }
+    }
+}
+
+/// 線分を伸ばす。
+///
+/// AutoCAD の EXTEND。TRIM と同じく、図面上の他のすべての図形を暗黙の境界にする。
+/// **クリックした側の端**が伸びる。
+#[derive(Debug, Default)]
+pub struct ExtendTool;
+
+impl Tool for ExtendTool {
+    fn name(&self) -> &'static str {
+        "EXTEND"
+    }
+
+    fn prompt(&self) -> String {
+        "伸ばす側の端をクリック <Enter で終了>:".to_owned()
+    }
+
+    fn wants_entity(&self) -> bool {
+        true
+    }
+
+    fn step(&mut self, input: StepInput, _ctx: &ToolCtx<'_>) -> StepOutcome {
+        match input {
+            StepInput::Entity { id, at } => {
+                StepOutcome::ApplyAndContinue(Box::new(ExtendEntity::new("EXTEND", id, at)))
+            }
+            StepInput::Point(_) => StepOutcome::Reject("図形の上をクリックしてください".to_owned()),
+            StepInput::Enter | StepInput::SelectionReady => StepOutcome::Finish,
+            StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
+            StepInput::Number(_) => {
+                StepOutcome::Reject("図形の上をクリックしてください".to_owned())
+            }
+        }
+    }
+}
+
+/// 角丸めと面取りの共通のツール。
+///
+/// どちらも「値を決める → 2 本の線分をクリック」という同じ流れなので 1 つにまとめる。
+/// 値は AutoCAD と同じくコマンド間で記憶される。
+#[derive(Debug)]
+pub struct CornerTool {
+    /// 角丸めか面取りか。
+    fillet: bool,
+    /// 1 本目のクリック。2 本目待ちなら `Some`。
+    first: Option<(cad_core::EntityId, Point2)>,
+    /// 値の入力待ちか（`R` / `D` オプション）。
+    editing: Option<CornerSetting>,
+}
+
+/// 値の入力待ちの内訳。
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CornerSetting {
+    Radius,
+    Distance1,
+    Distance2 { d1: f64 },
+}
+
+impl CornerTool {
+    /// 角丸め用。
+    #[must_use]
+    pub fn fillet() -> Self {
+        Self {
+            fillet: true,
+            first: None,
+            editing: None,
+        }
+    }
+
+    /// 面取り用。
+    #[must_use]
+    pub fn chamfer() -> Self {
+        Self {
+            fillet: false,
+            first: None,
+            editing: None,
+        }
+    }
+
+    fn kind(&self, s: &ToolSettings) -> CornerKind {
+        if self.fillet {
+            CornerKind::Fillet {
+                radius: s.fillet_radius,
+            }
+        } else {
+            CornerKind::Chamfer {
+                d1: s.chamfer_d1,
+                d2: s.chamfer_d2,
+            }
+        }
+    }
+}
+
+impl Tool for CornerTool {
+    fn name(&self) -> &'static str {
+        if self.fillet {
+            "FILLET"
+        } else {
+            "CHAMFER"
+        }
+    }
+
+    fn prompt(&self) -> String {
+        match self.editing {
+            Some(CornerSetting::Radius) => "半径を指定:".to_owned(),
+            Some(CornerSetting::Distance1) => "1 本目の距離を指定:".to_owned(),
+            Some(CornerSetting::Distance2 { .. }) => "2 本目の距離を指定:".to_owned(),
+            None if self.first.is_some() => "2 本目の線分をクリック:".to_owned(),
+            None if self.fillet => "1 本目の線分をクリック [半径(R)]:".to_owned(),
+            None => "1 本目の線分をクリック [距離(D)]:".to_owned(),
+        }
+    }
+
+    fn wants_entity(&self) -> bool {
+        // 値の入力待ちのあいだは図形を拾わない。
+        self.editing.is_none()
+    }
+
+    fn step(&mut self, input: StepInput, ctx: &ToolCtx<'_>) -> StepOutcome {
+        // ---- 値の入力待ち ----
+        if let Some(pending) = self.editing {
+            let StepInput::Number(v) = input else {
+                return match input {
+                    StepInput::Enter => {
+                        self.editing = None;
+                        StepOutcome::Continue
+                    }
+                    _ => StepOutcome::Reject("数値を指定してください".to_owned()),
+                };
+            };
+            if !v.is_finite() || v <= 0.0 {
+                return StepOutcome::Reject("0 より大きい値を指定してください".to_owned());
+            }
+            let mut s = ctx.settings;
+            match pending {
+                CornerSetting::Radius => {
+                    s.fillet_radius = v;
+                    self.editing = None;
+                }
+                CornerSetting::Distance1 => {
+                    s.chamfer_d1 = v;
+                    self.editing = Some(CornerSetting::Distance2 { d1: v });
+                }
+                CornerSetting::Distance2 { d1 } => {
+                    s.chamfer_d1 = d1;
+                    s.chamfer_d2 = v;
+                    self.editing = None;
+                }
+            }
+            return StepOutcome::Setting(s);
+        }
+
+        match input {
+            StepInput::Word(w) if self.fillet && w == "R" => {
+                self.editing = Some(CornerSetting::Radius);
+                StepOutcome::Continue
+            }
+            StepInput::Word(w) if !self.fillet && w == "D" => {
+                self.editing = Some(CornerSetting::Distance1);
+                StepOutcome::Continue
+            }
+            StepInput::Word(w) => StepOutcome::Reject(format!("不明なオプションです: {w}")),
+
+            StepInput::Entity { id, at } => {
+                let Some((first_id, pick1)) = self.first else {
+                    self.first = Some((id, at));
+                    return StepOutcome::Continue;
+                };
+                if first_id == id {
+                    return StepOutcome::Reject("別の線分をクリックしてください".to_owned());
+                }
+                let cmd = CornerEntities::new(
+                    self.name(),
+                    first_id,
+                    id,
+                    pick1,
+                    at,
+                    self.kind(&ctx.settings),
+                );
+                self.first = None;
+                StepOutcome::ApplyAndContinue(Box::new(cmd))
+            }
+
+            StepInput::Point(_) => StepOutcome::Reject("線分の上をクリックしてください".to_owned()),
+            StepInput::Enter | StepInput::SelectionReady => StepOutcome::Finish,
+            StepInput::Number(_) => StepOutcome::Reject(
+                "先に R（半径）または D（距離）で値を指定してください".to_owned(),
+            ),
         }
     }
 }

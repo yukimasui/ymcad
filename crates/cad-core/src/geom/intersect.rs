@@ -9,6 +9,7 @@ use super::line::Line;
 use super::point::Point2;
 use super::tolerance::{eq_len, gt_len, is_zero_len, lt_len};
 use super::xline::Xline;
+use crate::entity::Geometry;
 
 /// パラメータ `t` が `[0, 1]` にトレランス込みで収まるか（線分・円弧の範囲判定用）。
 fn in_unit_range(t: f64) -> bool {
@@ -213,6 +214,85 @@ pub fn xline_xline(a: &Xline, b: &Xline) -> Vec<Point2> {
     }
     let s = (b.origin - a.origin).cross(b.direction) / denom;
     vec![a.point_at(s)]
+}
+
+// ---------------------------------------------------------------------------
+// パラメータつきの交点 — TRIM / EXTEND 用
+// ---------------------------------------------------------------------------
+//
+// 上の関数群は交点の座標しか返さない。TRIM は「線分のどちら側を切るか」を、
+// EXTEND は「どちらへ伸ばすか」を決める必要があり、そのためには
+// **対象図形上のどこで交わったか**をパラメータで知る必要がある。
+
+/// 線分 `target` 上での交点パラメータ（`0.0` が始点、`1.0` が終点）。
+///
+/// `cutter` は有界な実体として扱う（線分なら線分の範囲内でのみ交わる）。
+/// 結果は昇順に並ぶ。
+#[must_use]
+pub fn line_params_against(target: &Line, cutter: &Geometry) -> Vec<f64> {
+    let mut params: Vec<f64> = intersections_with(target, cutter)
+        .into_iter()
+        .map(|p| target.closest_param(p))
+        .filter(|t| in_unit_range(*t))
+        .collect();
+    params.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    params.dedup_by(|a, b| eq_len(*a, *b));
+    params
+}
+
+/// 線分を **無限直線として延長したとき** の交点パラメータ。
+///
+/// EXTEND が「伸ばした先で何と交わるか」を知るために使う。
+/// `0.0` が始点、`1.0` が終点なので、`t > 1.0` は終点側、`t < 0.0` は始点側の延長。
+///
+/// 相手（`cutter`）は有界な実体のまま扱う。伸ばすのは対象だけで、
+/// 相手まで無限に延ばしてしまうと AutoCAD の挙動と食い違う。
+#[must_use]
+pub fn line_params_extended(target: &Line, cutter: &Geometry) -> Vec<f64> {
+    let Some(dir) = target.dir() else {
+        return Vec::new();
+    };
+    let Some(infinite) = Xline::new(target.a, dir) else {
+        return Vec::new();
+    };
+    let length = target.length();
+    if is_zero_len(length) {
+        return Vec::new();
+    }
+
+    let hits = match cutter {
+        Geometry::Line(l) => xline_line(&infinite, l),
+        Geometry::Circle(c) => xline_circle(&infinite, c),
+        Geometry::Arc(a) => xline_arc(&infinite, a),
+        Geometry::Xline(x) => xline_xline(&infinite, x),
+        Geometry::Polyline(p) => p
+            .segments()
+            .flat_map(|seg| xline_line(&infinite, &seg))
+            .collect(),
+    };
+
+    // 無限直線のパラメータ（距離）を、線分のパラメータ（0..1）へ直す。
+    let mut params: Vec<f64> = hits
+        .into_iter()
+        .map(|p| infinite.param_at(p) / length)
+        .collect();
+    params.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    params.dedup_by(|a, b| eq_len(*a, *b));
+    params
+}
+
+/// 線分と任意の図形の交点（どちらも有界な範囲で）。
+fn intersections_with(target: &Line, cutter: &Geometry) -> Vec<Point2> {
+    match cutter {
+        Geometry::Line(l) => line_line(target, l),
+        Geometry::Circle(c) => line_circle(target, c),
+        Geometry::Arc(a) => line_arc(target, a),
+        Geometry::Xline(x) => xline_line(x, target),
+        Geometry::Polyline(p) => p
+            .segments()
+            .flat_map(|seg| line_line(target, &seg))
+            .collect(),
+    }
 }
 
 #[cfg(test)]

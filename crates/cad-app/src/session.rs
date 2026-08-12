@@ -10,7 +10,7 @@ use cad_core::{Document, Geometry};
 use crate::cmdline::{coord, CommandLine, LineKind, Submission};
 use crate::input::ViewAction;
 use crate::selection::{self, Selection, WindowMode};
-use crate::tools::{self, Immediate, StepInput, StepOutcome, Tool, ToolCtx};
+use crate::tools::{self, Immediate, StepInput, StepOutcome, Tool, ToolCtx, ToolSettings};
 
 /// UI に対する要求。図面の変更ではないのでコマンドにはしない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,6 +45,8 @@ pub struct Session {
     view_actions: Vec<ViewAction>,
     /// このフレームで発生した UI 要求。
     ui_actions: Vec<UiAction>,
+    /// コマンド間で覚える設定（FILLET の半径など）。
+    settings: ToolSettings,
 }
 
 impl Default for Session {
@@ -67,6 +69,7 @@ impl Session {
             crossing_rects: Vec::new(),
             view_actions: Vec::new(),
             ui_actions: Vec::new(),
+            settings: ToolSettings::default(),
         }
     }
 
@@ -92,6 +95,12 @@ impl Session {
     #[must_use]
     pub fn wants_point(&self) -> bool {
         self.tool.is_some() && !self.awaiting_selection
+    }
+
+    /// 実行中のツールがクリックを「図形の指定」として受け取りたいか。
+    #[must_use]
+    pub fn wants_entity(&self) -> bool {
+        self.tool.as_ref().is_some_and(|t| t.wants_entity())
     }
 
     /// 溜まったビュー操作を取り出す。
@@ -125,6 +134,7 @@ impl Session {
             selection: &self.selection,
             layer: doc.layers().current(),
             crossing_rects: &self.crossing_rects,
+            settings: self.settings,
         }
     }
 
@@ -298,6 +308,7 @@ impl Session {
                 selection: &self.selection,
                 layer: doc.layers().current(),
                 crossing_rects: &self.crossing_rects,
+                settings: self.settings,
             };
             tool.step(input, &ctx)
         };
@@ -318,6 +329,10 @@ impl Session {
             }
             StepOutcome::View(action) => {
                 self.view_actions.push(action);
+            }
+            StepOutcome::Setting(settings) => {
+                self.settings = settings;
+                self.tool = Some(tool);
             }
             StepOutcome::Finish => {}
         }
@@ -344,6 +359,14 @@ impl Session {
         doc: &mut Document,
     ) {
         if self.wants_point() {
+            // 図形を要求しているツールには、拾えたら図形として渡す。
+            // 拾えなかったクリックは点のまま渡し、ツール側で案内させる。
+            if self.wants_entity() {
+                if let Some(id) = selection::pick_at(doc, model, pick_tolerance) {
+                    self.feed_tool(StepInput::Entity { id, at: model }, doc);
+                    return;
+                }
+            }
             self.feed_tool(StepInput::Point(model), doc);
             return;
         }
@@ -1492,5 +1515,407 @@ mod flow_tests {
             .cmdline
             .history()
             .any(|l| l.text.contains("グループに属していません")));
+    }
+
+    // ---- 段階 3: TRIM / EXTEND / FILLET / CHAMFER -------------------------
+    //
+    // この 4 つは「図形をクリックして指す」ことが対話の中心なので、
+    // 文字列入力だけでは経路を通せない。`handle_click` を直接叩く。
+
+    /// 拾い半径。テストの図形は座標が離れているので、この程度で取り違えない。
+    const PICK: f64 = 0.5;
+
+    /// キャンバスのクリックを模す。
+    fn click(s: &mut Session, doc: &mut Document, x: f64, y: f64) {
+        s.handle_click(Point2::new(x, y), false, PICK, doc);
+    }
+
+    /// 2 点を結ぶ線分を 1 本引く。
+    fn draw_line(s: &mut Session, doc: &mut Document, a: &str, b: &str) {
+        feed(s, doc, "L");
+        feed(s, doc, a);
+        feed(s, doc, b);
+        enter(s, doc);
+    }
+
+    /// 図面に入っている線分を、始点の x 昇順で取り出す。
+    fn lines_sorted(doc: &Document) -> Vec<cad_core::geom::Line> {
+        let mut out: Vec<_> = doc
+            .entities()
+            .iter()
+            .filter_map(|(_, e)| match &e.geom {
+                cad_core::Geometry::Line(l) => Some(*l),
+                _ => None,
+            })
+            .collect();
+        out.sort_by(|p, q| {
+            p.a.x
+                .partial_cmp(&q.a.x)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out
+    }
+
+    /// 横線を縦線で切ると、クリックした側が落ちること。
+    ///
+    /// ```text
+    ///            |            |
+    ///  0━━━━━━━━━┿━━ ×  →  0━━┥
+    ///            10          10
+    /// ```
+    #[test]
+    fn trim_removes_the_clicked_part_up_to_the_crossing() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "20,0");
+        draw_line(&mut s, &mut doc, "10,-5", "10,5");
+
+        feed(&mut s, &mut doc, "TR");
+        click(&mut s, &mut doc, 15.0, 0.0);
+        enter(&mut s, &mut doc);
+
+        assert_eq!(doc.entities().len(), 2, "横線 1 本 + 縦線 1 本");
+        let trimmed = lines_sorted(&doc)[0];
+        assert!(eq_len(trimmed.a.x, 0.0), "始点は残る: {}", trimmed.a.x);
+        assert!(eq_len(trimmed.b.x, 10.0), "交点で切れる: {}", trimmed.b.x);
+    }
+
+    /// 2 本の縦線に挟まれた中央をクリックすると、線分が 2 本に分断されること。
+    #[test]
+    fn trim_in_the_middle_splits_the_line_in_two() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "30,0");
+        draw_line(&mut s, &mut doc, "10,-5", "10,5");
+        draw_line(&mut s, &mut doc, "20,-5", "20,5");
+
+        feed(&mut s, &mut doc, "TR");
+        click(&mut s, &mut doc, 15.0, 0.0);
+        enter(&mut s, &mut doc);
+
+        assert_eq!(doc.entities().len(), 4, "横線 2 本 + 縦線 2 本");
+        let horizontals: Vec<_> = lines_sorted(&doc)
+            .into_iter()
+            .filter(|l| eq_len(l.a.y, 0.0) && eq_len(l.b.y, 0.0))
+            .collect();
+        assert_eq!(horizontals.len(), 2, "真ん中が抜けて 2 本になる");
+        assert!(eq_len(horizontals[0].b.x, 10.0));
+        assert!(eq_len(horizontals[1].a.x, 20.0));
+    }
+
+    /// TRIM は続けて何本でも切れること（`ApplyAndContinue`）。
+    #[test]
+    fn trim_keeps_running_until_enter() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "20,0");
+        draw_line(&mut s, &mut doc, "0,4", "20,4");
+        draw_line(&mut s, &mut doc, "10,-5", "10,9");
+
+        feed(&mut s, &mut doc, "TR");
+        click(&mut s, &mut doc, 15.0, 0.0);
+        assert!(s.has_active_tool(), "1 本切っても終わらない");
+        click(&mut s, &mut doc, 15.0, 4.0);
+        assert!(s.has_active_tool());
+        enter(&mut s, &mut doc);
+        assert!(!s.has_active_tool(), "Enter で終わる");
+
+        for l in lines_sorted(&doc).iter().filter(|l| eq_len(l.a.x, 0.0)) {
+            assert!(eq_len(l.b.x, 10.0), "2 本とも切れている: {}", l.b.x);
+        }
+    }
+
+    /// TRIM の Undo が元の 1 本に戻すこと。
+    #[test]
+    fn trim_undo_restores_the_original_line() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "20,0");
+        draw_line(&mut s, &mut doc, "10,-5", "10,5");
+        let before = lines_sorted(&doc);
+
+        feed(&mut s, &mut doc, "TR");
+        click(&mut s, &mut doc, 15.0, 0.0);
+        enter(&mut s, &mut doc);
+        feed(&mut s, &mut doc, "U");
+
+        assert_eq!(lines_sorted(&doc), before, "切る前の形に戻る");
+    }
+
+    /// 交点が無い図形をクリックしたらエラーを出し、図面は変わらないこと。
+    #[test]
+    fn trim_without_any_crossing_reports_an_error() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "20,0");
+        draw_line(&mut s, &mut doc, "0,5", "20,5");
+
+        feed(&mut s, &mut doc, "TR");
+        click(&mut s, &mut doc, 10.0, 0.0);
+
+        assert_eq!(doc.entities().len(), 2, "図面は変わらない");
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+    }
+
+    /// クリックした側の端が、交点まで伸びること。
+    #[test]
+    fn extend_grows_the_clicked_end_to_the_boundary() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "5,0");
+        draw_line(&mut s, &mut doc, "10,-5", "10,5");
+
+        feed(&mut s, &mut doc, "EX");
+        click(&mut s, &mut doc, 4.0, 0.0); // 終点側をクリック
+        enter(&mut s, &mut doc);
+
+        let grown = lines_sorted(&doc)[0];
+        assert!(eq_len(grown.a.x, 0.0), "始点は動かない: {}", grown.a.x);
+        assert!(eq_len(grown.b.x, 10.0), "境界まで伸びる: {}", grown.b.x);
+    }
+
+    /// 始点側をクリックしたら、そちら側が伸びること。
+    #[test]
+    fn extend_grows_the_start_end_when_clicked_near_it() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "10,0", "20,0");
+        draw_line(&mut s, &mut doc, "0,-5", "0,5");
+
+        feed(&mut s, &mut doc, "EX");
+        click(&mut s, &mut doc, 11.0, 0.0); // 始点側をクリック
+        enter(&mut s, &mut doc);
+
+        let grown = lines_sorted(&doc)[0];
+        assert!(eq_len(grown.a.x, 0.0), "始点が伸びる: {}", grown.a.x);
+        assert!(eq_len(grown.b.x, 20.0), "終点は動かない: {}", grown.b.x);
+    }
+
+    /// EXTEND の Undo が元の長さに戻すこと。
+    #[test]
+    fn extend_undo_restores_the_original_length() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "5,0");
+        draw_line(&mut s, &mut doc, "10,-5", "10,5");
+        let before = lines_sorted(&doc);
+
+        feed(&mut s, &mut doc, "EX");
+        click(&mut s, &mut doc, 4.0, 0.0);
+        enter(&mut s, &mut doc);
+        feed(&mut s, &mut doc, "U");
+
+        assert_eq!(lines_sorted(&doc), before, "伸ばす前に戻る");
+    }
+
+    /// 伸ばす先に何も無ければエラーを出し、図面は変わらないこと。
+    #[test]
+    fn extend_without_any_boundary_reports_an_error() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "5,0");
+        draw_line(&mut s, &mut doc, "0,5", "5,5");
+
+        feed(&mut s, &mut doc, "EX");
+        click(&mut s, &mut doc, 4.0, 0.0);
+
+        assert_eq!(lines_sorted(&doc)[0].b.x, 5.0, "図面は変わらない");
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+    }
+
+    /// 直角の角を丸めると、2 本が接点まで縮み、円弧が 1 つ増えること。
+    #[test]
+    fn fillet_shortens_both_lines_and_inserts_an_arc() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "10,0");
+        draw_line(&mut s, &mut doc, "0,0", "0,10");
+
+        feed(&mut s, &mut doc, "F");
+        feed(&mut s, &mut doc, "R"); // 半径を指定
+        feed(&mut s, &mut doc, "2");
+        click(&mut s, &mut doc, 8.0, 0.0);
+        click(&mut s, &mut doc, 0.0, 8.0);
+        enter(&mut s, &mut doc);
+
+        assert_eq!(type_names(&doc).len(), 3, "線分 2 本 + 円弧 1 つ");
+        let arcs: Vec<_> = doc
+            .entities()
+            .iter()
+            .filter_map(|(_, e)| match &e.geom {
+                cad_core::Geometry::Arc(a) => Some(*a),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(arcs.len(), 1, "円弧が 1 つできる");
+        assert!(eq_len(arcs[0].radius, 2.0), "半径 {}", arcs[0].radius);
+        // 半径 2 の角丸めなら、両線分は原点から 2 のところで止まる。
+        for l in lines_sorted(&doc) {
+            let near = if l.a.x.abs() + l.a.y.abs() < l.b.x.abs() + l.b.y.abs() {
+                l.a
+            } else {
+                l.b
+            };
+            assert!(
+                eq_len(near.x + near.y, 2.0),
+                "接点まで縮む: ({}, {})",
+                near.x,
+                near.y
+            );
+        }
+    }
+
+    /// 半径を指定していないと、既定値（10）が使われること。
+    ///
+    /// AutoCAD と同じく値はコマンドをまたいで残るので、既定値の存在自体を固定する。
+    #[test]
+    fn fillet_uses_the_remembered_radius() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "40,0");
+        draw_line(&mut s, &mut doc, "0,0", "0,40");
+
+        feed(&mut s, &mut doc, "F");
+        feed(&mut s, &mut doc, "R");
+        feed(&mut s, &mut doc, "5");
+        click(&mut s, &mut doc, 30.0, 0.0);
+        click(&mut s, &mut doc, 0.0, 30.0);
+        enter(&mut s, &mut doc);
+
+        // 半径を指定し直さずにもう一度。
+        draw_line(&mut s, &mut doc, "100,0", "140,0");
+        draw_line(&mut s, &mut doc, "100,0", "100,40");
+        feed(&mut s, &mut doc, "F");
+        click(&mut s, &mut doc, 130.0, 0.0);
+        click(&mut s, &mut doc, 100.0, 30.0);
+        enter(&mut s, &mut doc);
+
+        let radii: Vec<f64> = doc
+            .entities()
+            .iter()
+            .filter_map(|(_, e)| match &e.geom {
+                cad_core::Geometry::Arc(a) => Some(a.radius),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(radii.len(), 2, "角丸めが 2 か所");
+        assert!(
+            radii.iter().all(|r| eq_len(*r, 5.0)),
+            "前に指定した半径が残る: {radii:?}"
+        );
+    }
+
+    /// FILLET の Undo が線分 2 本の状態に戻すこと。
+    #[test]
+    fn fillet_undo_restores_both_lines_and_removes_the_arc() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "10,0");
+        draw_line(&mut s, &mut doc, "0,0", "0,10");
+        let before = lines_sorted(&doc);
+
+        feed(&mut s, &mut doc, "F");
+        feed(&mut s, &mut doc, "R");
+        feed(&mut s, &mut doc, "2");
+        click(&mut s, &mut doc, 8.0, 0.0);
+        click(&mut s, &mut doc, 0.0, 8.0);
+        enter(&mut s, &mut doc);
+        feed(&mut s, &mut doc, "U");
+
+        assert_eq!(doc.entities().len(), 2, "円弧が消える");
+        assert_eq!(lines_sorted(&doc), before, "線分が元の長さに戻る");
+    }
+
+    /// 面取りは、2 本を縮めて間に線分を 1 本入れること。
+    #[test]
+    fn chamfer_shortens_both_lines_and_inserts_a_line() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "10,0");
+        draw_line(&mut s, &mut doc, "0,0", "0,10");
+
+        feed(&mut s, &mut doc, "CHA");
+        feed(&mut s, &mut doc, "D"); // 距離を指定
+        feed(&mut s, &mut doc, "3"); // 1 本目
+        feed(&mut s, &mut doc, "3"); // 2 本目
+        click(&mut s, &mut doc, 8.0, 0.0);
+        click(&mut s, &mut doc, 0.0, 8.0);
+        enter(&mut s, &mut doc);
+
+        assert_eq!(doc.entities().len(), 3, "線分 2 本 + 面取り 1 本");
+        assert!(
+            type_names(&doc).iter().all(|n| *n == "LINE"),
+            "円弧はできない: {:?}",
+            type_names(&doc)
+        );
+        // (3, 0) と (0, 3) を結ぶ線分ができているはず。
+        let face = lines_sorted(&doc)
+            .into_iter()
+            .find(|l| eq_len(l.a.x + l.a.y, 3.0) && eq_len(l.b.x + l.b.y, 3.0));
+        assert!(face.is_some(), "面取りの線分が見つからない");
+    }
+
+    /// 距離を非対称にすると、それぞれの線分が別々の量だけ縮むこと。
+    #[test]
+    fn chamfer_honours_asymmetric_distances() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "10,0");
+        draw_line(&mut s, &mut doc, "0,0", "0,10");
+
+        feed(&mut s, &mut doc, "CHA");
+        feed(&mut s, &mut doc, "D");
+        feed(&mut s, &mut doc, "2"); // 1 本目（横線）
+        feed(&mut s, &mut doc, "4"); // 2 本目（縦線）
+        click(&mut s, &mut doc, 8.0, 0.0);
+        click(&mut s, &mut doc, 0.0, 8.0);
+        enter(&mut s, &mut doc);
+
+        let face = lines_sorted(&doc)
+            .into_iter()
+            .find(|l| !eq_len(l.a.x, l.b.x) && !eq_len(l.a.y, l.b.y))
+            .expect("面取りの線分があるはず");
+        // 横線側で 2、縦線側で 4 の位置を結ぶ。
+        let (on_x, on_y) = if eq_len(face.a.y, 0.0) {
+            (face.a, face.b)
+        } else {
+            (face.b, face.a)
+        };
+        assert!(eq_len(on_x.x, 2.0), "横線は 2 縮む: {}", on_x.x);
+        assert!(eq_len(on_y.y, 4.0), "縦線は 4 縮む: {}", on_y.y);
+    }
+
+    /// 交わらない 2 本を指定したらエラーになり、図面は変わらないこと。
+    #[test]
+    fn fillet_on_parallel_lines_reports_an_error() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "10,0");
+        draw_line(&mut s, &mut doc, "0,5", "10,5");
+
+        feed(&mut s, &mut doc, "F");
+        feed(&mut s, &mut doc, "R");
+        feed(&mut s, &mut doc, "1");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        click(&mut s, &mut doc, 5.0, 5.0);
+
+        assert_eq!(doc.entities().len(), 2, "図面は変わらない");
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+    }
+
+    /// 同じ線分を 2 回クリックしたら断られること。
+    #[test]
+    fn fillet_rejects_the_same_line_twice() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "10,0");
+        draw_line(&mut s, &mut doc, "0,0", "0,10");
+
+        feed(&mut s, &mut doc, "F");
+        click(&mut s, &mut doc, 8.0, 0.0);
+        click(&mut s, &mut doc, 4.0, 0.0); // 同じ線分
+
+        assert_eq!(doc.entities().len(), 2, "図面は変わらない");
+        assert!(s
+            .cmdline
+            .history()
+            .any(|l| l.text.contains("別の線分をクリック")));
+    }
+
+    /// 半径や距離に 0 以下を入れたら断られること。
+    #[test]
+    fn corner_values_must_be_positive() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "F");
+        feed(&mut s, &mut doc, "R");
+        feed(&mut s, &mut doc, "0");
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+
+        feed(&mut s, &mut doc, "-1");
+        assert!(s.has_active_tool(), "断られてもコマンドは続く");
     }
 }
