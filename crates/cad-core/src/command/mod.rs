@@ -5,6 +5,7 @@
 
 pub mod basic;
 pub mod edit_ctx;
+pub mod group_ops;
 pub mod layer_ops;
 pub mod stack;
 pub mod stretch;
@@ -12,6 +13,7 @@ pub mod transform;
 
 pub use basic::{AddEntities, DeleteEntities};
 pub use edit_ctx::EditCtx;
+pub use group_ops::{CreateGroup, ExplodeEntities, Ungroup};
 pub use layer_ops::{
     AddLayer, DeleteLayer, MoveEntitiesToLayer, RenameLayer, SetCurrentLayer, SetLayerProperties,
 };
