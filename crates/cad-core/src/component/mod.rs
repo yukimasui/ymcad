@@ -637,6 +637,65 @@ pub fn would_create_cycle(
     false
 }
 
+/// パラメータの既定値どうしが循環していないか調べる。
+///
+/// 循環していれば、その輪に含まれる名前を 1 つ返す。
+///
+/// **コマンドが宣言を受け取る前に必ず呼ぶ。** 循環したまま入れると
+/// [`Definition::param_env`] がそのパラメータを解決できず、
+/// 参照している束縛が黙って効かなくなる。
+#[must_use]
+pub fn param_cycle(params: &[ParamDecl]) -> Option<String> {
+    /// 探索の状態。
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        /// 未訪問。
+        White,
+        /// 探索中（ここへ戻ってきたら循環）。
+        Grey,
+        /// 探索済み。
+        Black,
+    }
+
+    let mut mark: BTreeMap<&str, Mark> = params
+        .iter()
+        .map(|p| (p.name.as_str(), Mark::White))
+        .collect();
+
+    // 明示的なスタックで深さ優先探索する（再帰だと深い依存でスタックを溢れさせる）。
+    for start in params {
+        if mark.get(start.name.as_str()) != Some(&Mark::White) {
+            continue;
+        }
+        let mut stack = vec![(start.name.as_str(), 0usize)];
+        while let Some((name, index)) = stack.pop() {
+            let Some(decl) = params.iter().find(|p| p.name == name) else {
+                continue;
+            };
+            let deps = decl.default.referenced_vars();
+
+            if index == 0 {
+                mark.insert(name, Mark::Grey);
+            }
+            if index >= deps.len() {
+                mark.insert(name, Mark::Black);
+                continue;
+            }
+
+            // 次の依存へ進む前に、自分を「続きから」戻す。
+            stack.push((name, index + 1));
+            let dep = deps[index];
+            match mark.get(dep) {
+                Some(Mark::Grey) => return Some(dep.to_owned()),
+                Some(Mark::White) => stack.push((dep, 0)),
+                // 探索済み、または宣言されていない名前（別のエラーで弾かれる）。
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 /// 定義の中で参照されている定義 ID を列挙する（重複あり）。
 #[must_use]
 pub fn referenced_definitions(def: &Definition) -> Vec<DefinitionId> {
