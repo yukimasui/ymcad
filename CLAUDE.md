@@ -23,6 +23,11 @@
    （`&mut Document` ではない）の 3 層で型強制している。
    **`Document` に `entities_mut` や `DerefMut` を生やさない**
 5. **model → screen 変換は `viewport.rs` の 1 箇所に集約。** 逆変換もペアで提供する
+6. **ファイル形式は 2 つで役割が分かれている。** `.ymc`（ネイティブ・無損失）が
+   保存形式、`.dxf`（R12・非可逆）は交換専用。**DXF を保存形式に戻さない。**
+   形式は**拡張子だけ**で決める（`crates/cad-app/src/file_ops.rs` の `is_dxf`）
+7. **`cad-core` の依存パッケージはゼロ。** 増やす前に必ずユーザーへ確認する
+   （wasm ビューアの道を守るため。詳細は ADR-0026）
 
 派生データ（ラバーバンド、空間インデックス、描画キャッシュ）は
 **`Document` に入れない**。`cad-app` 側に持ち、`Document::revision()` をキーに再構築する。
@@ -49,12 +54,21 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --workspace --release
 
-# DXF を書き出したら、Rust とは別ロジックで R12 構造を検査する
-python3 tools/validate_dxf_r12.py docs/sample.dxf
+# 書き出したファイルを Rust とは別ロジックで検査する（CI でも自動実行される）
+cargo run -p cad-core --example write_sample -- /tmp/sample.ymc
+python3 tools/validate_ymc.py /tmp/sample.ymc --verbose
+
+cargo run -p cad-core --example write_sample -- /tmp/sample.dxf
+python3 tools/validate_dxf_r12.py /tmp/sample.dxf
 ```
 
-ラウンドトリップテストは「自分で書いて自分で読む」ため、書き出しのバグを見逃す。
-`tools/validate_dxf_r12.py` はその盲点を埋めるためにある。
+ラウンドトリップテストは「自分で書いて自分で読む」ため、書き手と読み手が同じ誤解を
+していれば往復が成立してしまい、**書き出しのバグを見逃す**。
+`tools/` の検証スクリプトはその盲点を埋めるためにある。
+
+**バイナリ形式（`.ymc`）ではこの盲点がテキストより深い。** DXF なら保存した
+ファイルをエディタで開けば構造が目で見えるが、バイナリは開いても分からない。
+`validate_ymc.py` でいちばん効く検査は「**末尾でぴったり尽きること**」。
 
 ## ブランチ運用
 
@@ -83,8 +97,11 @@ Phase / Issue ごとの区切りを追える状態を保つ。
 ## 非スコープ
 
 `docs/ROADMAP.md` に列挙してある項目には着手しない
-（3D / OFFSET / TRIM / EXTEND / FILLET / CHAMFER / ハッチング / 寸法記入 /
-ブロック / 文字要素 / 印刷 / DWG / Windows・macOS / Web・wasm）。
+（3D / OFFSET / ハッチング / 寸法記入 / ブロック / 文字要素 / 印刷 / DWG /
+Windows・macOS / Web・wasm）。
+
+> TRIM / EXTEND / FILLET / CHAMFER は Issue #7 で**線分のみ**実装済み。
+> ポリラインの部分トリムと、円・円弧を含む角は残課題。
 
 **着手する必要が生じたら、勝手に始めずユーザーに確認する。**
 同じく次の変更も事前確認が必要:
@@ -92,3 +109,5 @@ Phase / Issue ごとの区切りを追える状態を保つ。
 - トレランス方針の変更
 - エンティティモデルの構造変更
 - 描画バックエンドの変更（egui Painter → wgpu）
+- **ファイル形式の変更**（`.ymc` の形式バージョンを上げる / DXF のバージョンを上げる）
+- **`cad-core` への依存パッケージの追加**

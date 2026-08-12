@@ -5,7 +5,7 @@
 ```
 ymcad/
 ├── crates/
-│   ├── cad-core/   ジオメトリ・エンティティ・コマンド・DXF（UI 非依存、f64 のみ）
+│   ├── cad-core/   ジオメトリ・エンティティ・コマンド・ファイル入出力（UI 非依存、f64 のみ）
 │   └── cad-app/    egui アプリケーション（入力処理・描画）
 └── spikes/
     └── ime-check/  Phase 0 の IME 検証用。ワークスペース外
