@@ -2344,4 +2344,125 @@ mod flow_tests {
             b.max.x
         );
     }
+
+    // ---- ラバーバンド（確定前のプレビュー） -------------------------------
+    //
+    // 2026-08-13 に「MOVE で確定前のプレビューが出ない」との報告を受けて追加。
+    // 描画そのものは目で見るしかないが、**`Session::preview` が図形を返すか**は
+    // ここで固定できる。返ってさえいれば、あとは描画経路の問題に絞り込める。
+
+    /// 線分 1 本を選択した状態を作る。
+    fn setup_one_line_selected() -> (Session, Document) {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "10,0");
+        let id = doc.entities().ids().next().expect("あるはず");
+        s.selection.insert(id);
+        (s, doc)
+    }
+
+    /// **MOVE の基点を指定したあと、プレビューが返ること。**
+    #[test]
+    fn move_returns_a_preview_after_the_base_point() {
+        let (mut s, mut doc) = setup_one_line_selected();
+
+        feed(&mut s, &mut doc, "M");
+        feed(&mut s, &mut doc, "0,0"); // 基点
+
+        let preview = s.preview(Some(Point2::new(5.0, 5.0)), &doc);
+        assert_eq!(preview.len(), 1, "選択 1 件ぶんのラバーバンドが返る");
+        let cad_core::Geometry::Line(l) = &preview[0] else {
+            panic!("線分のはず: {:?}", preview[0]);
+        };
+        assert!(
+            eq_len(l.a.x, 5.0) && eq_len(l.a.y, 5.0),
+            "カーソルまで動く: {:?}",
+            l.a
+        );
+    }
+
+    /// 基点を指定する前はプレビューが空であること（動かす量が決まらない）。
+    #[test]
+    fn move_has_no_preview_before_the_base_point() {
+        let (mut s, mut doc) = setup_one_line_selected();
+        feed(&mut s, &mut doc, "M");
+        assert!(s.preview(Some(Point2::new(5.0, 5.0)), &doc).is_empty());
+    }
+
+    /// カーソルが画面外なら空であること。
+    #[test]
+    fn no_preview_without_a_cursor() {
+        let (mut s, mut doc) = setup_one_line_selected();
+        feed(&mut s, &mut doc, "M");
+        feed(&mut s, &mut doc, "0,0");
+        assert!(s.preview(None, &doc).is_empty());
+    }
+
+    /// COPY / STRETCH / ROTATE / SCALE でもプレビューが返ること。
+    #[test]
+    fn transform_tools_return_a_preview() {
+        for (cmd, steps) in [
+            ("CO", vec!["0,0"]),
+            ("S", vec!["0,0"]),
+            ("RO", vec!["0,0"]),
+            ("SC", vec!["0,0"]),
+        ] {
+            let (mut s, mut doc) = setup_one_line_selected();
+            feed(&mut s, &mut doc, cmd);
+            for step in &steps {
+                feed(&mut s, &mut doc, step);
+            }
+            assert!(
+                !s.preview(Some(Point2::new(5.0, 5.0)), &doc).is_empty(),
+                "{cmd} でプレビューが返らない"
+            );
+        }
+    }
+
+    /// 作図コマンドでもプレビューが返ること。
+    #[test]
+    fn draw_tools_return_a_preview() {
+        for (cmd, steps) in [
+            ("L", vec!["0,0"]),
+            ("C", vec!["0,0"]),
+            ("REC", vec!["0,0"]),
+            ("PL", vec!["0,0"]),
+        ] {
+            let (mut s, mut doc) = setup();
+            feed(&mut s, &mut doc, cmd);
+            for step in &steps {
+                feed(&mut s, &mut doc, step);
+            }
+            assert!(
+                !s.preview(Some(Point2::new(5.0, 5.0)), &doc).is_empty(),
+                "{cmd} でプレビューが返らない"
+            );
+        }
+    }
+
+    /// **クリックで基点を置いた場合もプレビューが返ること。**
+    ///
+    /// 実際の操作はクリックなので、文字入力とは別に経路を押さえる
+    /// （`handle_click` は `wants_entity` の分岐を通るため、文字入力と経路が違う）。
+    #[test]
+    fn move_returns_a_preview_when_the_base_point_is_clicked() {
+        let (mut s, mut doc) = setup_one_line_selected();
+
+        feed(&mut s, &mut doc, "M");
+        click(&mut s, &mut doc, 0.0, 0.0); // 基点をクリックで置く
+
+        let preview = s.preview(Some(Point2::new(5.0, 5.0)), &doc);
+        assert_eq!(preview.len(), 1, "クリック経路でもラバーバンドが返る");
+    }
+
+    /// **オブジェクト選択を待っている間はプレビューを出さないこと。**
+    ///
+    /// 選択中にラバーバンドが出ると邪魔になる。
+    #[test]
+    fn no_preview_while_awaiting_selection() {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "10,0");
+        // 選択せずに MOVE を始めると、選択待ちになる。
+        feed(&mut s, &mut doc, "M");
+        assert!(s.preview(Some(Point2::new(5.0, 5.0)), &doc).is_empty());
+    }
 }
