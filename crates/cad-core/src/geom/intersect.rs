@@ -8,6 +8,7 @@ use super::arc::{Arc, Circle};
 use super::line::Line;
 use super::point::Point2;
 use super::tolerance::{eq_len, gt_len, is_zero_len, lt_len};
+use super::xline::Xline;
 
 /// パラメータ `t` が `[0, 1]` にトレランス込みで収まるか（線分・円弧の範囲判定用）。
 fn in_unit_range(t: f64) -> bool {
@@ -140,6 +141,78 @@ pub fn circle_arc(c: &Circle, a: &Arc) -> Vec<Point2> {
         .into_iter()
         .filter(|&p| a.contains_angle((p - a.center).angle()))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// 作図線（無限直線）との交点
+// ---------------------------------------------------------------------------
+//
+// 作図線は無限に伸びるので、相手側の範囲だけを見ればよい。
+// 実装は「作図線から十分な長さの線分を作って既存の関数へ渡す」形にはしない。
+// 十分な長さを決められないうえ、相手が遠方にあると届かないため。
+// 代わりに、作図線をパラメータ表現のまま扱う。
+
+/// 作図線と線分の交点。0 個または 1 個。
+///
+/// 線分の範囲内にある交点だけを返す。平行なら空。
+#[must_use]
+pub fn xline_line(x: &Xline, l: &Line) -> Vec<Point2> {
+    let d = l.vector();
+    let denom = x.direction.cross(d);
+    if is_zero_len(denom) {
+        return Vec::new();
+    }
+    // x.origin + s * x.direction == l.a + u * d を解く。線分側の u だけ範囲を見る。
+    let diff = l.a - x.origin;
+    let u = diff.cross(x.direction) / denom;
+    if in_unit_range(u) {
+        vec![l.point_at(u)]
+    } else {
+        Vec::new()
+    }
+}
+
+/// 作図線と円の交点。0〜2 個。接する場合は 1 個。
+#[must_use]
+pub fn xline_circle(x: &Xline, c: &Circle) -> Vec<Point2> {
+    // 中心から直線への垂線の足を基準に、半弦長を求める。
+    let foot = x.closest_point(c.center);
+    let dist = c.center.dist(foot);
+    if gt_len(dist, c.radius) {
+        return Vec::new();
+    }
+    if eq_len(dist, c.radius) {
+        return vec![foot];
+    }
+    let half_chord = (c.radius * c.radius - dist * dist).max(0.0).sqrt();
+    if is_zero_len(half_chord) {
+        return vec![foot];
+    }
+    vec![
+        foot + x.direction * half_chord,
+        foot - x.direction * half_chord,
+    ]
+}
+
+/// 作図線と円弧の交点。円弧の掃引範囲にある交点だけを返す。
+#[must_use]
+pub fn xline_arc(x: &Xline, a: &Arc) -> Vec<Point2> {
+    let circle = Circle::new(a.center, a.radius);
+    xline_circle(x, &circle)
+        .into_iter()
+        .filter(|p| a.contains_angle((*p - a.center).angle()))
+        .collect()
+}
+
+/// 作図線同士の交点。0 個または 1 個。平行なら空。
+#[must_use]
+pub fn xline_xline(a: &Xline, b: &Xline) -> Vec<Point2> {
+    let denom = a.direction.cross(b.direction);
+    if is_zero_len(denom) {
+        return Vec::new();
+    }
+    let s = (b.origin - a.origin).cross(b.direction) / denom;
+    vec![a.point_at(s)]
 }
 
 #[cfg(test)]
@@ -331,5 +404,108 @@ mod tests {
         let c2 = Circle::new(Point2::ORIGIN, 0.000_000_1);
         let pts2 = line_circle(&a2, &c2);
         assert_eq!(pts2.len(), 2);
+    }
+
+    // ---- 作図線との交点 ----
+
+    fn xl(ox: f64, oy: f64, dx: f64, dy: f64) -> Xline {
+        Xline::new(Point2::new(ox, oy), crate::geom::Vec2::new(dx, dy)).unwrap()
+    }
+
+    #[test]
+    fn xline_crosses_a_segment_within_its_extent() {
+        let x = xl(0.0, 0.0, 0.0, 1.0); // Y 軸
+        let l = Line::new(Point2::new(-5.0, 3.0), Point2::new(5.0, 3.0));
+        let hits = xline_line(&x, &l);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].eq_tol(Point2::new(0.0, 3.0)), "{:?}", hits[0]);
+    }
+
+    /// 線分の範囲外で交わる場合は拾わないこと（作図線は無限でも相手は有限）。
+    #[test]
+    fn xline_misses_a_segment_that_ends_before_it() {
+        let x = xl(0.0, 0.0, 0.0, 1.0);
+        let l = Line::new(Point2::new(2.0, 3.0), Point2::new(5.0, 3.0));
+        assert!(xline_line(&x, &l).is_empty());
+    }
+
+    #[test]
+    fn xline_parallel_to_a_segment_yields_nothing() {
+        let x = xl(0.0, 0.0, 1.0, 0.0);
+        let l = Line::new(Point2::new(-5.0, 3.0), Point2::new(5.0, 3.0));
+        assert!(xline_line(&x, &l).is_empty());
+    }
+
+    /// 作図線は無限なので、線分がはるか遠くにあっても交点を拾えること。
+    #[test]
+    fn xline_reaches_a_far_away_segment() {
+        let x = xl(0.0, 0.0, 1.0, 0.0);
+        let l = Line::new(Point2::new(1e6, -5.0), Point2::new(1e6, 5.0));
+        let hits = xline_line(&x, &l);
+        assert_eq!(hits.len(), 1);
+        assert!(eq_len(hits[0].x, 1e6), "{:?}", hits[0]);
+    }
+
+    #[test]
+    fn xline_crosses_a_circle_at_two_points() {
+        let x = xl(0.0, 0.0, 1.0, 0.0);
+        let c = Circle::new(Point2::ORIGIN, 5.0);
+        let hits = xline_circle(&x, &c);
+        assert_eq!(hits.len(), 2);
+        let xs: Vec<f64> = hits.iter().map(|p| p.x).collect();
+        assert!(xs.iter().any(|v| eq_len(*v, 5.0)));
+        assert!(xs.iter().any(|v| eq_len(*v, -5.0)));
+    }
+
+    #[test]
+    fn xline_tangent_to_a_circle_yields_one_point() {
+        let x = xl(0.0, 5.0, 1.0, 0.0);
+        let c = Circle::new(Point2::ORIGIN, 5.0);
+        let hits = xline_circle(&x, &c);
+        assert_eq!(hits.len(), 1, "接するので 1 点だけ: {hits:?}");
+        assert!(hits[0].eq_tol(Point2::new(0.0, 5.0)));
+    }
+
+    #[test]
+    fn xline_missing_a_circle_yields_nothing() {
+        let x = xl(0.0, 10.0, 1.0, 0.0);
+        assert!(xline_circle(&x, &Circle::new(Point2::ORIGIN, 5.0)).is_empty());
+    }
+
+    /// 円弧では掃引の外にある交点を落とすこと。
+    #[test]
+    fn xline_arc_keeps_only_points_within_the_sweep() {
+        use std::f64::consts::PI;
+        // 上半円だけの円弧。
+        let a = Arc::new(Point2::ORIGIN, 5.0, 0.0, PI);
+        let x = xl(0.0, 0.0, 1.0, 0.0); // X 軸: 円とは (5,0) と (-5,0) で交わる
+        let hits = xline_arc(&x, &a);
+        // 端点はどちらも掃引に含まれる。
+        assert_eq!(hits.len(), 2, "{hits:?}");
+
+        // Y 軸は上半円の頂点だけで交わる。
+        let y = xl(0.0, 0.0, 0.0, 1.0);
+        let hits = xline_arc(&y, &a);
+        assert_eq!(hits.len(), 1, "{hits:?}");
+        assert!(hits[0].eq_tol(Point2::new(0.0, 5.0)));
+    }
+
+    #[test]
+    fn two_xlines_cross_once() {
+        let a = xl(0.0, 0.0, 1.0, 0.0);
+        let b = xl(3.0, 0.0, 0.0, 1.0);
+        let hits = xline_xline(&a, &b);
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].eq_tol(Point2::new(3.0, 0.0)), "{:?}", hits[0]);
+    }
+
+    #[test]
+    fn parallel_xlines_yield_nothing() {
+        let a = xl(0.0, 0.0, 1.0, 0.0);
+        let b = xl(0.0, 5.0, 1.0, 0.0);
+        assert!(xline_xline(&a, &b).is_empty());
+        // 完全に重なっていても、無限個の交点は表現できないので空。
+        let c = xl(10.0, 0.0, 1.0, 0.0);
+        assert!(xline_xline(&a, &c).is_empty());
     }
 }

@@ -17,6 +17,7 @@ pub mod dxf;
 pub mod entity;
 pub mod error;
 pub mod geom;
+pub mod group;
 pub mod layer;
 pub mod snap;
 
@@ -24,4 +25,5 @@ pub use command::{Command, EditCtx, UndoStack};
 pub use document::Document;
 pub use entity::{Entity, EntityId, EntityStore, Geometry};
 pub use error::{CadError, Result};
+pub use group::{Group, GroupId, GroupTable};
 pub use layer::{AciColor, ColorSpec, Layer, LayerId, LayerTable};

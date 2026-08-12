@@ -8,6 +8,7 @@ use crate::command::{Command, EditCtx, UndoStack};
 use crate::entity::EntityStore;
 use crate::error::Result;
 use crate::geom::Aabb;
+use crate::group::GroupTable;
 use crate::layer::LayerTable;
 
 /// 1 つの図面。
@@ -21,6 +22,7 @@ use crate::layer::LayerTable;
 pub struct Document {
     entities: EntityStore,
     layers: LayerTable,
+    groups: GroupTable,
     history: UndoStack,
     revision: u64,
     dirty: bool,
@@ -40,6 +42,7 @@ impl Document {
         Self {
             entities: EntityStore::new(),
             layers: LayerTable::new(),
+            groups: GroupTable::new(),
             history: UndoStack::default(),
             revision: 0,
             dirty: false,
@@ -59,6 +62,12 @@ impl Document {
     #[must_use]
     pub fn layers(&self) -> &LayerTable {
         &self.layers
+    }
+
+    /// グループ。
+    #[must_use]
+    pub fn groups(&self) -> &GroupTable {
+        &self.groups
     }
 
     /// Undo 履歴。
@@ -105,7 +114,7 @@ impl Document {
     /// コマンドの `execute` が失敗した場合。
     pub fn apply(&mut self, mut command: Box<dyn Command>) -> Result<()> {
         {
-            let mut ctx = EditCtx::new(&mut self.entities, &mut self.layers);
+            let mut ctx = EditCtx::new(&mut self.entities, &mut self.layers, &mut self.groups);
             command.execute(&mut ctx)?;
         }
         self.history.push(command);
@@ -125,7 +134,7 @@ impl Document {
         let name = command.name();
 
         let result = {
-            let mut ctx = EditCtx::new(&mut self.entities, &mut self.layers);
+            let mut ctx = EditCtx::new(&mut self.entities, &mut self.layers, &mut self.groups);
             command.undo(&mut ctx)
         };
 
@@ -155,7 +164,7 @@ impl Document {
         let name = command.name();
 
         let result = {
-            let mut ctx = EditCtx::new(&mut self.entities, &mut self.layers);
+            let mut ctx = EditCtx::new(&mut self.entities, &mut self.layers, &mut self.groups);
             command.execute(&mut ctx)
         };
 

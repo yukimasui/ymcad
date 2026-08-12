@@ -189,6 +189,12 @@ pub static COMMANDS: &[CommandSpec] = &[
         kind: CommandKind::Tool(|| Box::new(draw::PolylineTool::default())),
     },
     CommandSpec {
+        name: "XLINE",
+        aliases: &["XL"],
+        summary: "無限長の作図線",
+        kind: CommandKind::Tool(|| Box::new(draw::XlineTool::default())),
+    },
+    CommandSpec {
         name: "ERASE",
         aliases: &["E", "DEL"],
         summary: "選択オブジェクトの削除",
@@ -229,6 +235,24 @@ pub static COMMANDS: &[CommandSpec] = &[
         aliases: &["MI"],
         summary: "鏡像（対称軸の2点）",
         kind: CommandKind::Tool(|| Box::new(edit::MirrorTool::default())),
+    },
+    CommandSpec {
+        name: "GROUP",
+        aliases: &["G"],
+        summary: "選択をグループ化",
+        kind: CommandKind::Tool(|| Box::new(edit::GroupTool::default())),
+    },
+    CommandSpec {
+        name: "UNGROUP",
+        aliases: &["UNG"],
+        summary: "グループを解除",
+        kind: CommandKind::Tool(|| Box::new(edit::UngroupTool)),
+    },
+    CommandSpec {
+        name: "EXPLODE",
+        aliases: &["X"],
+        summary: "ポリラインを線分へ分解",
+        kind: CommandKind::Tool(|| Box::new(edit::ExplodeTool)),
     },
     CommandSpec {
         name: "ZOOM",

@@ -525,6 +525,7 @@ mod tests {
     use crate::error::CadError;
     use crate::geom::tolerance::eq_len;
     use crate::geom::{Line, Point2};
+    use crate::group::GroupTable;
     use crate::layer::{LayerId, LayerTable};
     use std::f64::consts::FRAC_PI_2;
 
@@ -565,17 +566,17 @@ mod tests {
 
     /// テスト用の `EntityStore` / `LayerTable` の組。`EditCtx` はこの 2 つの
     /// `&mut` からしか作れない。
-    fn new_parts() -> (EntityStore, LayerTable) {
-        (EntityStore::new(), LayerTable::new())
+    fn new_parts() -> (EntityStore, LayerTable, GroupTable) {
+        (EntityStore::new(), LayerTable::new(), GroupTable::new())
     }
 
     #[test]
     fn move_execute_translates_and_keeps_id() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(1.0));
 
         let mut cmd = MoveEntities::new("MOVE", vec![id], Vec2::new(5.0, 0.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
         cmd.execute(&mut ctx).unwrap();
 
         let e = ctx.entities().get(id).expect("同じ ID で見つかるはず");
@@ -584,9 +585,9 @@ mod tests {
 
     #[test]
     fn move_undo_restores_original_position_and_id() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = MoveEntities::new("MOVE", vec![id], Vec2::new(5.0, 0.0));
         cmd.execute(&mut ctx).unwrap();
@@ -598,9 +599,9 @@ mod tests {
 
     #[test]
     fn move_redo_after_undo_translates_again() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = MoveEntities::new("MOVE", vec![id], Vec2::new(5.0, 0.0));
         cmd.execute(&mut ctx).unwrap();
@@ -613,13 +614,13 @@ mod tests {
 
     #[test]
     fn move_missing_target_fails_and_leaves_document_unchanged() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let survivor = entities.insert(line_entity(1.0));
         let doomed = entities.insert(line_entity(2.0));
         entities.remove(doomed).unwrap();
 
         let mut cmd = MoveEntities::new("MOVE", vec![survivor, doomed], Vec2::new(100.0, 0.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
         let result = cmd.execute(&mut ctx);
 
         assert_eq!(result, Err(CadError::EntityNotFound));
@@ -629,9 +630,9 @@ mod tests {
 
     #[test]
     fn move_large_coordinates() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(1e6));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = MoveEntities::new("MOVE", vec![id], Vec2::new(1e6, 0.0));
         cmd.execute(&mut ctx).unwrap();
@@ -643,10 +644,10 @@ mod tests {
 
     #[test]
     fn copy_execute_creates_offset_entities() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
         let b = entities.insert(line_entity(2.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = CopyEntities::new("COPY", vec![a, b], Vec2::new(10.0, 0.0));
         assert!(cmd.created().is_empty(), "適用前は空のはず");
@@ -658,9 +659,9 @@ mod tests {
 
     #[test]
     fn copy_created_ids_are_offset_and_originals_untouched() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = CopyEntities::new("COPY", vec![a], Vec2::new(10.0, 0.0));
         cmd.execute(&mut ctx).unwrap();
@@ -676,9 +677,9 @@ mod tests {
 
     #[test]
     fn copy_undo_removes_exactly_created_and_keeps_originals() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = CopyEntities::new("COPY", vec![a], Vec2::new(10.0, 0.0));
         cmd.execute(&mut ctx).unwrap();
@@ -692,9 +693,9 @@ mod tests {
 
     #[test]
     fn copy_execute_undo_execute_redo_path_works() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = CopyEntities::new("COPY", vec![a], Vec2::new(10.0, 0.0));
         cmd.execute(&mut ctx).unwrap();
@@ -714,11 +715,11 @@ mod tests {
 
     #[test]
     fn copy_missing_source_fails_and_creates_nothing() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
         let doomed = entities.insert(line_entity(2.0));
         entities.remove(doomed).unwrap();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = CopyEntities::new("COPY", vec![a, doomed], Vec2::new(10.0, 0.0));
         let result = cmd.execute(&mut ctx);
@@ -730,9 +731,9 @@ mod tests {
 
     #[test]
     fn copy_large_coordinates() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1e6));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = CopyEntities::new("COPY", vec![a], Vec2::new(1e6, 0.0));
         cmd.execute(&mut ctx).unwrap();
@@ -746,11 +747,11 @@ mod tests {
 
     #[test]
     fn rotate_execute_rotates_and_keeps_id() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(1.0));
 
         let mut cmd = RotateEntities::new("ROTATE", vec![id], Point2::new(0.0, 0.0), FRAC_PI_2);
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
         cmd.execute(&mut ctx).unwrap();
 
         let e = ctx.entities().get(id).expect("同じ ID で見つかるはず");
@@ -759,9 +760,9 @@ mod tests {
 
     #[test]
     fn rotate_undo_restores_original_position_and_id() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = RotateEntities::new("ROTATE", vec![id], Point2::new(0.0, 0.0), FRAC_PI_2);
         cmd.execute(&mut ctx).unwrap();
@@ -773,9 +774,9 @@ mod tests {
 
     #[test]
     fn rotate_redo_after_undo_rotates_again() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = RotateEntities::new("ROTATE", vec![id], Point2::new(0.0, 0.0), FRAC_PI_2);
         cmd.execute(&mut ctx).unwrap();
@@ -788,7 +789,7 @@ mod tests {
 
     #[test]
     fn rotate_missing_target_fails_and_leaves_document_unchanged() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let survivor = entities.insert(line_entity(1.0));
         let doomed = entities.insert(line_entity(2.0));
         entities.remove(doomed).unwrap();
@@ -799,7 +800,7 @@ mod tests {
             Point2::new(0.0, 0.0),
             FRAC_PI_2,
         );
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
         let result = cmd.execute(&mut ctx);
 
         assert_eq!(result, Err(CadError::EntityNotFound));
@@ -809,9 +810,9 @@ mod tests {
 
     #[test]
     fn rotate_large_coordinates() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(1e6));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = RotateEntities::new("ROTATE", vec![id], Point2::new(0.0, 0.0), FRAC_PI_2);
         cmd.execute(&mut ctx).unwrap();
@@ -825,9 +826,9 @@ mod tests {
 
     #[test]
     fn rotate_copy_execute_creates_rotated_entities() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = RotateCopyEntities::new("ROTATE", vec![a], Point2::new(0.0, 0.0), FRAC_PI_2);
         assert!(cmd.created().is_empty(), "適用前は空のはず");
@@ -846,9 +847,9 @@ mod tests {
 
     #[test]
     fn rotate_copy_leaves_sources_untouched() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = RotateCopyEntities::new("ROTATE", vec![a], Point2::new(0.0, 0.0), FRAC_PI_2);
         cmd.execute(&mut ctx).unwrap();
@@ -858,9 +859,9 @@ mod tests {
 
     #[test]
     fn rotate_copy_undo_removes_exactly_created_and_keeps_originals() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = RotateCopyEntities::new("ROTATE", vec![a], Point2::new(0.0, 0.0), FRAC_PI_2);
         cmd.execute(&mut ctx).unwrap();
@@ -874,9 +875,9 @@ mod tests {
 
     #[test]
     fn rotate_copy_redo_after_undo_creates_again() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = RotateCopyEntities::new("ROTATE", vec![a], Point2::new(0.0, 0.0), FRAC_PI_2);
         cmd.execute(&mut ctx).unwrap();
@@ -893,11 +894,11 @@ mod tests {
 
     #[test]
     fn rotate_copy_missing_source_fails_and_creates_nothing() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
         let doomed = entities.insert(line_entity(2.0));
         entities.remove(doomed).unwrap();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd =
             RotateCopyEntities::new("ROTATE", vec![a, doomed], Point2::new(0.0, 0.0), FRAC_PI_2);
@@ -910,9 +911,9 @@ mod tests {
 
     #[test]
     fn rotate_copy_large_coordinates() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1e6));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = RotateCopyEntities::new("ROTATE", vec![a], Point2::new(0.0, 0.0), FRAC_PI_2);
         cmd.execute(&mut ctx).unwrap();
@@ -930,11 +931,11 @@ mod tests {
 
     #[test]
     fn scale_execute_scales_and_keeps_id() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(2.0));
 
         let mut cmd = ScaleEntities::new("SCALE", vec![id], Point2::new(0.0, 0.0), 3.0);
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
         cmd.execute(&mut ctx).unwrap();
 
         let e = ctx.entities().get(id).expect("同じ ID で見つかるはず");
@@ -943,9 +944,9 @@ mod tests {
 
     #[test]
     fn scale_undo_restores_original_position_and_id() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(2.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = ScaleEntities::new("SCALE", vec![id], Point2::new(0.0, 0.0), 3.0);
         cmd.execute(&mut ctx).unwrap();
@@ -957,9 +958,9 @@ mod tests {
 
     #[test]
     fn scale_redo_after_undo_scales_again() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(2.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = ScaleEntities::new("SCALE", vec![id], Point2::new(0.0, 0.0), 3.0);
         cmd.execute(&mut ctx).unwrap();
@@ -972,14 +973,14 @@ mod tests {
 
     #[test]
     fn scale_missing_target_fails_and_leaves_document_unchanged() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let survivor = entities.insert(line_entity(2.0));
         let doomed = entities.insert(line_entity(3.0));
         entities.remove(doomed).unwrap();
 
         let mut cmd =
             ScaleEntities::new("SCALE", vec![survivor, doomed], Point2::new(0.0, 0.0), 3.0);
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
         let result = cmd.execute(&mut ctx);
 
         assert_eq!(result, Err(CadError::EntityNotFound));
@@ -989,9 +990,9 @@ mod tests {
 
     #[test]
     fn scale_large_coordinates() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(1e6));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = ScaleEntities::new("SCALE", vec![id], Point2::new(0.0, 0.0), 2.0);
         cmd.execute(&mut ctx).unwrap();
@@ -1005,9 +1006,9 @@ mod tests {
 
     #[test]
     fn scale_copy_execute_creates_scaled_entities() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(2.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = ScaleCopyEntities::new("SCALE", vec![a], Point2::new(0.0, 0.0), 3.0);
         assert!(cmd.created().is_empty(), "適用前は空のはず");
@@ -1026,9 +1027,9 @@ mod tests {
 
     #[test]
     fn scale_copy_leaves_sources_untouched() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(2.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = ScaleCopyEntities::new("SCALE", vec![a], Point2::new(0.0, 0.0), 3.0);
         cmd.execute(&mut ctx).unwrap();
@@ -1038,9 +1039,9 @@ mod tests {
 
     #[test]
     fn scale_copy_undo_removes_exactly_created_and_keeps_originals() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(2.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = ScaleCopyEntities::new("SCALE", vec![a], Point2::new(0.0, 0.0), 3.0);
         cmd.execute(&mut ctx).unwrap();
@@ -1054,9 +1055,9 @@ mod tests {
 
     #[test]
     fn scale_copy_redo_after_undo_creates_again() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(2.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = ScaleCopyEntities::new("SCALE", vec![a], Point2::new(0.0, 0.0), 3.0);
         cmd.execute(&mut ctx).unwrap();
@@ -1073,11 +1074,11 @@ mod tests {
 
     #[test]
     fn scale_copy_missing_source_fails_and_creates_nothing() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(2.0));
         let doomed = entities.insert(line_entity(3.0));
         entities.remove(doomed).unwrap();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = ScaleCopyEntities::new("SCALE", vec![a, doomed], Point2::new(0.0, 0.0), 3.0);
         let result = cmd.execute(&mut ctx);
@@ -1089,9 +1090,9 @@ mod tests {
 
     #[test]
     fn scale_copy_large_coordinates() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1e6));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = ScaleCopyEntities::new("SCALE", vec![a], Point2::new(0.0, 0.0), 2.0);
         cmd.execute(&mut ctx).unwrap();
@@ -1109,11 +1110,11 @@ mod tests {
 
     #[test]
     fn mirror_execute_mirrors_and_keeps_id() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(2.0));
 
         let mut cmd = MirrorEntities::new("MIRROR", vec![id], x_axis());
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
         cmd.execute(&mut ctx).unwrap();
 
         let e = ctx.entities().get(id).expect("同じ ID で見つかるはず");
@@ -1122,9 +1123,9 @@ mod tests {
 
     #[test]
     fn mirror_undo_restores_original_position_and_id() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(2.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = MirrorEntities::new("MIRROR", vec![id], x_axis());
         cmd.execute(&mut ctx).unwrap();
@@ -1136,9 +1137,9 @@ mod tests {
 
     #[test]
     fn mirror_redo_after_undo_mirrors_again() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(2.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = MirrorEntities::new("MIRROR", vec![id], x_axis());
         cmd.execute(&mut ctx).unwrap();
@@ -1151,13 +1152,13 @@ mod tests {
 
     #[test]
     fn mirror_missing_target_fails_and_leaves_document_unchanged() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let survivor = entities.insert(line_entity(2.0));
         let doomed = entities.insert(line_entity(3.0));
         entities.remove(doomed).unwrap();
 
         let mut cmd = MirrorEntities::new("MIRROR", vec![survivor, doomed], x_axis());
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
         let result = cmd.execute(&mut ctx);
 
         assert_eq!(result, Err(CadError::EntityNotFound));
@@ -1167,9 +1168,9 @@ mod tests {
 
     #[test]
     fn mirror_large_coordinates() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let id = entities.insert(line_entity(1e6));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = MirrorEntities::new("MIRROR", vec![id], x_axis());
         cmd.execute(&mut ctx).unwrap();
@@ -1183,9 +1184,9 @@ mod tests {
 
     #[test]
     fn mirror_copy_execute_creates_mirrored_entities() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = MirrorCopyEntities::new("MIRROR", vec![a], x_axis());
         assert!(cmd.created().is_empty(), "適用前は空のはず");
@@ -1204,9 +1205,9 @@ mod tests {
 
     #[test]
     fn mirror_copy_leaves_sources_untouched() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = MirrorCopyEntities::new("MIRROR", vec![a], x_axis());
         cmd.execute(&mut ctx).unwrap();
@@ -1216,9 +1217,9 @@ mod tests {
 
     #[test]
     fn mirror_copy_undo_removes_exactly_created_and_keeps_originals() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = MirrorCopyEntities::new("MIRROR", vec![a], x_axis());
         cmd.execute(&mut ctx).unwrap();
@@ -1232,9 +1233,9 @@ mod tests {
 
     #[test]
     fn mirror_copy_redo_after_undo_creates_again() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = MirrorCopyEntities::new("MIRROR", vec![a], x_axis());
         cmd.execute(&mut ctx).unwrap();
@@ -1251,11 +1252,11 @@ mod tests {
 
     #[test]
     fn mirror_copy_missing_source_fails_and_creates_nothing() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1.0));
         let doomed = entities.insert(line_entity(2.0));
         entities.remove(doomed).unwrap();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = MirrorCopyEntities::new("MIRROR", vec![a, doomed], x_axis());
         let result = cmd.execute(&mut ctx);
@@ -1267,9 +1268,9 @@ mod tests {
 
     #[test]
     fn mirror_copy_large_coordinates() {
-        let (mut entities, mut layers) = new_parts();
+        let (mut entities, mut layers, mut groups) = new_parts();
         let a = entities.insert(line_entity(1e6));
-        let mut ctx = EditCtx::new(&mut entities, &mut layers);
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
 
         let mut cmd = MirrorCopyEntities::new("MIRROR", vec![a], x_axis());
         cmd.execute(&mut ctx).unwrap();

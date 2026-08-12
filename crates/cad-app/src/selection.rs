@@ -121,6 +121,24 @@ pub fn pick_at(doc: &Document, pos: Point2, tolerance: f64) -> Option<EntityId> 
     best.map(|(id, _)| id)
 }
 
+/// `id` と同じグループに属する要素をすべて返す（自分自身を含む）。
+///
+/// グループに属していなければ自分だけ。
+///
+/// AutoCAD の既定と同じく、**グループの一員を選ぶと全体が選ばれる**。
+/// 所属はエンティティ側が持っているので、走査して求める。
+#[must_use]
+pub fn expand_to_group(doc: &Document, id: EntityId) -> Vec<EntityId> {
+    let Some(group) = doc.entities().get(id).and_then(|e| e.group) else {
+        return vec![id];
+    };
+    doc.entities()
+        .iter()
+        .filter(|(_, e)| e.group == Some(group))
+        .map(|(other, _)| other)
+        .collect()
+}
+
 /// 矩形に掛かるエンティティを集める。
 #[must_use]
 pub fn pick_in_rect(doc: &Document, rect: Aabb, mode: WindowMode) -> Vec<EntityId> {
@@ -186,6 +204,7 @@ fn intersections(edge: &Line, geom: &Geometry) -> Vec<Point2> {
         Geometry::Line(l) => intersect::line_line(edge, l),
         Geometry::Circle(c) => intersect::line_circle(edge, c),
         Geometry::Arc(a) => intersect::line_arc(edge, a),
+        Geometry::Xline(x) => intersect::xline_line(x, edge),
         Geometry::Polyline(p) => p
             .segments()
             .flat_map(|seg| intersect::line_line(edge, &seg))
