@@ -1060,4 +1060,32 @@ mod flow_tests {
         s.cancel();
         assert!(s.crossing_rects.is_empty(), "Esc で範囲も捨てる");
     }
+
+    /// 短縮入力がコマンド起動まで届くこと（Issue #5）。
+    ///
+    /// `CommandLine` が候補を解決して正式名を渡すので、`Session` から見ると
+    /// 「LINE が来た」のと同じになる。ここではその正式名で起動できることを確かめる。
+    #[test]
+    fn canonical_name_from_a_suggestion_starts_the_tool() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "LINE");
+        assert!(s.has_active_tool());
+        assert_eq!(s.prompt(), tools::create("LINE").unwrap().prompt());
+    }
+
+    /// エイリアス 1 文字でも起動できること。
+    /// 候補が未選択でも先頭が実行される仕組みと合わせて、`L` + Enter で LINE が始まる。
+    #[test]
+    fn single_letter_alias_starts_the_tool() {
+        for (alias, expected) in [("L", "LINE"), ("C", "CIRCLE"), ("S", "STRETCH")] {
+            let (mut s, mut doc) = setup();
+            feed(&mut s, &mut doc, alias);
+            assert!(s.has_active_tool(), "{alias} でツールが起動しない");
+            assert_eq!(
+                s.cmdline.last_command(),
+                Some(expected),
+                "{alias} は {expected} を起動するはず"
+            );
+        }
+    }
 }

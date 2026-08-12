@@ -62,10 +62,11 @@ pub enum Submission {
 #[derive(Debug, Default)]
 struct Suggestions {
     items: Vec<&'static CommandSpec>,
-    /// 明示的に選ばれている候補。`None` なら未選択。
+    /// `↑` `↓` で明示的に選ばれている候補。`None` なら未選択。
     ///
-    /// 未選択のときに `Enter` を押すと、候補ではなく入力文字列がそのまま確定される。
-    /// 「打った通りに実行される」のが既定で、候補選択は明示的な操作にする。
+    /// 未選択でも `Enter` は候補を実行する（[`Self::effective_index`] 参照）。
+    /// これは選択の由来を区別するためだけの状態で、
+    /// 「実行されるのはどれか」とは別物。
     selected: Option<usize>,
 }
 
@@ -114,15 +115,42 @@ impl Suggestions {
         };
     }
 
-    /// 明示的に選ばれている候補の名前。
-    fn selected_name(&self) -> Option<String> {
-        self.items.get(self.selected?).map(|c| c.name.to_owned())
+    /// `Enter` で実際に実行される候補の位置。
+    ///
+    /// 優先順位:
+    ///
+    /// 1. `↑` `↓` で明示的に選ばれていればそれ
+    /// 2. 入力と完全一致する候補があればそれ
+    /// 3. どちらでもなければ先頭候補
+    ///
+    /// **2 を挟むのが肝。** 候補の並び順は「エイリアス完全一致 → 名前の先頭一致 → …」
+    /// なので今は 3 でも同じ結果になるが、`COMMANDS` の並びを変えた瞬間に壊れる。
+    /// 完全一致を明示的に優先しておけば並び順に依存しない。
+    fn effective_index(&self, input: &str) -> Option<usize> {
+        if self.items.is_empty() {
+            return None;
+        }
+        if let Some(index) = self.selected {
+            return Some(index);
+        }
+        let upper = input.trim().to_uppercase();
+        let exact = self
+            .items
+            .iter()
+            .position(|c| c.name == upper || c.aliases.contains(&upper.as_str()));
+        Some(exact.unwrap_or(0))
     }
 
-    /// `Tab` で補完する名前。未選択なら先頭候補。
-    fn completion(&self) -> Option<String> {
-        let index = self.selected.unwrap_or(0);
-        self.items.get(index).map(|c| c.name.to_owned())
+    /// `Enter` で実際に実行される候補の名前。
+    fn effective_name(&self, input: &str) -> Option<String> {
+        self.items
+            .get(self.effective_index(input)?)
+            .map(|c| c.name.to_owned())
+    }
+
+    /// `Tab` で補完する名前。実行される候補と同じものを入れる。
+    fn completion(&self, input: &str) -> Option<String> {
+        self.effective_name(input)
     }
 }
 
@@ -268,10 +296,11 @@ impl CommandLine {
                 Submission::Cancel
             }
             Some(Submission::Text(_)) => {
-                // 候補が明示的に選ばれていれば、入力文字列ではなくその名前を確定する。
+                // 候補が出ていればそれを実行する。候補が無いときだけ入力文字列を使う。
+                // 未選択でも先頭候補が実行されるので、`L` + Enter で LINE が起動する。
                 let text = self
                     .suggestions
-                    .selected_name()
+                    .effective_name(&self.input)
                     .unwrap_or_else(|| self.input.trim().to_owned());
                 self.input.clear();
                 self.suggestions.clear();
@@ -326,8 +355,8 @@ impl CommandLine {
                 return None;
             }
             if i.consume_key(NONE, egui::Key::Tab) {
-                // 選択中（未選択なら先頭）の候補を入力欄へ入れる。
-                if let Some(name) = self.suggestions.completion() {
+                // Enter で実行される候補をそのまま入力欄へ入れる。
+                if let Some(name) = self.suggestions.completion(&self.input) {
                     self.input = name;
                     self.suggestions.update(&self.input);
                 }
@@ -341,45 +370,69 @@ impl CommandLine {
     }
 
     /// 候補一覧を描く。
+    ///
+    /// **`Enter` で実行される行が必ず分かる**ようにするのが目的。
+    /// 未選択でも先頭候補が実行されるので、そのことが見えていないと
+    /// 打ち間違いで意図しないコマンドが走ったときに原因が分からない。
+    ///
+    /// 目印は行頭の `⏎` と背景の 2 つ。**背景色とは別の視覚チャンネル**を併用するので、
+    /// テーマや配色に関わらず読み取れる。
     fn show_suggestions(&self, ui: &mut egui::Ui) {
         if !self.suggestions.is_visible() {
             return;
         }
+        let effective = self.suggestions.effective_index(&self.input);
+
         egui::Frame::group(ui.style())
             .inner_margin(egui::Margin::symmetric(6, 3))
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 1.0;
                 for (index, spec) in self.suggestions.items.iter().enumerate() {
-                    let selected = self.suggestions.selected == Some(index);
-                    let name_color = if selected {
-                        ui.visuals().strong_text_color()
+                    let runs = effective == Some(index);
+                    let picked = self.suggestions.selected == Some(index);
+
+                    // 明示的に選んだ行は濃く、既定で選ばれている行は薄く敷く。
+                    // Frame の fill なので背景が文字の下に来る
+                    // （行を描いた後に rect_filled すると文字の上に乗ってしまう）。
+                    let fill = if picked {
+                        ui.visuals().selection.bg_fill
+                    } else if runs {
+                        ui.visuals().selection.bg_fill.gamma_multiply(0.35)
                     } else {
-                        ui.visuals().text_color()
+                        egui::Color32::TRANSPARENT
                     };
-                    let row = ui.horizontal(|ui| {
-                        ui.monospace(
-                            egui::RichText::new(format!("{:<10}", spec.name)).color(name_color),
-                        );
-                        let alias = spec.alias_text();
-                        ui.monospace(
-                            egui::RichText::new(format!("{alias:<10}"))
-                                .color(ui.visuals().weak_text_color()),
-                        );
-                        ui.monospace(
-                            egui::RichText::new(spec.summary).color(ui.visuals().weak_text_color()),
-                        );
-                    });
-                    if selected {
-                        // 選択行は背景を敷いて分かるようにする。
-                        ui.painter().rect_filled(
-                            row.response.rect.expand(1.0),
-                            2.0,
-                            ui.visuals().selection.bg_fill.gamma_multiply(0.5),
-                        );
-                    }
+
+                    egui::Frame::new()
+                        .fill(fill)
+                        .corner_radius(2)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let name_color = if runs {
+                                    ui.visuals().strong_text_color()
+                                } else {
+                                    ui.visuals().text_color()
+                                };
+                                let weak = ui.visuals().weak_text_color();
+
+                                // Enter で走る行の目印。幅を固定して桁が揃うようにする。
+                                ui.monospace(
+                                    egui::RichText::new(if runs { "⏎ " } else { "  " })
+                                        .color(name_color),
+                                );
+                                ui.monospace(
+                                    egui::RichText::new(format!("{:<10}", spec.name))
+                                        .color(name_color),
+                                );
+                                let alias = spec.alias_text();
+                                ui.monospace(
+                                    egui::RichText::new(format!("{alias:<10}")).color(weak),
+                                );
+                                ui.monospace(egui::RichText::new(spec.summary).color(weak));
+                            });
+                        });
                 }
                 ui.monospace(
-                    egui::RichText::new("↑↓ 選択  Tab 補完  Enter 実行")
+                    egui::RichText::new("Enter で ⏎ の行を実行  ↑↓ 選択  Tab 補完")
                         .small()
                         .color(ui.visuals().weak_text_color()),
                 );
@@ -437,5 +490,119 @@ mod tests {
         c.error("失敗");
         let kinds: Vec<_> = c.history().map(|l| l.kind).collect();
         assert_eq!(kinds, vec![LineKind::Info, LineKind::Error]);
+    }
+
+    /// 候補を作った状態を用意する。
+    fn suggestions_for(input: &str) -> Suggestions {
+        let mut s = Suggestions::default();
+        s.update(input);
+        s
+    }
+
+    fn effective(input: &str) -> Option<&'static str> {
+        let s = suggestions_for(input);
+        s.effective_index(input).map(|i| s.items[i].name)
+    }
+
+    /// **Issue #5 の本体。** 未選択でも先頭候補が実行対象になること。
+    #[test]
+    fn unselected_enter_runs_the_top_suggestion() {
+        assert_eq!(effective("L"), Some("LINE"));
+        assert_eq!(effective("REC"), Some("RECTANGLE"));
+    }
+
+    /// 完全一致は先頭候補より優先されること。
+    ///
+    /// `SAVE` は `SAVEAS` の接頭辞でもあるので、並び順に関わらず SAVE が走ってほしい。
+    #[test]
+    fn exact_match_wins_over_the_first_row() {
+        let s = suggestions_for("SAVE");
+        assert!(
+            s.items.len() >= 2,
+            "前提: SAVE と SAVEAS が候補に出る（実際: {:?}）",
+            s.items.iter().map(|c| c.name).collect::<Vec<_>>()
+        );
+        assert_eq!(effective("SAVE"), Some("SAVE"));
+    }
+
+    /// 完全一致の優先が候補の並び順に依存していないこと。
+    ///
+    /// 先頭以外の位置に完全一致があっても、そちらが選ばれる。
+    #[test]
+    fn exact_match_is_found_regardless_of_position() {
+        let mut s = suggestions_for("S");
+        assert!(s.items.len() >= 2, "前提: 候補が複数ある");
+
+        // 完全一致（エイリアス "S" を持つ STRETCH）をわざと末尾へ動かす。
+        let pos = s
+            .items
+            .iter()
+            .position(|c| c.aliases.contains(&"S"))
+            .expect("S を持つコマンドがあるはず");
+        let spec = s.items.remove(pos);
+        let name = spec.name;
+        s.items.push(spec);
+
+        let index = s.effective_index("S").unwrap();
+        assert_eq!(s.items[index].name, name, "並び順に関わらず完全一致が勝つ");
+        assert_eq!(index, s.items.len() - 1, "末尾に置いたものが選ばれている");
+    }
+
+    /// 明示的な選択がすべてに優先すること。
+    #[test]
+    fn explicit_selection_wins_over_exact_match() {
+        let mut s = suggestions_for("SAVE");
+        assert!(s.items.len() >= 2, "前提: 候補が複数ある");
+        s.selected = Some(1);
+        assert_eq!(s.effective_index("SAVE"), Some(1));
+    }
+
+    #[test]
+    fn no_suggestions_means_no_effective_row() {
+        let s = suggestions_for("XYZZY");
+        assert!(!s.is_visible());
+        assert_eq!(s.effective_index("XYZZY"), None);
+        assert_eq!(s.effective_name("XYZZY"), None);
+    }
+
+    /// 上下キーで選択が動き、端では未選択へ戻ること。
+    #[test]
+    fn move_selection_falls_off_at_the_ends() {
+        let mut s = suggestions_for("S");
+        let last = s.items.len() - 1;
+
+        s.move_selection(1);
+        assert_eq!(s.selected, Some(0));
+        s.move_selection(-1);
+        assert_eq!(s.selected, None, "先頭から上へ抜けると未選択");
+
+        s.move_selection(-1);
+        assert_eq!(s.selected, Some(last), "未選択から上へ行くと末尾");
+        s.move_selection(1);
+        assert_eq!(s.selected, None, "末尾から下へ抜けると未選択");
+    }
+
+    /// 候補の顔ぶれが変わったら選択を解除すること。
+    /// 位置だけ残ると別のコマンドを選んだつもりになる。
+    #[test]
+    fn changing_the_input_clears_the_selection() {
+        let mut s = suggestions_for("S");
+        s.selected = Some(1);
+        s.update("L");
+        assert_eq!(s.selected, None);
+    }
+
+    /// Tab の補完先は Enter で実行される候補と一致すること。
+    /// 補完した結果と実行される内容が食い違うと混乱する。
+    #[test]
+    fn tab_completion_matches_what_enter_runs() {
+        for input in ["L", "REC", "SAVE", "C"] {
+            let s = suggestions_for(input);
+            assert_eq!(
+                s.completion(input),
+                s.effective_name(input),
+                "入力 {input:?}"
+            );
+        }
     }
 }
