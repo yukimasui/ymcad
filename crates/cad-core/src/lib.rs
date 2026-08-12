@@ -11,6 +11,11 @@
 
 #![forbid(unsafe_code)]
 
+/// ファイルをアトミックに置き換える内部ヘルパ。
+///
+/// 書き出しモジュール（[`dxf`] / [`native`]）から使う。外部には出さない。
+mod atomic_write;
+
 pub mod command;
 pub mod document;
 pub mod dxf;

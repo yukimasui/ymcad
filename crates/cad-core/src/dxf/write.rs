@@ -27,7 +27,7 @@ pub struct WriteReport {
 use super::{rad_to_deg, ACAD_VERSION};
 use crate::document::Document;
 use crate::entity::{Entity, EntityId, Geometry};
-use crate::error::{CadError, Result};
+use crate::error::Result;
 use crate::geom::Point2;
 use crate::layer::{ColorSpec, LayerId};
 
@@ -304,11 +304,14 @@ pub fn write_to_string(doc: &Document) -> WriteReport {
 
 /// 図面を DXF R12 としてファイルへ書き出す。
 ///
+/// 書き込みは**アトミック**。失敗しても `path` は元の内容のまま残る
+/// （[`crate::atomic_write`] を参照）。
+///
 /// # Errors
 ///
 /// ファイルの書き込みに失敗した場合 [`CadError::Io`]。
 pub fn write_to_file(doc: &Document, path: &Path) -> Result<Vec<String>> {
     let report = write_to_string(doc);
-    std::fs::write(path, report.text).map_err(|e| CadError::Io(e.to_string()))?;
+    crate::atomic_write::write_atomic(path, report.text.as_bytes())?;
     Ok(report.warnings)
 }
