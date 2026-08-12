@@ -315,7 +315,7 @@ impl CadApp {
         );
 
         let preview = self.session.preview(self.cursor_model, &self.doc);
-        render::draw_preview(&painter, &self.viewport, &preview);
+        render::draw_preview(&painter, &self.viewport, self.doc.definitions(), &preview);
 
         if let Some(candidate) = &self.snapped {
             render::draw_snap_marker(&painter, &self.viewport, candidate, true);

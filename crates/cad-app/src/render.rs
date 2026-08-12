@@ -7,6 +7,7 @@
 use crate::resolved::ResolvedInstances;
 use crate::selection::{Selection, WindowMode};
 use crate::viewport::{px_to_f32, Viewport};
+use cad_core::component::{self, DefinitionTable};
 use cad_core::geom::{Line, Point2};
 use cad_core::layer::LineType;
 use cad_core::snap::{SnapCandidate, SnapKind};
@@ -266,24 +267,34 @@ pub fn draw_entities(
         let linetype = doc.layers().resolve_linetype(entity);
         let stroke = egui::Stroke::new(width, color);
 
-        // インスタンスは展開結果を描く。それ以外は自分自身 1 つ。
+        // インスタンスはキャッシュ済みの展開結果を描く。
+        // `draw_geometry` も展開できるが、要素が多いと毎フレーム解決し直すので
+        // ここではキャッシュを使う（結果は同じ）。
         match &entity.geom {
             Geometry::Instance(_) => {
                 for g in resolved.get(id).unwrap_or(&[]) {
-                    draw_geometry(painter, vp, g, stroke, linetype);
+                    draw_geometry(painter, vp, doc.definitions(), g, stroke, linetype);
                 }
             }
-            geom => draw_geometry(painter, vp, geom, stroke, linetype),
+            geom => draw_geometry(painter, vp, doc.definitions(), geom, stroke, linetype),
         }
     }
 }
 
 /// 確定前のラバーバンドを描く。
-pub fn draw_preview(painter: &egui::Painter, vp: &Viewport, geoms: &[Geometry]) {
+///
+/// `defs` が必要なのは、**ラバーバンドにコンポーネントのインスタンスが
+/// 含まれうる**から（インスタンスを `MOVE` している最中など）。
+pub fn draw_preview(
+    painter: &egui::Painter,
+    vp: &Viewport,
+    defs: &DefinitionTable,
+    geoms: &[Geometry],
+) {
     let stroke = egui::Stroke::new(ENTITY_STROKE_PX, PREVIEW_COLOR);
     for g in geoms {
         // ラバーバンドは常に実線。確定前だと分かればよく、線種は関係ない。
-        draw_geometry(painter, vp, g, stroke, LineType::Continuous);
+        draw_geometry(painter, vp, defs, g, stroke, LineType::Continuous);
     }
 }
 
@@ -291,15 +302,25 @@ pub fn draw_preview(painter: &egui::Painter, vp: &Viewport, geoms: &[Geometry]) 
 pub fn draw_geometry(
     painter: &egui::Painter,
     vp: &Viewport,
+    defs: &DefinitionTable,
     geom: &Geometry,
     stroke: egui::Stroke,
     linetype: LineType,
 ) {
     match geom {
         Geometry::Line(l) => draw_clipped_segment(painter, vp, l, stroke, linetype),
-        // インスタンスは `draw_entities` が展開してから渡すので、ここには来ない。
-        // 中身を持たないので、定義テーブル無しでは何も描けない。
-        Geometry::Instance(_) => {}
+        // インスタンスは中身を持たないので、定義を引いて展開する。
+        //
+        // **ここを空実装にすると「何も描かれない」形で静かに壊れる。**
+        // 2026-08-13 に実際に踏んだ: 「`draw_entities` が展開してから渡すので
+        // ここには来ない」と思い込んで空にしたが、`draw_preview` も同じ関数を
+        // 通るため、インスタンスの `MOVE` でラバーバンドが消えていた。
+        // `Aabb::EMPTY` で逃げてはいけないのと同じ話（ADR-0030）。
+        Geometry::Instance(i) => {
+            for g in component::resolve(i, defs) {
+                draw_geometry(painter, vp, defs, &g, stroke, linetype);
+            }
+        }
         // 作図線は無限に伸びるので、表示範囲へクリップした線分として描く。
         // 長さは表示範囲から導かれるので、どれだけズームしても巨大座標にならない。
         Geometry::Xline(x) => {
@@ -674,5 +695,234 @@ mod tests {
         assert!((nice_step(-5.0) - 1.0).abs() < 1e-12);
         assert!((nice_step(f64::NAN) - 1.0).abs() < 1e-12);
         assert!((nice_step(f64::INFINITY) - 1.0).abs() < 1e-12);
+    }
+
+    // ---- インスタンスの描画 -----------------------------------------------
+    //
+    // 2026-08-13 の不具合の回帰テスト。
+    // `draw_geometry` の `Instance` の腕を空実装にしていたため、
+    // インスタンスを `MOVE` している最中のラバーバンドが消えていた。
+    // 「`draw_entities` が展開してから渡すのでここには来ない」という思い込みが原因で、
+    // 実際は `draw_preview` も同じ関数を通る。
+    //
+    // **`Painter` が実際に線を積んだかを数える**ことで、
+    // 空実装に戻したら必ず落ちるようにしてある。
+
+    use cad_core::command::{DefineComponent, InsertInstance};
+    use cad_core::component::Placement;
+    use cad_core::geom::{Line, Point2};
+    use cad_core::{Document, Entity, LayerId};
+
+    /// 描画を捨てずに拾える `Painter` と、その内容を取り出すための文脈。
+    fn painter_for_test() -> (egui::Context, egui::Painter) {
+        let ctx = egui::Context::default();
+        ctx.begin_pass(egui::RawInput::default());
+        let painter = egui::Painter::new(
+            ctx.clone(),
+            egui::LayerId::new(egui::Order::Background, egui::Id::new("test")),
+            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0)),
+        );
+        (ctx, painter)
+    }
+
+    /// 描いた内容を確定させ、積まれた図形の数を返す。
+    ///
+    /// `GraphicLayers` の中身は非公開なので、`end_pass` でクリップ済みの
+    /// 図形列として受け取って数える。**1 回しか呼べない**（パスを閉じるため）。
+    fn finish_and_count(ctx: &egui::Context) -> usize {
+        let mut output = ctx.end_pass();
+        // `TexturesDelta` は未適用のまま drop すると panic する
+        // （epaint の意図的な検査）。テストでは描画しないので明示的に捨てる。
+        output.textures_delta.clear();
+        output
+            .shapes
+            .into_iter()
+            .map(|clipped| count_shape(&clipped.shape))
+            .sum()
+    }
+
+    /// 入れ子（`Shape::Vec`）を数え落とさないよう再帰する。
+    fn count_shape(shape: &egui::Shape) -> usize {
+        match shape {
+            egui::Shape::Noop => 0,
+            egui::Shape::Vec(v) => v.iter().map(count_shape).sum(),
+            _ => 1,
+        }
+    }
+
+    fn test_viewport() -> Viewport {
+        let mut vp = Viewport::default();
+        vp.set_rect(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(800.0, 600.0),
+        ));
+        vp
+    }
+
+    /// 線分 1 本を含む定義と、その配置を持つ図面。
+    fn doc_with_instance() -> Document {
+        let mut doc = Document::new();
+        let contents = vec![Entity::new(
+            cad_core::Geometry::Line(Line::new(Point2::new(0.0, 0.0), Point2::new(50.0, 0.0))),
+            LayerId::ZERO,
+        )];
+        doc.apply(Box::new(DefineComponent::new(
+            "COMPONENT",
+            "部品",
+            Point2::ORIGIN,
+            contents,
+        )))
+        .expect("定義を作れるはず");
+        let def = doc.definitions().by_name("部品").expect("あるはず");
+        doc.apply(Box::new(InsertInstance::new(
+            "INSERT",
+            def,
+            Placement::at(Point2::new(10.0, 10.0)),
+            LayerId::ZERO,
+        )))
+        .expect("配置できるはず");
+        doc
+    }
+
+    /// **インスタンスを `draw_geometry` に渡すと線が積まれること。**
+    ///
+    /// これが 0 なら「何も描かれない」= 2026-08-13 の不具合そのもの。
+    #[test]
+    fn draw_geometry_draws_the_contents_of_an_instance() {
+        let doc = doc_with_instance();
+        let (_, instance_geom) = doc
+            .entities()
+            .iter()
+            .find(|(_, e)| matches!(e.geom, Geometry::Instance(_)))
+            .expect("インスタンスがあるはず");
+
+        let (ctx, painter) = painter_for_test();
+        let vp = test_viewport();
+
+        draw_geometry(
+            &painter,
+            &vp,
+            doc.definitions(),
+            &instance_geom.geom,
+            egui::Stroke::new(1.0, egui::Color32::WHITE),
+            LineType::Continuous,
+        );
+
+        assert!(
+            finish_and_count(&ctx) > 0,
+            "インスタンスの中身が 1 本も描かれていない（空実装に戻っている）"
+        );
+    }
+
+    /// 比較用。単発の線分は当然描かれる。
+    #[test]
+    fn draw_geometry_draws_a_plain_line() {
+        let doc = Document::new();
+        let (ctx, painter) = painter_for_test();
+        let vp = test_viewport();
+
+        let line = Geometry::Line(Line::new(Point2::new(0.0, 0.0), Point2::new(50.0, 0.0)));
+        draw_geometry(
+            &painter,
+            &vp,
+            doc.definitions(),
+            &line,
+            egui::Stroke::new(1.0, egui::Color32::WHITE),
+            LineType::Continuous,
+        );
+
+        assert!(finish_and_count(&ctx) > 0);
+    }
+
+    /// **ラバーバンドにインスタンスが含まれていても描かれること。**
+    ///
+    /// 不具合の再現経路そのもの。`draw_preview` は `draw_geometry` を通るので、
+    /// そこが空実装だとここで 0 になる。
+    #[test]
+    fn draw_preview_draws_an_instance_rubber_band() {
+        let doc = doc_with_instance();
+        // インスタンスを平行移動したもの＝ MOVE 中のラバーバンド。
+        let moved: Vec<Geometry> = doc
+            .entities()
+            .iter()
+            .map(|(_, e)| e.geom.translated(cad_core::geom::Vec2::new(30.0, 20.0)))
+            .collect();
+        assert!(
+            matches!(moved[0], Geometry::Instance(_)),
+            "ラバーバンドはインスタンスのまま返る（描画側が展開する責務）"
+        );
+
+        let (ctx, painter) = painter_for_test();
+        let vp = test_viewport();
+
+        draw_preview(&painter, &vp, doc.definitions(), &moved);
+
+        assert!(
+            finish_and_count(&ctx) > 0,
+            "インスタンスの MOVE でラバーバンドが描かれない"
+        );
+    }
+
+    /// 定義が見つからないインスタンスでも panic しないこと。
+    #[test]
+    fn draw_geometry_survives_a_dangling_instance() {
+        let doc = doc_with_instance();
+        let (_, entity) = doc
+            .entities()
+            .iter()
+            .find(|(_, e)| matches!(e.geom, Geometry::Instance(_)))
+            .expect("あるはず");
+
+        // 定義を持たない別の図面のテーブルで描かせる。
+        let empty = Document::new();
+        let (_, painter) = painter_for_test();
+        let vp = test_viewport();
+
+        draw_geometry(
+            &painter,
+            &vp,
+            empty.definitions(),
+            &entity.geom,
+            egui::Stroke::new(1.0, egui::Color32::WHITE),
+            LineType::Continuous,
+        );
+    }
+
+    /// 図面全体の描画でもインスタンスが線として積まれること。
+    #[test]
+    fn draw_entities_draws_instances() {
+        let doc = doc_with_instance();
+        let (ctx, painter) = painter_for_test();
+        let vp = test_viewport();
+        let mut resolved = crate::resolved::ResolvedInstances::new();
+
+        draw_entities(
+            &painter,
+            &doc,
+            &vp,
+            &crate::selection::Selection::new(),
+            &mut resolved,
+        );
+
+        assert!(finish_and_count(&ctx) > 0, "インスタンスが描かれていない");
+    }
+
+    /// 何も無い図面では何も積まれないこと（数え方が正しいことの確認）。
+    #[test]
+    fn an_empty_drawing_draws_nothing() {
+        let doc = Document::new();
+        let (ctx, painter) = painter_for_test();
+        let vp = test_viewport();
+        let mut resolved = crate::resolved::ResolvedInstances::new();
+
+        draw_entities(
+            &painter,
+            &doc,
+            &vp,
+            &crate::selection::Selection::new(),
+            &mut resolved,
+        );
+
+        assert_eq!(finish_and_count(&ctx), 0, "空の図面では何も描かない");
     }
 }
