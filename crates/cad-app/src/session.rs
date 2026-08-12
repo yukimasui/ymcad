@@ -103,6 +103,14 @@ impl Session {
         self.tool.as_ref().is_some_and(|t| t.wants_entity())
     }
 
+    /// 実行中のツールが**生の文字列**を待っているか。
+    ///
+    /// `true` の間は座標・数値としての解釈も、大文字化も全角の正規化もしない。
+    #[must_use]
+    pub fn wants_raw_text(&self) -> bool {
+        self.tool.as_ref().is_some_and(|t| t.wants_raw_text())
+    }
+
     /// 溜まったビュー操作を取り出す。
     pub fn take_view_actions(&mut self) -> Vec<ViewAction> {
         std::mem::take(&mut self.view_actions)
@@ -208,6 +216,13 @@ impl Session {
         }
 
         if self.tool.is_some() {
+            // 名前や式を待っているツールには、打った文字列をそのまま渡す。
+            // 大文字化や全角の正規化を通すと `if` が `IF` になり、
+            // `データー` の長音が `-` に直されて壊れる。
+            if self.wants_raw_text() {
+                self.feed_tool(StepInput::Word(text.to_owned()), doc);
+                return;
+            }
             match Self::interpret(text, self.last_point()) {
                 Ok(input) => self.feed_tool(input, doc),
                 Err(msg) => self.cmdline.error(msg),
@@ -2464,5 +2479,306 @@ mod flow_tests {
         // 選択せずに MOVE を始めると、選択待ちになる。
         feed(&mut s, &mut doc, "M");
         assert!(s.preview(Some(Point2::new(5.0, 5.0)), &doc).is_empty());
+    }
+
+    // ---- パラメータ（段階 2） ---------------------------------------------
+    //
+    // **コマンドラインだけで一通り試せること**を固定する。
+    // パラメータパネル（段階 3）が入るまでの唯一の入口なので、
+    // ここが動かないと段階 2 は使えない。
+
+    /// 線分 1 本のコンポーネント「窓」を作り、インスタンス 1 つが置かれた状態にする。
+    fn setup_component() -> (Session, Document) {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "10,0");
+        let id = doc.entities().ids().next().expect("あるはず");
+        s.selection.insert(id);
+
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "窓");
+        (s, doc)
+    }
+
+    /// 解決された線分の終点 X。
+    fn resolved_end_x(doc: &Document) -> f64 {
+        let (_, e) = doc
+            .entities()
+            .iter()
+            .find(|(_, e)| matches!(e.geom, cad_core::Geometry::Instance(_)))
+            .expect("インスタンスがあるはず");
+        let cad_core::Geometry::Instance(i) = &e.geom else {
+            panic!()
+        };
+        match &cad_core::component::resolve(i, doc.definitions())[0] {
+            cad_core::Geometry::Line(l) => l.b.x,
+            other => panic!("線分のはず: {other:?}"),
+        }
+    }
+
+    /// **`PARAM` → `BIND` → `PSET` の一連が動くこと。**
+    ///
+    /// これが段階 2 の受け入れ基準そのもの。
+    #[test]
+    fn param_bind_and_pset_drive_the_geometry() {
+        let (mut s, mut doc) = setup_component();
+
+        // パラメータを宣言する。
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+        assert_eq!(
+            doc.definitions().get(def).expect("引ける").params.len(),
+            1,
+            "パラメータが宣言される"
+        );
+
+        // 線分の終点 X に束縛する。
+        feed(&mut s, &mut doc, "BI");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "0"); // 要素番号
+        feed(&mut s, &mut doc, "終点X"); // スロット
+        feed(&mut s, &mut doc, "幅"); // 式
+        assert_eq!(
+            doc.definitions().get(def).expect("引ける").bindings.len(),
+            1,
+            "束縛ができる"
+        );
+        assert!(eq_len(resolved_end_x(&doc), 900.0), "既定値が効く");
+
+        // インスタンスのパラメータを変える。
+        let inst = doc.entities().ids().next().expect("あるはず");
+        let _ = inst;
+        feed(&mut s, &mut doc, "PS");
+        click(&mut s, &mut doc, 5.0, 0.0); // インスタンスをクリック
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "1800");
+        assert!(eq_len(resolved_end_x(&doc), 1800.0), "上書きが効く");
+
+        // リセットで既定値へ戻る。
+        feed(&mut s, &mut doc, "PS");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "R");
+        assert!(eq_len(resolved_end_x(&doc), 900.0), "リセットで既定値へ");
+    }
+
+    /// **式が書けること。** 値の入力にも式が使える。
+    #[test]
+    fn expressions_can_be_used_for_values() {
+        let (mut s, mut doc) = setup_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+
+        feed(&mut s, &mut doc, "BI");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "0");
+        feed(&mut s, &mut doc, "終点X");
+        feed(&mut s, &mut doc, "幅 * 2 + 10"); // 式を束縛
+        assert!(eq_len(resolved_end_x(&doc), 1810.0), "900*2+10");
+
+        // 値の入力にも式が使える。
+        feed(&mut s, &mut doc, "PS");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "100 * 3");
+        assert!(eq_len(resolved_end_x(&doc), 610.0), "300*2+10");
+    }
+
+    /// 真偽のパラメータと条件式で形が切り替わること。
+    #[test]
+    fn a_boolean_parameter_switches_the_shape() {
+        let (mut s, mut doc) = setup_component();
+        for (name, default) in [("幅", "900"), ("両開き", "偽")] {
+            feed(&mut s, &mut doc, "PA");
+            feed(&mut s, &mut doc, "窓");
+            feed(&mut s, &mut doc, name);
+            feed(&mut s, &mut doc, default);
+        }
+
+        feed(&mut s, &mut doc, "BI");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "0");
+        feed(&mut s, &mut doc, "終点X");
+        feed(&mut s, &mut doc, "if 両開き then 幅 / 2 else 幅");
+        assert!(eq_len(resolved_end_x(&doc), 900.0));
+
+        feed(&mut s, &mut doc, "PS");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        feed(&mut s, &mut doc, "両開き");
+        feed(&mut s, &mut doc, "真");
+        assert!(eq_len(resolved_end_x(&doc), 450.0), "条件で切り替わる");
+    }
+
+    /// 選択肢のパラメータが宣言でき、候補外を断ること。
+    #[test]
+    fn a_choice_parameter_only_accepts_its_options() {
+        let (mut s, mut doc) = setup_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "種別");
+        feed(&mut s, &mut doc, "引違い|開き|FIX");
+
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+        let decl = doc.definitions().get(def).expect("引ける").param("種別");
+        assert!(decl.is_some(), "選択肢として宣言される");
+
+        // 候補外は断られる。
+        feed(&mut s, &mut doc, "PS");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        feed(&mut s, &mut doc, "種別");
+        feed(&mut s, &mut doc, "上げ下げ");
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+        assert!(s.has_active_tool(), "断られてもコマンドは続く");
+        s.cancel();
+
+        // 候補内なら通る。
+        feed(&mut s, &mut doc, "PS");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        feed(&mut s, &mut doc, "種別");
+        feed(&mut s, &mut doc, "開き");
+        let inst = doc.entities().ids().next().expect("あるはず");
+        let cad_core::Geometry::Instance(i) = &doc.entities().get(inst).expect("あるはず").geom
+        else {
+            panic!()
+        };
+        assert_eq!(
+            i.overrides.get("種別"),
+            Some(&cad_core::expr::Value::Choice("開き".to_owned()))
+        );
+    }
+
+    /// **`BIND` が要素の一覧をプロンプトに出すこと。**
+    ///
+    /// 定義の中身は図面に出ていないので、番号を見られないと指せない。
+    #[test]
+    fn bind_lists_the_entities_in_its_prompt() {
+        let (mut s, mut doc) = setup_component();
+        feed(&mut s, &mut doc, "BI");
+        feed(&mut s, &mut doc, "窓");
+
+        let prompt = s.prompt();
+        assert!(prompt.contains("0:"), "番号が出る: {prompt}");
+        assert!(prompt.contains("LINE"), "種別が出る: {prompt}");
+    }
+
+    /// `BIND` がスロットの一覧を出すこと。
+    #[test]
+    fn bind_lists_the_available_slots() {
+        let (mut s, mut doc) = setup_component();
+        feed(&mut s, &mut doc, "BI");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "0");
+
+        let prompt = s.prompt();
+        assert!(prompt.contains("終点X"), "線分のスロットが出る: {prompt}");
+        assert!(!prompt.contains("半径"), "円のスロットは出ない: {prompt}");
+    }
+
+    /// **`PSET` がいまの値と上書き中の印を出すこと。**
+    #[test]
+    fn pset_shows_the_current_values_and_marks_overrides() {
+        let (mut s, mut doc) = setup_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+
+        feed(&mut s, &mut doc, "PS");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        let prompt = s.prompt();
+        assert!(prompt.contains("幅 = 900"), "いまの値が出る: {prompt}");
+        // 凡例の行（「＊ は上書き中」）は常にあるので、**値の行**だけを見る。
+        assert!(
+            !prompt.contains("＊幅"),
+            "まだ上書きしていないので印は付かない: {prompt}"
+        );
+        s.cancel();
+
+        // 上書きしてから見ると印が付く。
+        feed(&mut s, &mut doc, "PS");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "1800");
+        feed(&mut s, &mut doc, "PS");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        let prompt = s.prompt();
+        assert!(prompt.contains("＊幅"), "上書き中の印が付く: {prompt}");
+    }
+
+    /// 範囲外・型違いを断ること（コマンド層の検証がここまで届くこと）。
+    #[test]
+    fn pset_rejects_values_the_command_layer_refuses() {
+        let (mut s, mut doc) = setup_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "両開き");
+        feed(&mut s, &mut doc, "偽");
+
+        feed(&mut s, &mut doc, "PS");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        feed(&mut s, &mut doc, "両開き");
+        feed(&mut s, &mut doc, "900"); // 真偽に数値
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+    }
+
+    /// 存在しないコンポーネント名を断り、あるものを案内すること。
+    #[test]
+    fn param_reports_the_available_component_names() {
+        let (mut s, mut doc) = setup_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "ない名前");
+        assert!(
+            s.cmdline.history().any(|l| l.text.contains("窓")),
+            "あるコンポーネント名を案内する"
+        );
+    }
+
+    /// **束縛が参照しているパラメータを消せないこと**が UI まで届くこと。
+    #[test]
+    fn a_parameter_used_by_a_binding_cannot_be_redeclared_away() {
+        let (mut s, mut doc) = setup_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        feed(&mut s, &mut doc, "BI");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "0");
+        feed(&mut s, &mut doc, "終点X");
+        feed(&mut s, &mut doc, "幅");
+
+        // 「幅」を真偽に変えようとすると、束縛の式が数値でなくなる。
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "偽");
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+    }
+
+    /// パラメータの操作が Undo で戻ること。
+    #[test]
+    fn parameter_operations_undo() {
+        let (mut s, mut doc) = setup_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+        assert_eq!(doc.definitions().get(def).expect("引ける").params.len(), 1);
+
+        feed(&mut s, &mut doc, "U");
+        assert!(
+            doc.definitions()
+                .get(def)
+                .expect("引ける")
+                .params
+                .is_empty(),
+            "宣言が戻る"
+        );
     }
 }

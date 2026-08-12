@@ -1422,6 +1422,30 @@ impl Command for SetDefinitionParams {
             }
         }
 
+        // **既存の束縛が新しい宣言でも数値になること。**
+        //
+        // 名前を残したまま型だけ変える（数値 → 真偽など）と、上の検査は通るのに
+        // 束縛の式が数値でなくなり、その座標が黙って定義のままになる。
+        // 消すのを禁じておきながら型変更を許すと、抜け道になる。
+        let probe = Definition {
+            name: def.name.clone(),
+            origin: def.origin,
+            params: self.params.clone(),
+            entities: Vec::new(),
+            bindings: Vec::new(),
+        };
+        let env = probe.param_env(&BTreeMap::new());
+        for b in &def.bindings {
+            match crate::expr::eval(&b.expr, &env) {
+                Ok(crate::expr::Value::Number(_)) => {}
+                _ => {
+                    return Err(CadError::NotEditable(
+                        "この宣言にすると既存の束縛が数値になりません",
+                    ))
+                }
+            }
+        }
+
         self.previous = Some(ctx.replace_definition_params(self.target, self.params.clone())?);
         Ok(())
     }
