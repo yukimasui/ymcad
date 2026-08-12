@@ -10,17 +10,18 @@
 
 use std::path::Path;
 
-use crate::component::{Definition, DefinitionId, Value};
+use crate::component::{Definition, DefinitionId, ParamDecl, Slot, Value};
 use crate::document::Document;
 use crate::entity::{Entity, Geometry};
 use crate::error::Result;
+use crate::expr::{BinOp, Expr, Func1, Func2, ParamType, UnOp};
 use crate::geom::Point2;
 use crate::group::{Group, GroupId};
 use crate::layer::{ColorSpec, Layer, LayerId, LineType};
 
 use super::{
-    color_tag, kind, layer_flags, linetype, option_tag, placement_flags, value_tag, FORMAT_VERSION,
-    MAGIC,
+    color_tag, expr_tag, kind, layer_flags, linetype, option_tag, param_type, placement_flags,
+    slot_tag, value_tag, FORMAT_VERSION, MAGIC,
 };
 
 /// 図面をネイティブ形式のバイト列にする。
@@ -71,9 +72,201 @@ pub fn write_to_bytes(doc: &Document) -> Vec<u8> {
         for entity in &def.entities {
             write_entity(&mut w, entity, &index_of);
         }
+
+        // ---- 形式 v3 以降 ----
+        // 追加は既存の並びの**後ろ**へ足す。こうすると古い版は
+        // 「そこで終わり」として読める。
+        w.count(def.params.len());
+        for decl in &def.params {
+            write_param(&mut w, decl);
+        }
+        w.count(def.bindings.len());
+        for b in &def.bindings {
+            w.count(b.entity);
+            write_slot(&mut w, b.slot);
+            write_expr(&mut w, &b.expr);
+        }
     }
 
     w.finish()
+}
+
+/// パラメータの宣言を書く。
+fn write_param(w: &mut Writer, decl: &ParamDecl) {
+    w.string(&decl.name);
+    match &decl.ty {
+        ParamType::Number => w.u8(param_type::NUMBER),
+        ParamType::Bool => w.u8(param_type::BOOL),
+        ParamType::Choice(options) => {
+            w.u8(param_type::CHOICE);
+            w.count(options.len());
+            for o in options {
+                w.string(o);
+            }
+        }
+    }
+    // 範囲は Option。
+    match decl.range {
+        Some((lo, hi)) => {
+            w.u8(option_tag::SOME);
+            w.f64(lo);
+            w.f64(hi);
+        }
+        None => w.u8(option_tag::NONE),
+    }
+    write_expr(w, &decl.default);
+}
+
+/// 束縛のスロットを書く。
+fn write_slot(w: &mut Writer, slot: Slot) {
+    match slot {
+        Slot::LineAx => w.u8(slot_tag::LINE_AX),
+        Slot::LineAy => w.u8(slot_tag::LINE_AY),
+        Slot::LineBx => w.u8(slot_tag::LINE_BX),
+        Slot::LineBy => w.u8(slot_tag::LINE_BY),
+        Slot::CircleCx => w.u8(slot_tag::CIRCLE_CX),
+        Slot::CircleCy => w.u8(slot_tag::CIRCLE_CY),
+        Slot::CircleR => w.u8(slot_tag::CIRCLE_R),
+        Slot::ArcCx => w.u8(slot_tag::ARC_CX),
+        Slot::ArcCy => w.u8(slot_tag::ARC_CY),
+        Slot::ArcR => w.u8(slot_tag::ARC_R),
+        Slot::ArcStart => w.u8(slot_tag::ARC_START),
+        Slot::ArcEnd => w.u8(slot_tag::ARC_END),
+        Slot::XlineOx => w.u8(slot_tag::XLINE_OX),
+        Slot::XlineOy => w.u8(slot_tag::XLINE_OY),
+        Slot::XlineAngle => w.u8(slot_tag::XLINE_ANGLE),
+        Slot::PolylineVx(i) => {
+            w.u8(slot_tag::POLYLINE_VX);
+            w.u32(i);
+        }
+        Slot::PolylineVy(i) => {
+            w.u8(slot_tag::POLYLINE_VY);
+            w.u32(i);
+        }
+        Slot::InstanceX => w.u8(slot_tag::INSTANCE_X),
+        Slot::InstanceY => w.u8(slot_tag::INSTANCE_Y),
+        Slot::InstanceRotation => w.u8(slot_tag::INSTANCE_ROTATION),
+        Slot::InstanceScale => w.u8(slot_tag::INSTANCE_SCALE),
+    }
+}
+
+/// パラメータの値を書く。
+fn write_value(w: &mut Writer, v: &Value) {
+    match v {
+        Value::Number(n) => {
+            w.u8(value_tag::NUMBER);
+            w.f64(*n);
+        }
+        Value::Bool(b) => {
+            w.u8(value_tag::BOOL);
+            w.u8(u8::from(*b));
+        }
+        Value::Choice(c) => {
+            w.u8(value_tag::CHOICE);
+            w.string(c);
+        }
+    }
+}
+
+/// 式を**前置記法**で書く。
+///
+/// 子の個数はタグから決まるので、括弧や終端記号が要らない。
+/// 読み込み側も同じ順で再帰するだけで木に戻る。
+fn write_expr(w: &mut Writer, e: &Expr) {
+    match e {
+        Expr::Literal(v) => {
+            w.u8(expr_tag::LITERAL);
+            write_value(w, v);
+        }
+        Expr::Var(name) => {
+            w.u8(expr_tag::VAR);
+            w.string(name);
+        }
+        Expr::Unary(op, a) => {
+            w.u8(expr_tag::UNARY);
+            w.u8(unop_code(*op));
+            write_expr(w, a);
+        }
+        Expr::Binary(op, a, b) => {
+            w.u8(expr_tag::BINARY);
+            w.u8(binop_code(*op));
+            write_expr(w, a);
+            write_expr(w, b);
+        }
+        Expr::If {
+            cond,
+            then,
+            otherwise,
+        } => {
+            w.u8(expr_tag::IF);
+            write_expr(w, cond);
+            write_expr(w, then);
+            write_expr(w, otherwise);
+        }
+        Expr::Call1(f, a) => {
+            w.u8(expr_tag::CALL1);
+            w.u8(func1_code(*f));
+            write_expr(w, a);
+        }
+        Expr::Call2(f, a, b) => {
+            w.u8(expr_tag::CALL2);
+            w.u8(func2_code(*f));
+            write_expr(w, a);
+            write_expr(w, b);
+        }
+    }
+}
+
+/// 単項演算子の番号。**既存の値は変えない。**
+fn unop_code(op: UnOp) -> u8 {
+    match op {
+        UnOp::Neg => 0,
+        UnOp::Not => 1,
+    }
+}
+
+/// 二項演算子の番号。**既存の値は変えない。**
+fn binop_code(op: BinOp) -> u8 {
+    match op {
+        BinOp::Add => 0,
+        BinOp::Sub => 1,
+        BinOp::Mul => 2,
+        BinOp::Div => 3,
+        BinOp::Lt => 4,
+        BinOp::Le => 5,
+        BinOp::Gt => 6,
+        BinOp::Ge => 7,
+        BinOp::Eq => 8,
+        BinOp::Ne => 9,
+        BinOp::And => 10,
+        BinOp::Or => 11,
+    }
+}
+
+/// 1 引数の関数の番号。**既存の値は変えない。**
+fn func1_code(f: Func1) -> u8 {
+    match f {
+        Func1::Sin => 0,
+        Func1::Cos => 1,
+        Func1::Tan => 2,
+        Func1::Sqrt => 3,
+        Func1::Abs => 4,
+        Func1::Floor => 5,
+        Func1::Ceil => 6,
+        Func1::Round => 7,
+        Func1::Deg => 8,
+        Func1::Rad => 9,
+    }
+}
+
+/// 2 引数の関数の番号。**既存の値は変えない。**
+fn func2_code(f: Func2) -> u8 {
+    match f {
+        Func2::Min => 0,
+        Func2::Max => 1,
+        Func2::Atan2 => 2,
+        Func2::Pow => 3,
+    }
 }
 
 /// ID → ファイル内の添字を引くための対応表。
@@ -208,20 +401,7 @@ fn write_geometry(w: &mut Writer, geom: &Geometry, idx: &Indices<'_>) {
             w.count(i.overrides.len());
             for (name, value) in &i.overrides {
                 w.string(name);
-                match value {
-                    Value::Number(n) => {
-                        w.u8(value_tag::NUMBER);
-                        w.f64(*n);
-                    }
-                    Value::Bool(b) => {
-                        w.u8(value_tag::BOOL);
-                        w.u8(u8::from(*b));
-                    }
-                    Value::Choice(c) => {
-                        w.u8(value_tag::CHOICE);
-                        w.string(c);
-                    }
-                }
+                write_value(w, value);
             }
         }
     }
