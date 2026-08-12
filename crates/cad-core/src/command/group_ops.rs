@@ -288,13 +288,19 @@ impl ExplodeEntities {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::DefinitionTable;
     use crate::entity::EntityStore;
     use crate::geom::{Line, Point2, Polyline};
     use crate::group::GroupTable;
     use crate::layer::{LayerId, LayerTable};
 
-    fn new_parts() -> (EntityStore, LayerTable, GroupTable) {
-        (EntityStore::new(), LayerTable::new(), GroupTable::new())
+    fn new_parts() -> (EntityStore, LayerTable, GroupTable, DefinitionTable) {
+        (
+            EntityStore::new(),
+            LayerTable::new(),
+            GroupTable::new(),
+            DefinitionTable::new(),
+        )
     }
 
     fn line_entity(x: f64) -> Entity {
@@ -315,16 +321,16 @@ mod tests {
 
     #[test]
     fn create_group_execute_assigns_all_targets() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let (a, b) = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             (
                 ctx.add_entity(line_entity(0.0)),
                 ctx.add_entity(line_entity(1.0)),
             )
         };
         let mut cmd = CreateGroup::new("GROUP", "壁", vec![a, b]);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
 
         let gid = cmd.created().expect("グループができるはず");
@@ -335,14 +341,14 @@ mod tests {
 
     #[test]
     fn create_group_undo_restores_previous_membership() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let a = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             ctx.add_entity(line_entity(0.0))
         };
 
         let mut first = CreateGroup::new("GROUP", "A", vec![a]);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         first.execute(&mut ctx).unwrap();
         let first_id = first.created().unwrap();
 
@@ -369,13 +375,13 @@ mod tests {
     /// 参照が壊れる。エンティティで `restore` を用意したのと同じ理由（ADR-0004）。
     #[test]
     fn create_group_redo_reuses_the_same_group_id() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let a = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             ctx.add_entity(line_entity(0.0))
         };
         let mut cmd = CreateGroup::new("GROUP", "壁", vec![a]);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
 
         cmd.execute(&mut ctx).unwrap();
         let first = cmd.created().expect("最初の適用で ID が決まる");
@@ -389,13 +395,13 @@ mod tests {
 
     #[test]
     fn create_group_redo_after_undo_works() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let a = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             ctx.add_entity(line_entity(0.0))
         };
         let mut cmd = CreateGroup::new("GROUP", "壁", vec![a]);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
 
         cmd.execute(&mut ctx).unwrap();
         cmd.undo(&mut ctx).unwrap();
@@ -407,9 +413,9 @@ mod tests {
 
     #[test]
     fn create_group_missing_target_fails_and_leaves_document_unchanged() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let (alive, dead) = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             let alive = ctx.add_entity(line_entity(0.0));
             let dead = ctx.add_entity(line_entity(1.0));
             ctx.remove_entity(dead).unwrap();
@@ -417,7 +423,7 @@ mod tests {
         };
 
         let mut cmd = CreateGroup::new("GROUP", "壁", vec![alive, dead]);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         assert_eq!(cmd.execute(&mut ctx), Err(CadError::EntityNotFound));
         assert!(
             ctx.entities().get(alive).unwrap().group.is_none(),
@@ -428,9 +434,9 @@ mod tests {
 
     #[test]
     fn create_group_with_no_targets_is_rejected() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let mut cmd = CreateGroup::new("GROUP", "空", Vec::new());
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         assert!(cmd.execute(&mut ctx).is_err());
     }
 
@@ -438,9 +444,9 @@ mod tests {
 
     #[test]
     fn ungroup_execute_clears_membership_but_keeps_entities() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let (a, b, gid) = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             let a = ctx.add_entity(line_entity(0.0));
             let b = ctx.add_entity(line_entity(1.0));
             let mut create = CreateGroup::new("GROUP", "壁", vec![a, b]);
@@ -449,7 +455,7 @@ mod tests {
         };
 
         let mut cmd = Ungroup::new("UNGROUP", gid);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
 
         assert!(ctx.entities().get(a).unwrap().group.is_none());
@@ -460,9 +466,9 @@ mod tests {
 
     #[test]
     fn ungroup_undo_restores_the_group_and_membership() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let (a, b, gid) = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             let a = ctx.add_entity(line_entity(0.0));
             let b = ctx.add_entity(line_entity(1.0));
             let mut create = CreateGroup::new("GROUP", "壁", vec![a, b]);
@@ -471,7 +477,7 @@ mod tests {
         };
 
         let mut cmd = Ungroup::new("UNGROUP", gid);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
         cmd.undo(&mut ctx).unwrap();
 
@@ -487,16 +493,16 @@ mod tests {
     /// 既に解除されたグループをもう一度解除しようとしたら失敗すること。
     #[test]
     fn ungroup_missing_group_fails() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let gid = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             let a = ctx.add_entity(line_entity(0.0));
             let mut create = CreateGroup::new("GROUP", "壁", vec![a]);
             create.execute(&mut ctx).unwrap();
             create.created().unwrap()
         };
 
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         Ungroup::new("UNGROUP", gid).execute(&mut ctx).unwrap();
 
         let mut again = Ungroup::new("UNGROUP", gid);
@@ -507,14 +513,14 @@ mod tests {
 
     #[test]
     fn explode_execute_splits_a_polyline_into_lines() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let id = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             ctx.add_entity(rect_entity())
         };
 
         let mut cmd = ExplodeEntities::new("EXPLODE", vec![id]);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
 
         // 閉じた矩形なので 4 本になる。
@@ -529,9 +535,9 @@ mod tests {
     /// 分解した破片が元の属性を引き継ぐこと。
     #[test]
     fn explode_keeps_layer_color_and_group() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let (id, gid) = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             let id = ctx.add_entity(rect_entity());
             let mut create = CreateGroup::new("GROUP", "枠", vec![id]);
             create.execute(&mut ctx).unwrap();
@@ -540,7 +546,7 @@ mod tests {
         let original = e.get(id).unwrap().clone();
 
         let mut cmd = ExplodeEntities::new("EXPLODE", vec![id]);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
 
         for (_, entity) in ctx.entities().iter() {
@@ -552,15 +558,15 @@ mod tests {
 
     #[test]
     fn explode_undo_restores_the_original_entity_with_the_same_id() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let id = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             ctx.add_entity(rect_entity())
         };
         let original = e.get(id).unwrap().clone();
 
         let mut cmd = ExplodeEntities::new("EXPLODE", vec![id]);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         cmd.execute(&mut ctx).unwrap();
         cmd.undo(&mut ctx).unwrap();
 
@@ -574,13 +580,13 @@ mod tests {
 
     #[test]
     fn explode_redo_after_undo_works() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let id = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             ctx.add_entity(rect_entity())
         };
         let mut cmd = ExplodeEntities::new("EXPLODE", vec![id]);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
 
         cmd.execute(&mut ctx).unwrap();
         cmd.undo(&mut ctx).unwrap();
@@ -591,22 +597,22 @@ mod tests {
     /// 分解できない種類しか無ければ失敗すること（黙って何もしないより親切）。
     #[test]
     fn explode_with_nothing_explodable_is_rejected() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let id = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             ctx.add_entity(line_entity(0.0))
         };
         let mut cmd = ExplodeEntities::new("EXPLODE", vec![id]);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         assert!(cmd.execute(&mut ctx).is_err());
         assert_eq!(ctx.entities().len(), 1, "図面は変わらない");
     }
 
     #[test]
     fn explode_missing_target_fails_and_leaves_document_unchanged() {
-        let (mut e, mut l, mut g) = new_parts();
+        let (mut e, mut l, mut g, mut d) = new_parts();
         let (alive, dead) = {
-            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
             let alive = ctx.add_entity(rect_entity());
             let dead = ctx.add_entity(rect_entity());
             ctx.remove_entity(dead).unwrap();
@@ -614,7 +620,7 @@ mod tests {
         };
 
         let mut cmd = ExplodeEntities::new("EXPLODE", vec![alive, dead]);
-        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g);
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
         assert_eq!(cmd.execute(&mut ctx), Err(CadError::EntityNotFound));
         assert_eq!(ctx.entities().len(), 1, "分解されていないこと");
         assert!(matches!(

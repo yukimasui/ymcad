@@ -17,7 +17,12 @@
 
 use std::path::Path;
 
-use crate::command::{AddEntities, AddLayer, CreateGroup, SetLayerProperties};
+use std::collections::BTreeMap;
+
+use crate::command::{
+    AddEntities, AddLayer, CreateGroup, DefineComponent, SetDefinitionContents, SetLayerProperties,
+};
+use crate::component::{DefinitionId, Instance, Placement, Value};
 use crate::document::Document;
 use crate::entity::{Entity, EntityId, Geometry};
 use crate::error::{CadError, Result};
@@ -25,7 +30,10 @@ use crate::geom::tolerance::eq_len;
 use crate::geom::{Arc, Circle, Line, Point2, Polyline, Vec2, Xline};
 use crate::layer::{AciColor, ColorSpec, LayerId, LineType};
 
-use super::{color_tag, kind, layer_flags, linetype, option_tag, FORMAT_VERSION, MAGIC};
+use super::{
+    color_tag, kind, layer_flags, linetype, option_tag, placement_flags, value_tag, FORMAT_VERSION,
+    MAGIC, VERSION_WITH_COMPONENTS,
+};
 
 /// 読み取ったレイヤ 1 件。
 struct LayerRecord {
@@ -36,12 +44,35 @@ struct LayerRecord {
     linetype: LineType,
 }
 
-/// 読み取ったエンティティ 1 件。レイヤ・グループはファイル内の添字のまま持つ。
+/// 読み取ったエンティティ 1 件。レイヤ・グループ・定義はファイル内の添字のまま持つ。
 struct EntityRecord {
-    geom: Geometry,
+    geom: GeomRecord,
     layer_index: usize,
     color: ColorSpec,
     group_index: Option<usize>,
+}
+
+/// 読み取った図形。
+///
+/// インスタンスは**定義をファイル内の添字で持つ**（まだ `DefinitionId` に直せない）。
+/// 定義セクションはエンティティより後ろにあり、しかも前方参照できるので、
+/// 全部読み終わってから ID へ解決する 2 パス構成にする。
+enum GeomRecord {
+    /// インスタンス以外。そのまま使える。
+    Plain(Geometry),
+    /// インスタンス。定義の添字と配置・上書き。
+    Instance {
+        definition_index: usize,
+        placement: Placement,
+        overrides: BTreeMap<String, Value>,
+    },
+}
+
+/// 読み取った定義 1 件。
+struct DefinitionRecord {
+    name: String,
+    origin: Point2,
+    entities: Vec<EntityRecord>,
 }
 
 /// バイト列からネイティブ形式の図面を読む。
@@ -84,7 +115,48 @@ pub fn read_from_bytes(bytes: &[u8]) -> Result<Document> {
         entities.push(read_entity(&mut r, layers.len(), groups.len())?);
     }
 
-    build_document(layers, groups, entities)
+    // 形式 v1 にはコンポーネント定義のセクションが無い。**そこで終わり**。
+    // 前半の表現は v1 と v2 で変わっていないので、分岐はこれだけで済む。
+    let mut definitions: Vec<DefinitionRecord> = Vec::new();
+    if version >= VERSION_WITH_COMPONENTS {
+        let def_count = r.count()?;
+        definitions.reserve(def_count.min(r.remaining()));
+        for _ in 0..def_count {
+            let name = r.string()?;
+            let origin = r.point()?;
+            let n = r.count()?;
+            let mut inner = Vec::with_capacity(n.min(r.remaining()));
+            for _ in 0..n {
+                inner.push(read_entity(&mut r, layers.len(), groups.len())?);
+            }
+            definitions.push(DefinitionRecord {
+                name,
+                origin,
+                entities: inner,
+            });
+        }
+    }
+
+    // 定義の添字が範囲内であることを、組み立てる前にまとめて検査する。
+    // 前方参照があるので、読みながらでは検査できない。
+    let def_count = definitions.len();
+    for rec in entities
+        .iter()
+        .chain(definitions.iter().flat_map(|d| d.entities.iter()))
+    {
+        if let GeomRecord::Instance {
+            definition_index, ..
+        } = &rec.geom
+        {
+            if *definition_index >= def_count {
+                return Err(r.error(format!(
+                    "コンポーネント定義の参照が範囲外です: {definition_index}（定義数 {def_count}）"
+                )));
+            }
+        }
+    }
+
+    build_document(layers, groups, definitions, entities)
 }
 
 /// ネイティブ形式のファイルを読む。
@@ -158,17 +230,23 @@ fn read_entity(r: &mut Reader<'_>, layer_count: usize, group_count: usize) -> Re
     })
 }
 
-fn read_geometry(r: &mut Reader<'_>) -> Result<Geometry> {
+fn read_geometry(r: &mut Reader<'_>) -> Result<GeomRecord> {
     let tag = r.u8()?;
     match tag {
-        kind::LINE => Ok(Geometry::Line(Line::new(r.point()?, r.point()?))),
-        kind::CIRCLE => Ok(Geometry::Circle(Circle::new(r.point()?, r.f64()?))),
-        kind::ARC => Ok(Geometry::Arc(Arc::new(
+        kind::LINE => Ok(GeomRecord::Plain(Geometry::Line(Line::new(
+            r.point()?,
+            r.point()?,
+        )))),
+        kind::CIRCLE => Ok(GeomRecord::Plain(Geometry::Circle(Circle::new(
+            r.point()?,
+            r.f64()?,
+        )))),
+        kind::ARC => Ok(GeomRecord::Plain(Geometry::Arc(Arc::new(
             r.point()?,
             r.f64()?,
             r.f64()?,
             r.f64()?,
-        ))),
+        )))),
         kind::XLINE => {
             let origin = r.point()?;
             let direction = Vec2::new(r.f64()?, r.f64()?);
@@ -186,7 +264,10 @@ fn read_geometry(r: &mut Reader<'_>) -> Result<Geometry> {
                     direction.len()
                 )));
             }
-            Ok(Geometry::Xline(Xline { origin, direction }))
+            Ok(GeomRecord::Plain(Geometry::Xline(Xline {
+                origin,
+                direction,
+            })))
         }
         kind::POLYLINE => {
             let closed = r.u8()? != 0;
@@ -195,7 +276,50 @@ fn read_geometry(r: &mut Reader<'_>) -> Result<Geometry> {
             for _ in 0..count {
                 vertices.push(r.point()?);
             }
-            Ok(Geometry::Polyline(Polyline::new(vertices, closed)))
+            Ok(GeomRecord::Plain(Geometry::Polyline(Polyline::new(
+                vertices, closed,
+            ))))
+        }
+        kind::INSTANCE => {
+            let definition_index = r.count()?;
+            let origin = r.point()?;
+            let rotation = r.f64()?;
+            let scale = r.f64()?;
+            let flags = r.u8()?;
+            let unknown = flags & !placement_flags::FLIPPED;
+            if unknown != 0 {
+                return Err(r.error(format!(
+                    "配置に未定義のフラグビットがあります: {unknown:#04x}"
+                )));
+            }
+            // ファイルの中身を信用せず、`Placement` の不変条件（倍率は正の有限値）を
+            // コンストラクタに検査させる。手で壊されたファイルでも不変条件を破らない。
+            let placement = Placement::new(
+                origin,
+                rotation,
+                scale,
+                flags & placement_flags::FLIPPED != 0,
+            )
+            .map_err(|e| r.error(format!("配置が妥当ではありません: {e}")))?;
+
+            let n = r.count()?;
+            let mut overrides = BTreeMap::new();
+            for _ in 0..n {
+                let name = r.string()?;
+                let value = match r.u8()? {
+                    value_tag::NUMBER => Value::Number(r.f64()?),
+                    value_tag::BOOL => Value::Bool(r.u8()? != 0),
+                    value_tag::CHOICE => Value::Choice(r.string()?),
+                    other => return Err(r.error(format!("未知のパラメータ値の種別です: {other}"))),
+                };
+                overrides.insert(name, value);
+            }
+
+            Ok(GeomRecord::Instance {
+                definition_index,
+                placement,
+                overrides,
+            })
         }
         other => Err(r.error(format!("未知の図形種別です: {other}"))),
     }
@@ -205,6 +329,7 @@ fn read_geometry(r: &mut Reader<'_>) -> Result<Geometry> {
 fn build_document(
     layers: Vec<LayerRecord>,
     groups: Vec<String>,
+    definitions: Vec<DefinitionRecord>,
     entities: Vec<EntityRecord>,
 ) -> Result<Document> {
     let mut doc = Document::new();
@@ -232,21 +357,37 @@ fn build_document(
         layer_ids.push(id);
     }
 
+    // ---- コンポーネント定義（2 パス） ------------------------------------
+    //
+    // 定義の中身は自分より後ろの定義を参照できる（前方参照）。
+    // そのため **まず空の定義を全部作って ID を確定させ**、そのあと中身を入れる。
+    // 1 パスでやると、まだ存在しない定義への参照を解決できない。
+    let mut def_ids: Vec<DefinitionId> = Vec::with_capacity(definitions.len());
+    for rec in &definitions {
+        doc.apply(Box::new(DefineComponent::new(
+            "YMC_LOAD",
+            rec.name.clone(),
+            rec.origin,
+            Vec::new(),
+        )))?;
+        // `Document::apply` はコマンドを消費するので `created()` を読めない。
+        // `AddLayer` と同じく名前で引く。
+        let id = doc
+            .definitions()
+            .by_name(&rec.name)
+            .ok_or(CadError::DefinitionNotFound)?;
+        def_ids.push(id);
+    }
+    for (rec, id) in definitions.iter().zip(def_ids.iter()) {
+        let contents = build_entities(&rec.entities, &layer_ids, &def_ids)?;
+        doc.apply(Box::new(SetDefinitionContents::new(
+            "YMC_LOAD", *id, rec.origin, contents,
+        )))?;
+    }
+
     // ---- エンティティ ----------------------------------------------------
     let group_of: Vec<Option<usize>> = entities.iter().map(|e| e.group_index).collect();
-    let built: Vec<Entity> = entities
-        .into_iter()
-        .map(|rec| {
-            // 添字は `read_entity` で範囲を検査済み。
-            let layer = layer_ids
-                .get(rec.layer_index)
-                .copied()
-                .unwrap_or(LayerId::ZERO);
-            let mut e = Entity::new(rec.geom, layer);
-            e.color = rec.color;
-            e
-        })
-        .collect();
+    let built = build_entities(&entities, &layer_ids, &def_ids)?;
 
     if !built.is_empty() {
         doc.apply(Box::new(AddEntities::many("YMC_LOAD", built)))?;
@@ -283,6 +424,49 @@ fn build_document(
     doc.mark_saved(None);
 
     Ok(doc)
+}
+
+/// 読み取ったレコード列を [`Entity`] へ直す。
+///
+/// 図面直下の要素と定義の中身で同じ処理を使う。
+/// 添字はすべて `read_from_bytes` で範囲を検査済み。
+fn build_entities(
+    records: &[EntityRecord],
+    layer_ids: &[LayerId],
+    def_ids: &[DefinitionId],
+) -> Result<Vec<Entity>> {
+    records
+        .iter()
+        .map(|rec| {
+            let layer = layer_ids
+                .get(rec.layer_index)
+                .copied()
+                .unwrap_or(LayerId::ZERO);
+            let geom = match &rec.geom {
+                GeomRecord::Plain(g) => g.clone(),
+                GeomRecord::Instance {
+                    definition_index,
+                    placement,
+                    overrides,
+                } => {
+                    // 添字は `read_from_bytes` で範囲を検査済み。
+                    // それでも黙って別の定義を指さないよう、ここでもエラーにする。
+                    let definition = def_ids
+                        .get(*definition_index)
+                        .copied()
+                        .ok_or(CadError::DefinitionNotFound)?;
+                    Geometry::Instance(Instance {
+                        definition,
+                        placement: *placement,
+                        overrides: overrides.clone(),
+                    })
+                }
+            };
+            let mut e = Entity::new(geom, layer);
+            e.color = rec.color;
+            Ok(e)
+        })
+        .collect()
 }
 
 /// バイト列を前から読み進める小さなヘルパ。

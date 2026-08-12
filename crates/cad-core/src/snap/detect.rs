@@ -1,5 +1,6 @@
 //! カーソル近傍のスナップ候補の検出。
 
+use crate::component::{self, DefinitionTable};
 use crate::document::Document;
 use crate::entity::{EntityId, Geometry};
 use crate::geom::intersect::{
@@ -47,10 +48,10 @@ pub fn detect(doc: &Document, index: &SpatialIndex, q: &SnapQuery) -> Vec<SnapCa
             continue;
         }
 
-        collect_point_candidates(&mut out, q, id, &entity.geom);
+        collect_point_candidates(&mut out, q, id, &entity.geom, doc.definitions());
 
         if q.modes.is_enabled(SnapKind::Intersection) {
-            push_curves(id, &entity.geom, &mut curves);
+            push_curves(id, &entity.geom, doc.definitions(), &mut curves);
         }
     }
 
@@ -98,6 +99,7 @@ fn collect_point_candidates(
     q: &SnapQuery,
     id: EntityId,
     geom: &Geometry,
+    defs: &DefinitionTable,
 ) {
     match geom {
         Geometry::Line(l) => {
@@ -200,6 +202,14 @@ fn collect_point_candidates(
                 }
             }
         }
+        // 中身をワールド座標へ展開し、その各図形の候補を集める。
+        // **候補の `EntityId` はインスタンス自身**なので、スナップしても
+        // 選択されるのはインスタンス（中身の個別要素ではない）。
+        Geometry::Instance(i) => {
+            for g in component::resolve(i, defs) {
+                collect_point_candidates(out, q, id, &g, defs);
+            }
+        }
     }
 }
 
@@ -294,7 +304,15 @@ enum Curve {
 }
 
 /// エンティティを [`Curve`] へ平坦化して `out` に積む。
-fn push_curves(id: EntityId, geom: &Geometry, out: &mut Vec<(EntityId, Curve)>) {
+///
+/// **インスタンスは中身へ展開する。** そうしないとコンポーネント内部の端点・中点・
+/// 交点にスナップできず、配置したコンポーネントを基準に作図できなくなる。
+fn push_curves(
+    id: EntityId,
+    geom: &Geometry,
+    defs: &DefinitionTable,
+    out: &mut Vec<(EntityId, Curve)>,
+) {
     match geom {
         Geometry::Line(l) => out.push((id, Curve::Line(*l))),
         Geometry::Circle(c) => out.push((id, Curve::Circle(*c))),
@@ -303,6 +321,13 @@ fn push_curves(id: EntityId, geom: &Geometry, out: &mut Vec<(EntityId, Curve)>) 
         Geometry::Polyline(pl) => {
             for s in pl.segments() {
                 out.push((id, Curve::Line(s)));
+            }
+        }
+        // 中身をワールド座標へ展開して、その各図形を再帰的に積む。
+        // 入れ子は `resolve` が処理済みなので、ここに `Instance` は返ってこない。
+        Geometry::Instance(i) => {
+            for g in component::resolve(i, defs) {
+                push_curves(id, &g, defs, out);
             }
         }
     }

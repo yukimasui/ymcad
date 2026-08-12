@@ -4,6 +4,7 @@
 //! 詳しい理由と型による強制のしかたは [`EditCtx`] を参照。
 
 pub mod basic;
+pub mod component_ops;
 pub mod edit_ctx;
 pub mod edit_geometry;
 pub mod group_ops;
@@ -13,6 +14,7 @@ pub mod stretch;
 pub mod transform;
 
 pub use basic::{AddEntities, DeleteEntities};
+pub use component_ops::{DefineComponent, DeleteDefinition, InsertInstance, SetDefinitionContents};
 pub use edit_ctx::EditCtx;
 pub use edit_geometry::{CornerEntities, CornerKind, ExtendEntity, TrimEntity};
 pub use group_ops::{CreateGroup, ExplodeEntities, Ungroup};

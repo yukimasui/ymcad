@@ -1,7 +1,9 @@
 //! エンティティとレイヤを変更できる唯一のハンドル。
 
+use crate::component::{Definition, DefinitionId, DefinitionTable};
 use crate::entity::{Entity, EntityId, EntityStore};
 use crate::error::{CadError, Result};
+use crate::geom::Point2;
 use crate::group::{Group, GroupId, GroupTable};
 use crate::layer::{Layer, LayerId, LayerTable};
 
@@ -36,6 +38,7 @@ pub struct EditCtx<'a> {
     entities: &'a mut EntityStore,
     layers: &'a mut LayerTable,
     groups: &'a mut GroupTable,
+    definitions: &'a mut DefinitionTable,
     _seal: Seal,
 }
 
@@ -45,11 +48,13 @@ impl<'a> EditCtx<'a> {
         entities: &'a mut EntityStore,
         layers: &'a mut LayerTable,
         groups: &'a mut GroupTable,
+        definitions: &'a mut DefinitionTable,
     ) -> Self {
         Self {
             entities,
             layers,
             groups,
+            definitions,
             _seal: Seal,
         }
     }
@@ -163,6 +168,69 @@ impl<'a> EditCtx<'a> {
         self.groups
             .rename(id, new_name)
             .ok_or(CadError::GroupNotFound)
+    }
+
+    // ---- コンポーネント定義の変更 -----------------------------------------
+
+    /// コンポーネント定義の読み取り。
+    #[must_use]
+    pub fn definitions(&self) -> &DefinitionTable {
+        self.definitions
+    }
+
+    /// 定義を追加する（同名があればその ID を返す）。
+    pub fn add_definition(&mut self, def: Definition) -> DefinitionId {
+        self.definitions.insert(def)
+    }
+
+    /// 定義を取り除く。
+    ///
+    /// # Errors
+    ///
+    /// 存在しない ID の場合 [`CadError::DefinitionNotFound`]。
+    pub fn remove_definition(&mut self, id: DefinitionId) -> Result<Definition> {
+        self.definitions.remove(id)
+    }
+
+    /// 取り除いた定義を **元の ID のまま** 戻す。Undo で使う。
+    ///
+    /// # Errors
+    ///
+    /// スロットが埋まっている場合 [`CadError::SlotOccupied`]。
+    pub fn restore_definition(&mut self, id: DefinitionId, def: Definition) -> Result<()> {
+        self.definitions.restore(id, def)
+    }
+
+    /// 定義の中身を差し替える。差し替え前の基点と中身を返す。
+    ///
+    /// **これが「定義を編集すると全インスタンスが追従する」の実体。**
+    /// インスタンス側は定義を ID で参照しているだけなので、ここを変えるだけで済む。
+    ///
+    /// # Errors
+    ///
+    /// 存在しない ID の場合 [`CadError::DefinitionNotFound`]。
+    pub fn replace_definition_contents(
+        &mut self,
+        id: DefinitionId,
+        origin: Point2,
+        entities: Vec<Entity>,
+    ) -> Result<(Point2, Vec<Entity>)> {
+        self.definitions.replace_contents(id, origin, entities)
+    }
+
+    /// 定義名を変更する。古い名前を返す。
+    ///
+    /// # Errors
+    ///
+    /// 存在しない ID の場合 [`CadError::DefinitionNotFound`]。
+    pub fn rename_definition(
+        &mut self,
+        id: DefinitionId,
+        new_name: impl Into<String>,
+    ) -> Result<String> {
+        self.definitions
+            .rename(id, new_name)
+            .ok_or(CadError::DefinitionNotFound)
     }
 
     /// レイヤを取り除き、中身を返す。Undo で戻せるよう必ず受け取ること。

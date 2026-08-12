@@ -25,6 +25,7 @@ pub struct WriteReport {
 }
 
 use super::{rad_to_deg, ACAD_VERSION};
+use crate::component::DefinitionId;
 use crate::document::Document;
 use crate::entity::{Entity, EntityId, Geometry};
 use crate::error::Result;
@@ -188,7 +189,18 @@ fn xline_span(doc: &Document) -> f64 {
     }
 }
 
-fn write_entity(w: &mut Writer, id: EntityId, entity: &Entity, layer_name: &str, xline_span: f64) {
+/// エンティティ 1 件を書く。
+///
+/// `block_names` はコンポーネント定義 ID → DXF のブロック名。
+/// `Geometry::Instance` を `INSERT` として書くのに使う。
+fn write_entity(
+    w: &mut Writer,
+    id: EntityId,
+    entity: &Entity,
+    layer_name: &str,
+    xline_span: f64,
+    block_names: &HashMap<DefinitionId, String>,
+) {
     match &entity.geom {
         Geometry::Line(l) => {
             w.pair(0, "LINE");
@@ -251,19 +263,115 @@ fn write_entity(w: &mut Writer, id: EntityId, entity: &Entity, layer_name: &str,
             }
             w.pair(0, "SEQEND");
         }
+        // R12 には BLOCK / INSERT があるので、そのまま対応づけられる。
+        //
+        // **ただしパラメータと式の束縛は R12 に置き場所が無い。**
+        // 書き出すと「その時点の形に固まったブロック」になり、
+        // 読み戻してもパラメータを動かせない。呼び出し側が警告を出す。
+        Geometry::Instance(i) => {
+            let Some(name) = block_names.get(&i.definition) else {
+                // 定義が見つからないインスタンスは書けない。
+                // `Document` の不変条件では起こらないが、黙って壊れた DXF を
+                // 吐くより何も書かないほうがよい。
+                return;
+            };
+            w.pair(0, "INSERT");
+            w.pair(5, &id.to_dxf_handle());
+            w.pair(8, layer_name);
+            write_entity_color(w, entity.color);
+            w.pair(2, name);
+            w.pair_f64(10, i.placement.origin.x);
+            w.pair_f64(20, i.placement.origin.y);
+            // 一様倍率なので 3 軸に同じ値を入れる。
+            // **反転は Y の符号で表す**（AutoCAD の慣習）。R12 に反転フラグは無い。
+            let sy = if i.placement.flipped {
+                -i.placement.scale
+            } else {
+                i.placement.scale
+            };
+            w.pair_f64(41, i.placement.scale);
+            w.pair_f64(42, sy);
+            w.pair_f64(43, i.placement.scale);
+            // 角度の変換は rad_to_deg の 1 箇所だけを通す。
+            w.pair_f64(50, rad_to_deg(i.placement.rotation));
+        }
     }
+}
+
+/// コンポーネント定義 ID → DXF のブロック名の対応表。
+///
+/// ブロック名にもレイヤ名と同じサニタイズをかける（R12 では大文字・空白なしが安全）。
+/// 非可逆な変換なので正規化後に衝突しうる点も同じで、`_2`, `_3`, … で一意にする
+/// （[`sanitized_layer_names`] と同じ流儀）。
+fn sanitized_block_names(doc: &Document) -> HashMap<DefinitionId, String> {
+    let mut used: HashSet<String> = HashSet::new();
+    let mut map = HashMap::new();
+    for (id, def) in doc.definitions().iter() {
+        let base = super::sanitize_layer_name(&def.name);
+        let mut candidate = base.clone();
+        let mut suffix = 2u32;
+        while used.contains(&candidate) {
+            candidate = format!("{base}_{suffix}");
+            suffix += 1;
+        }
+        used.insert(candidate.clone());
+        map.insert(id, candidate);
+    }
+    map
+}
+
+/// `BLOCKS` セクション。`ENTITIES` より**前**に置かなければならない。
+///
+/// R12 のリーダは順に読むので、`INSERT` が参照するブロックが後ろにあると解決できない。
+fn write_blocks(
+    w: &mut Writer,
+    doc: &Document,
+    layer_names: &HashMap<LayerId, String>,
+    block_names: &HashMap<DefinitionId, String>,
+    span: f64,
+) {
+    w.pair(0, "SECTION");
+    w.pair(2, "BLOCKS");
+
+    for (id, def) in doc.definitions().iter() {
+        let Some(name) = block_names.get(&id) else {
+            continue;
+        };
+        w.pair(0, "BLOCK");
+        w.pair(8, "0");
+        w.pair(2, name);
+        w.pair_i32(70, 0);
+        // 基点。INSERT の挿入点にこの点が来る。
+        w.pair_f64(10, def.origin.x);
+        w.pair_f64(20, def.origin.y);
+        w.pair_f64(30, 0.0);
+        w.pair(3, name);
+
+        for (i, entity) in def.entities.iter().enumerate() {
+            let layer_name = layer_name_for(layer_names, entity.layer);
+            // 定義の中身は `EntityId` を持たないので、ハンドルは定義と添字から作る。
+            let handle = EntityId::new(id.index(), u32::try_from(i).unwrap_or(0));
+            write_entity(w, handle, entity, layer_name, span, block_names);
+        }
+
+        w.pair(0, "ENDBLK");
+        w.pair(8, "0");
+    }
+
+    w.pair(0, "ENDSEC");
 }
 
 fn write_entities(
     w: &mut Writer,
     doc: &Document,
     names: &HashMap<LayerId, String>,
+    block_names: &HashMap<DefinitionId, String>,
+    span: f64,
     warnings: &mut Vec<String>,
 ) {
     w.pair(0, "SECTION");
     w.pair(2, "ENTITIES");
 
-    let span = xline_span(doc);
     let mut xline_count = 0usize;
 
     for (id, entity) in doc.entities().iter() {
@@ -271,7 +379,7 @@ fn write_entities(
             xline_count += 1;
         }
         let layer_name = layer_name_for(names, entity.layer);
-        write_entity(w, id, entity, layer_name, span);
+        write_entity(w, id, entity, layer_name, span, block_names);
     }
 
     // 何本あっても警告は 1 行にまとめる。
@@ -288,13 +396,28 @@ fn write_entities(
 #[must_use]
 pub fn write_to_string(doc: &Document) -> WriteReport {
     let names = sanitized_layer_names(doc);
+    let block_names = sanitized_block_names(doc);
+    let span = xline_span(doc);
 
     let mut w = Writer::new();
     let mut warnings = Vec::new();
     write_header(&mut w, doc);
     write_layer_table(&mut w, doc, &names);
-    write_entities(&mut w, doc, &names, &mut warnings);
+    // BLOCKS は ENTITIES より前。R12 のリーダは順に読むので、
+    // INSERT が参照するブロックが後ろにあると解決できない。
+    write_blocks(&mut w, doc, &names, &block_names, span);
+    write_entities(&mut w, doc, &names, &block_names, span, &mut warnings);
     w.pair(0, "EOF");
+
+    // コンポーネントは BLOCK / INSERT として書けるが、パラメータと式の束縛は
+    // R12 に置き場所が無い。「その時点の形に固まったブロック」になることを伝える。
+    let definition_count = doc.definitions().len();
+    if definition_count > 0 {
+        warnings.push(format!(
+            "コンポーネント {definition_count} 件はブロックとして書き出しました。\
+             パラメータは DXF R12 に無いため失われ、読み戻すと形が固定されます"
+        ));
+    }
 
     WriteReport {
         text: w.finish(),

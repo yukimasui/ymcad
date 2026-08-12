@@ -135,7 +135,7 @@ impl SpatialIndex {
             .entities()
             .iter()
             .filter(|(_, e)| doc.layers().is_entity_visible(e))
-            .map(|(id, e)| (id, e.bbox()))
+            .map(|(id, e)| (id, e.bbox(doc.definitions())))
             .collect();
 
         let bounds = items
@@ -189,6 +189,15 @@ impl Default for SpatialIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::DefinitionTable;
+
+    /// テスト用の空の定義テーブル。
+    ///
+    /// インスタンスを含まない図形の `bbox` / `dist_to` は定義を引かないので、
+    /// 空でよい。インスタンスを扱うテストは `component` 側にある。
+    fn defs() -> DefinitionTable {
+        DefinitionTable::new()
+    }
     use crate::command::AddEntities;
     use crate::entity::{Entity, Geometry};
     use crate::geom::{Circle, Line, Polyline};
@@ -209,7 +218,7 @@ mod tests {
         doc.entities()
             .iter()
             .filter(|(_, e)| doc.layers().is_entity_visible(e))
-            .filter(|(_, e)| e.bbox().intersects(&area))
+            .filter(|(_, e)| e.bbox(&defs()).intersects(&area))
             .map(|(id, _)| id)
             .collect()
     }

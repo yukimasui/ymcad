@@ -5,6 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::command::{Command, EditCtx, UndoStack};
+use crate::component::DefinitionTable;
 use crate::entity::EntityStore;
 use crate::error::Result;
 use crate::geom::Aabb;
@@ -23,6 +24,7 @@ pub struct Document {
     entities: EntityStore,
     layers: LayerTable,
     groups: GroupTable,
+    definitions: DefinitionTable,
     history: UndoStack,
     revision: u64,
     dirty: bool,
@@ -43,6 +45,7 @@ impl Document {
             entities: EntityStore::new(),
             layers: LayerTable::new(),
             groups: GroupTable::new(),
+            definitions: DefinitionTable::new(),
             history: UndoStack::default(),
             revision: 0,
             dirty: false,
@@ -70,6 +73,12 @@ impl Document {
         &self.groups
     }
 
+    /// コンポーネント定義。
+    #[must_use]
+    pub fn definitions(&self) -> &DefinitionTable {
+        &self.definitions
+    }
+
     /// Undo 履歴。
     #[must_use]
     pub fn history(&self) -> &UndoStack {
@@ -79,7 +88,7 @@ impl Document {
     /// 図面全体の境界ボックス。ZOOM EXTENTS で使う。
     #[must_use]
     pub fn bbox(&self) -> Aabb {
-        self.entities.bbox()
+        self.entities.bbox(&self.definitions)
     }
 
     /// 変更のたびに増える版番号。
@@ -114,7 +123,12 @@ impl Document {
     /// コマンドの `execute` が失敗した場合。
     pub fn apply(&mut self, mut command: Box<dyn Command>) -> Result<()> {
         {
-            let mut ctx = EditCtx::new(&mut self.entities, &mut self.layers, &mut self.groups);
+            let mut ctx = EditCtx::new(
+                &mut self.entities,
+                &mut self.layers,
+                &mut self.groups,
+                &mut self.definitions,
+            );
             command.execute(&mut ctx)?;
         }
         self.history.push(command);
@@ -134,7 +148,12 @@ impl Document {
         let name = command.name();
 
         let result = {
-            let mut ctx = EditCtx::new(&mut self.entities, &mut self.layers, &mut self.groups);
+            let mut ctx = EditCtx::new(
+                &mut self.entities,
+                &mut self.layers,
+                &mut self.groups,
+                &mut self.definitions,
+            );
             command.undo(&mut ctx)
         };
 
@@ -164,7 +183,12 @@ impl Document {
         let name = command.name();
 
         let result = {
-            let mut ctx = EditCtx::new(&mut self.entities, &mut self.layers, &mut self.groups);
+            let mut ctx = EditCtx::new(
+                &mut self.entities,
+                &mut self.layers,
+                &mut self.groups,
+                &mut self.definitions,
+            );
             command.execute(&mut ctx)
         };
 

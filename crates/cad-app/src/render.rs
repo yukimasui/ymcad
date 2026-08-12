@@ -4,6 +4,7 @@
 //! モデル座標からスクリーン座標への変換は必ず [`Viewport`] を経由すること
 //! （このモジュールに `as f32` を書かない）。
 
+use crate::resolved::ResolvedInstances;
 use crate::selection::{Selection, WindowMode};
 use crate::viewport::{px_to_f32, Viewport};
 use cad_core::geom::{Line, Point2};
@@ -219,11 +220,15 @@ const PREVIEW_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
 /// 図面のエンティティを描く。
 ///
 /// 非表示レイヤの要素と、画面外の要素は描かない。
+///
+/// `resolved` はコンポーネントインスタンスの展開結果のキャッシュ。
+/// インスタンスは中身を持たないので、これを通さないと描けない。
 pub fn draw_entities(
     painter: &egui::Painter,
     doc: &Document,
     vp: &Viewport,
     selection: &Selection,
+    resolved: &mut ResolvedInstances,
 ) {
     let view = vp.visible_model_rect();
     if view.is_empty() {
@@ -232,11 +237,15 @@ pub fn draw_entities(
     // 線幅ぶんだけ広げてカリングする。境界上の要素が消えないように。
     let cull = view.expanded(vp.px_to_model_len(SELECTED_STROKE_PX));
 
+    // 展開結果はループの前に 1 回だけ用意する。ループの中で `&mut` を取ると
+    // `Document` の借用と衝突し、毎フレーム複製する羽目になる。
+    resolved.refresh(doc);
+
     for (id, entity) in doc.entities().iter() {
         if !doc.layers().is_entity_visible(entity) {
             continue;
         }
-        if !cull.intersects(&entity.bbox()) {
+        if !cull.intersects(&entity.bbox(doc.definitions())) {
             continue;
         }
 
@@ -255,13 +264,17 @@ pub fn draw_entities(
 
         // 線種はレイヤから継承する。実線ならパターンは空。
         let linetype = doc.layers().resolve_linetype(entity);
-        draw_geometry(
-            painter,
-            vp,
-            &entity.geom,
-            egui::Stroke::new(width, color),
-            linetype,
-        );
+        let stroke = egui::Stroke::new(width, color);
+
+        // インスタンスは展開結果を描く。それ以外は自分自身 1 つ。
+        match &entity.geom {
+            Geometry::Instance(_) => {
+                for g in resolved.get(id).unwrap_or(&[]) {
+                    draw_geometry(painter, vp, g, stroke, linetype);
+                }
+            }
+            geom => draw_geometry(painter, vp, geom, stroke, linetype),
+        }
     }
 }
 
@@ -284,6 +297,9 @@ pub fn draw_geometry(
 ) {
     match geom {
         Geometry::Line(l) => draw_clipped_segment(painter, vp, l, stroke, linetype),
+        // インスタンスは `draw_entities` が展開してから渡すので、ここには来ない。
+        // 中身を持たないので、定義テーブル無しでは何も描けない。
+        Geometry::Instance(_) => {}
         // 作図線は無限に伸びるので、表示範囲へクリップした線分として描く。
         // 長さは表示範囲から導かれるので、どれだけズームしても巨大座標にならない。
         Geometry::Xline(x) => {

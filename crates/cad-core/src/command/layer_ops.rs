@@ -383,6 +383,7 @@ impl Command for MoveEntitiesToLayer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::DefinitionTable;
     use crate::entity::{EntityStore, Geometry};
     use crate::geom::{Line, Point2};
     use crate::group::GroupTable;
@@ -397,16 +398,21 @@ mod tests {
 
     /// テスト用の `EntityStore` / `LayerTable` の組。`EditCtx` はこの 2 つの
     /// `&mut` からしか作れない。
-    fn new_parts() -> (EntityStore, LayerTable, GroupTable) {
-        (EntityStore::new(), LayerTable::new(), GroupTable::new())
+    fn new_parts() -> (EntityStore, LayerTable, GroupTable, DefinitionTable) {
+        (
+            EntityStore::new(),
+            LayerTable::new(),
+            GroupTable::new(),
+            DefinitionTable::new(),
+        )
     }
 
     // ---- AddLayer -----------------------------------------------------
 
     #[test]
     fn add_layer_execute_creates_and_returns_id() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
 
         let mut cmd = AddLayer::new("WALL", AciColor::RED);
         assert!(cmd.created().is_none(), "適用前は None のはず");
@@ -420,8 +426,8 @@ mod tests {
 
     #[test]
     fn add_layer_undo_removes_it_exactly() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let before = ctx.layers().len();
 
         let mut cmd = AddLayer::new("WALL", AciColor::RED);
@@ -435,8 +441,8 @@ mod tests {
 
     #[test]
     fn add_layer_redo_after_undo_recreates() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
 
         let mut cmd = AddLayer::new("WALL", AciColor::RED);
         cmd.execute(&mut ctx).unwrap();
@@ -451,8 +457,8 @@ mod tests {
 
     #[test]
     fn set_layer_properties_execute_changes_only_specified_fields() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
 
         let mut cmd = SetLayerProperties::new(id)
@@ -469,8 +475,8 @@ mod tests {
 
     #[test]
     fn set_layer_properties_undo_restores_all_fields() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
 
         let mut cmd = SetLayerProperties::new(id)
@@ -490,8 +496,8 @@ mod tests {
 
     #[test]
     fn set_layer_properties_redo_after_undo_reapplies() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
 
         let mut cmd = SetLayerProperties::new(id).linetype(LineType::Center);
@@ -504,8 +510,8 @@ mod tests {
 
     #[test]
     fn set_layer_properties_missing_layer_fails() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         // 追加してすぐ削除し、存在しない ID を用意する。
         let ghost = ctx.add_layer(Layer::new("GHOST", AciColor::WHITE));
         ctx.remove_layer(ghost).unwrap();
@@ -517,8 +523,8 @@ mod tests {
 
     #[test]
     fn hidden_layer_still_hides_and_disables_entity() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("HIDDEN", AciColor::WHITE));
         let mut cmd = SetLayerProperties::new(id).visible(false);
         cmd.execute(&mut ctx).unwrap();
@@ -530,8 +536,8 @@ mod tests {
 
     #[test]
     fn locked_layer_still_visible_but_not_editable() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("LOCKED", AciColor::WHITE));
         let mut cmd = SetLayerProperties::new(id).locked(true);
         cmd.execute(&mut ctx).unwrap();
@@ -545,8 +551,8 @@ mod tests {
 
     #[test]
     fn rename_layer_execute_updates_name_and_by_name_map() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
 
         let mut cmd = RenameLayer::new(id, "STRUCTURE");
@@ -559,8 +565,8 @@ mod tests {
 
     #[test]
     fn rename_layer_undo_restores_name_and_by_name_map() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
 
         let mut cmd = RenameLayer::new(id, "STRUCTURE");
@@ -574,8 +580,8 @@ mod tests {
 
     #[test]
     fn rename_layer_redo_after_undo_renames_again() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
 
         let mut cmd = RenameLayer::new(id, "STRUCTURE");
@@ -589,8 +595,8 @@ mod tests {
 
     #[test]
     fn rename_layer_zero_is_rejected() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
 
         let mut cmd = RenameLayer::new(LayerId::ZERO, "NOT_ZERO");
         let result = cmd.execute(&mut ctx);
@@ -601,8 +607,8 @@ mod tests {
 
     #[test]
     fn rename_layer_to_existing_other_name_is_rejected() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let a = ctx.add_layer(Layer::new("A", AciColor::WHITE));
         let _b = ctx.add_layer(Layer::new("B", AciColor::WHITE));
 
@@ -615,8 +621,8 @@ mod tests {
 
     #[test]
     fn rename_layer_to_own_name_is_a_noop() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let a = ctx.add_layer(Layer::new("A", AciColor::WHITE));
 
         let mut cmd = RenameLayer::new(a, "A");
@@ -628,8 +634,8 @@ mod tests {
 
     #[test]
     fn rename_layer_missing_layer_fails() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("GHOST", AciColor::WHITE));
         ctx.remove_layer(id).unwrap();
 
@@ -642,8 +648,8 @@ mod tests {
 
     #[test]
     fn set_current_layer_execute_switches_current() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
 
         let mut cmd = SetCurrentLayer::new(id);
@@ -654,8 +660,8 @@ mod tests {
 
     #[test]
     fn set_current_layer_undo_restores_previous_current() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
 
         let mut cmd = SetCurrentLayer::new(id);
@@ -667,8 +673,8 @@ mod tests {
 
     #[test]
     fn set_current_layer_redo_after_undo_switches_again() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
 
         let mut cmd = SetCurrentLayer::new(id);
@@ -681,8 +687,8 @@ mod tests {
 
     #[test]
     fn set_current_layer_missing_layer_fails_and_leaves_current_unchanged() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("GHOST", AciColor::WHITE));
         ctx.remove_layer(id).unwrap();
 
@@ -697,8 +703,8 @@ mod tests {
 
     #[test]
     fn delete_layer_execute_removes_layer_and_its_entities() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
         let e1 = ctx.add_entity(line_entity(id));
         let e2 = ctx.add_entity(line_entity(id));
@@ -715,8 +721,8 @@ mod tests {
 
     #[test]
     fn delete_layer_undo_restores_layer_and_entities_with_same_ids() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::RED));
         let e1 = ctx.add_entity(line_entity(id));
         let e2 = ctx.add_entity(line_entity(id));
@@ -737,8 +743,8 @@ mod tests {
 
     #[test]
     fn delete_layer_redo_after_undo_removes_again() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
         let e1 = ctx.add_entity(line_entity(id));
 
@@ -753,8 +759,8 @@ mod tests {
 
     #[test]
     fn delete_layer_zero_is_rejected() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
 
         let mut cmd = DeleteLayer::new(LayerId::ZERO);
         let result = cmd.execute(&mut ctx);
@@ -765,8 +771,8 @@ mod tests {
 
     #[test]
     fn delete_current_layer_is_rejected() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
         ctx.set_current_layer(id);
 
@@ -779,8 +785,8 @@ mod tests {
 
     #[test]
     fn delete_layer_missing_layer_fails() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("GHOST", AciColor::WHITE));
         ctx.remove_layer(id).unwrap();
 
@@ -793,8 +799,8 @@ mod tests {
 
     #[test]
     fn move_entities_to_layer_execute_changes_layer() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let dest = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
         let a = ctx.add_entity(line_entity(LayerId::ZERO));
         let b = ctx.add_entity(line_entity(LayerId::ZERO));
@@ -808,8 +814,8 @@ mod tests {
 
     #[test]
     fn move_entities_to_layer_undo_restores_original_layers() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let dest = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
         let a = ctx.add_entity(line_entity(LayerId::ZERO));
 
@@ -822,8 +828,8 @@ mod tests {
 
     #[test]
     fn move_entities_to_layer_redo_after_undo_moves_again() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let dest = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
         let a = ctx.add_entity(line_entity(LayerId::ZERO));
 
@@ -837,8 +843,8 @@ mod tests {
 
     #[test]
     fn move_entities_to_layer_missing_destination_fails_and_leaves_document_unchanged() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let ghost = ctx.add_layer(Layer::new("GHOST", AciColor::WHITE));
         ctx.remove_layer(ghost).unwrap();
         let a = ctx.add_entity(line_entity(LayerId::ZERO));
@@ -852,8 +858,8 @@ mod tests {
 
     #[test]
     fn move_entities_to_layer_missing_entity_leaves_document_unchanged() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let dest = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
         let survivor = ctx.add_entity(line_entity(LayerId::ZERO));
         let doomed = ctx.add_entity(line_entity(LayerId::ZERO));
@@ -905,8 +911,8 @@ mod tests {
 
     #[test]
     fn resolve_linetype_inherits_from_layer() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
         let mut set = SetLayerProperties::new(id).linetype(LineType::Hidden);
         set.execute(&mut ctx).unwrap();
@@ -917,8 +923,8 @@ mod tests {
 
     #[test]
     fn resolve_linetype_defaults_to_continuous_for_new_layer() {
-        let (mut entities, mut layers, mut groups) = new_parts();
-        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups);
+        let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+        let mut ctx = EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
         let id = ctx.add_layer(Layer::new("WALL", AciColor::WHITE));
 
         let e = line_entity(id);

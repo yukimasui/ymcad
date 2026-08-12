@@ -1,5 +1,6 @@
 //! 図形要素の定義。
 
+use crate::component::{self, DefinitionTable, Instance};
 use crate::geom::{Aabb, Arc, Circle, Line, Point2, Polyline, Vec2, Xline};
 use crate::group::GroupId;
 use crate::layer::{ColorSpec, LayerId};
@@ -17,12 +18,26 @@ pub enum Geometry {
     Xline(Xline),
     /// ポリライン（連結した線分列）。
     Polyline(Polyline),
+    /// 配置されたコンポーネント（[`crate::component`] を参照）。
+    ///
+    /// 中身は自分では持たず、定義を ID で参照する。
+    /// そのため **[`Self::bbox`] などは [`DefinitionTable`] を必要とする**。
+    Instance(Instance),
 }
 
 impl Geometry {
     /// 境界ボックス。
+    ///
+    /// # 定義テーブルを引数で受け取る理由
+    ///
+    /// [`Self::Instance`] は中身を持たないので、定義を引かないと範囲が分からない。
+    /// ここで `Aabb::EMPTY` を返して逃げると **XLINE のときと同じ罠**を踏む
+    /// （`EMPTY` だと `render` のカリングと矩形選択から落ちて、
+    /// 「描画されない・選択できない」図形になる）。
+    ///
+    /// 引数で受け取れば、依存が隠れずコンパイラが全呼び出し元を見つける。
     #[must_use]
-    pub fn bbox(&self) -> Aabb {
+    pub fn bbox(&self, defs: &DefinitionTable) -> Aabb {
         match self {
             Self::Line(l) => l.bbox(),
             Self::Circle(c) => c.bbox(),
@@ -31,28 +46,36 @@ impl Geometry {
             // `EntityStore::bbox` が `is_bounded` を見て除外する。
             Self::Xline(_) => Aabb::UNBOUNDED,
             Self::Polyline(p) => p.bbox(),
+            Self::Instance(i) => component::instance_bbox(i, defs),
         }
     }
 
     /// 点との最短距離。ピックやスナップの判定に使う。
+    ///
+    /// `defs` が必要な理由は [`Self::bbox`] と同じ。
     #[must_use]
-    pub fn dist_to(&self, p: Point2) -> f64 {
+    pub fn dist_to(&self, defs: &DefinitionTable, p: Point2) -> f64 {
         match self {
             Self::Line(l) => l.dist_to(p),
             Self::Circle(c) => c.dist_to(p),
             Self::Arc(a) => a.dist_to(p),
             Self::Xline(x) => x.dist_to(p),
             Self::Polyline(pl) => pl.dist_to(p),
+            Self::Instance(i) => component::instance_dist_to(i, defs, p),
         }
     }
 
-    /// 有界な図形か。作図線だけが `false`。
+    /// 有界な図形か。作図線と、作図線を含むインスタンスが `false`。
     ///
     /// 図面範囲（ZOOM EXTENTS）の計算から無限図形を外すために使う。
     /// AutoCAD も作図線を図面範囲に含めない。
     #[must_use]
-    pub fn is_bounded(&self) -> bool {
-        !matches!(self, Self::Xline(_))
+    pub fn is_bounded(&self, defs: &DefinitionTable) -> bool {
+        match self {
+            Self::Xline(_) => false,
+            Self::Instance(i) => component::instance_is_bounded(i, defs),
+            _ => true,
+        }
     }
 
     /// コマンド名などに使う種別名。
@@ -65,6 +88,8 @@ impl Geometry {
             Self::Xline(_) => "XLINE",
             // DXF R12 での LWPOLYLINE 相当の名前（Phase 6 の DXF 出力で使う）。
             Self::Polyline(_) => "LWPOLYLINE",
+            // DXF R12 の INSERT 相当。
+            Self::Instance(_) => "INSERT",
         }
     }
 
@@ -77,6 +102,12 @@ impl Geometry {
             Self::Arc(a) => Self::Arc(a.translated(v)),
             Self::Xline(x) => Self::Xline(x.translated(v)),
             Self::Polyline(p) => Self::Polyline(p.translated(v)),
+            // 中身は触らず、配置の基点だけを動かす。
+            Self::Instance(i) => {
+                let mut p = i.placement;
+                p.origin += v;
+                Self::Instance(i.with_placement(p))
+            }
         }
     }
 
@@ -121,6 +152,17 @@ impl Geometry {
                 let vertices = p.vertices.iter().copied().map(move_if_inside).collect();
                 Self::Polyline(Polyline::new(vertices, p.closed))
             }
+            // インスタンスは変形できない。AutoCAD と同じく、基点が範囲に入っていれば
+            // 全体を平行移動し、そうでなければ動かさない。
+            Self::Instance(i) => {
+                if inside(i.placement.origin) {
+                    let mut p = i.placement;
+                    p.origin += delta;
+                    Self::Instance(i.with_placement(p))
+                } else {
+                    Self::Instance(i.clone())
+                }
+            }
         }
     }
 
@@ -143,6 +185,13 @@ impl Geometry {
             Self::Polyline(p) => {
                 let vertices = p.vertices.iter().copied().map(rot).collect();
                 Self::Polyline(Polyline::new(vertices, p.closed))
+            }
+            // 基点を回し、配置の回転角に加える。中身は触らない。
+            Self::Instance(i) => {
+                let mut pl = i.placement;
+                pl.origin = rot(pl.origin);
+                pl.rotation += angle;
+                Self::Instance(i.with_placement(pl))
             }
         }
     }
@@ -173,6 +222,20 @@ impl Geometry {
             Self::Polyline(p) => {
                 let vertices = p.vertices.iter().copied().map(scale).collect();
                 Self::Polyline(Polyline::new(vertices, p.closed))
+            }
+            // 基点を移し、配置の倍率にかける。
+            //
+            // `Placement` の不変条件は「倍率は正」なので、負の factor は絶対値へ回す。
+            // **2 次元では負の一様倍率は反射ではなく 180 度回転**（行列式が +1）なので、
+            // 反転フラグではなく回転角へ足す。反転フラグを立てると別の図形になる。
+            Self::Instance(i) => {
+                let mut pl = i.placement;
+                pl.origin = scale(pl.origin);
+                pl.scale *= factor.abs();
+                if factor < 0.0 {
+                    pl.rotation += std::f64::consts::PI;
+                }
+                Self::Instance(i.with_placement(pl))
             }
         }
     }
@@ -217,6 +280,28 @@ impl Geometry {
                     .collect();
                 Self::Polyline(Polyline::new(vertices, p.closed))
             }
+            // 中身は触らず、配置だけを鏡像にする。
+            //
+            // インスタンスの変換を複素数で書くと `z → s·e^{iφ}·z + t`（非反転）または
+            // `z → s·e^{iφ}·z̄ + t`（反転）。軸（角度 θ、点 a を通る）での鏡像
+            // `M(z) = e^{2iθ}·(z̄ - ā) + a` を合成すると、どちらの場合も
+            //
+            //   倍率  : そのまま
+            //   回転  : 2θ − φ
+            //   反転  : 反転する
+            //   基点  : 軸で反射した点
+            //
+            // になる。**`Arc` の `2·axis_angle − angle` と同じ形**で、
+            // これは偶然ではなく「反射が向きを逆転させる」同じ事情（ADR-0020）。
+            Self::Instance(i) => {
+                // 非退化なので axis.dir() は必ず Some。
+                let axis_angle = axis.dir().expect("非退化な axis のはず").angle();
+                let mut pl = i.placement;
+                pl.origin = reflect_point(axis, pl.origin);
+                pl.rotation = 2.0 * axis_angle - pl.rotation;
+                pl.flipped = !pl.flipped;
+                Self::Instance(i.with_placement(pl))
+            }
         }
     }
 }
@@ -258,9 +343,11 @@ impl Entity {
     }
 
     /// 境界ボックス。
+    ///
+    /// `defs` が必要な理由は [`Geometry::bbox`] を参照。
     #[must_use]
-    pub fn bbox(&self) -> Aabb {
-        self.geom.bbox()
+    pub fn bbox(&self, defs: &DefinitionTable) -> Aabb {
+        self.geom.bbox(defs)
     }
 
     /// 平行移動した複製を作る（レイヤ・色は変わらない）。
@@ -322,6 +409,15 @@ impl Entity {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::DefinitionTable;
+
+    /// テスト用の空の定義テーブル。
+    ///
+    /// インスタンスを含まない図形の `bbox` / `dist_to` は定義を引かないので、
+    /// 空でよい。インスタンスを扱うテストは `component` 側にある。
+    fn defs() -> DefinitionTable {
+        DefinitionTable::new()
+    }
     use crate::geom::tolerance::{eq_angle, eq_len};
     use crate::geom::{Point2 as P, Vec2 as V};
     use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
@@ -361,7 +457,7 @@ mod tests {
     #[test]
     fn geometry_bbox_dispatches_to_polyline() {
         let g = Geometry::Polyline(Polyline::rectangle(P::new(0.0, 0.0), P::new(2.0, 3.0)));
-        let b = g.bbox();
+        let b = g.bbox(&defs());
         assert_eq!(b.min, P::new(0.0, 0.0));
         assert_eq!(b.max, P::new(2.0, 3.0));
     }
@@ -372,7 +468,7 @@ mod tests {
             vec![P::new(0.0, 0.0), P::new(10.0, 0.0)],
             false,
         ));
-        assert!(eq_len(g.dist_to(P::new(5.0, 3.0)), 3.0));
+        assert!(eq_len(g.dist_to(&defs(), P::new(5.0, 3.0)), 3.0));
     }
 
     #[test]

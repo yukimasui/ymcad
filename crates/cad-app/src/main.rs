@@ -13,6 +13,7 @@ mod input;
 mod jp_font;
 mod layer_panel;
 mod render;
+mod resolved;
 mod selection;
 mod session;
 mod snap;
