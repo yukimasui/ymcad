@@ -36,6 +36,11 @@ pub struct Session {
     tool: Option<Box<dyn Tool>>,
     /// ツール開始前の選択待ち段階か。
     awaiting_selection: bool,
+    /// 選択に使われた交差窓の矩形（モデル座標）。
+    ///
+    /// STRETCH が「どの点を動かすか」を決めるのに使う。窓選択やクリックでは増えない。
+    /// AutoCAD は交差窓を複数回重ねられるので蓄積する。
+    crossing_rects: Vec<Aabb>,
     /// このフレームで発生したビュー操作。
     view_actions: Vec<ViewAction>,
     /// このフレームで発生した UI 要求。
@@ -59,6 +64,7 @@ impl Session {
             selection: Selection::new(),
             tool: None,
             awaiting_selection: false,
+            crossing_rects: Vec::new(),
             view_actions: Vec::new(),
             ui_actions: Vec::new(),
         }
@@ -118,6 +124,7 @@ impl Session {
             doc,
             selection: &self.selection,
             layer: doc.layers().current(),
+            crossing_rects: &self.crossing_rects,
         }
     }
 
@@ -156,6 +163,7 @@ impl Session {
         self.tool = None;
         self.awaiting_selection = false;
         self.selection.clear();
+        self.crossing_rects.clear();
         self.cmdline.clear_input();
     }
 
@@ -239,6 +247,8 @@ impl Session {
         self.tool = Some(tool);
 
         if wants_selection && self.selection.is_empty() {
+            // 選択をやり直すので、前のコマンドが使った範囲も捨てる。
+            self.crossing_rects.clear();
             self.awaiting_selection = true;
         } else if wants_selection {
             // 既に選択済みならそのまま先へ進む。
@@ -287,6 +297,7 @@ impl Session {
                 doc,
                 selection: &self.selection,
                 layer: doc.layers().current(),
+                crossing_rects: &self.crossing_rects,
             };
             tool.step(input, &ctx)
         };
@@ -370,6 +381,12 @@ impl Session {
             } else {
                 self.selection.insert(id);
             }
+        }
+
+        // STRETCH が使う範囲。交差選択のときだけ、追加選択の場合だけ覚える。
+        // Shift での選択解除では範囲を増やさない（動かす対象を広げてしまうため）。
+        if mode == WindowMode::Crossing && !shift {
+            self.crossing_rects.push(rect);
         }
     }
 
@@ -870,5 +887,177 @@ mod flow_tests {
             .cmdline
             .history()
             .any(|l| l.text.contains("相対座標は使えません")));
+    }
+
+    /// 交差窓で選ぶと、その矩形が STRETCH の範囲として記録されること。
+    #[test]
+    fn crossing_selection_records_its_rectangle() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "100,0");
+        enter(&mut s, &mut doc);
+
+        let r = Aabb::new(Point2::new(-5.0, -5.0), Point2::new(5.0, 5.0));
+        s.handle_rect_select(r, WindowMode::Crossing, false, &mut doc);
+        assert_eq!(s.crossing_rects.len(), 1);
+        assert_eq!(s.selection.len(), 1);
+
+        // 窓選択では範囲を増やさない。
+        s.handle_rect_select(
+            Aabb::new(Point2::new(-200.0, -200.0), Point2::new(200.0, 200.0)),
+            WindowMode::Window,
+            false,
+            &mut doc,
+        );
+        assert_eq!(s.crossing_rects.len(), 1, "窓選択は範囲に数えない");
+    }
+
+    /// **STRETCH の本体。** 交差範囲に入っている端点だけが動くこと。
+    #[test]
+    fn stretch_moves_only_endpoints_inside_the_crossing_region() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "100,0");
+        enter(&mut s, &mut doc);
+        let id = doc.entities().ids().next().unwrap();
+
+        // 始点 (0,0) だけを囲む交差窓。
+        s.handle_rect_select(
+            Aabb::new(Point2::new(-5.0, -5.0), Point2::new(5.0, 5.0)),
+            WindowMode::Crossing,
+            false,
+            &mut doc,
+        );
+
+        feed(&mut s, &mut doc, "S");
+        feed(&mut s, &mut doc, "0,0"); // 基点
+        feed(&mut s, &mut doc, "0,50"); // 目的点
+
+        let cad_core::Geometry::Line(l) = &doc.entities().get(id).unwrap().geom else {
+            panic!("線分のはず");
+        };
+        assert!(
+            eq_len(l.a.x, 0.0) && eq_len(l.a.y, 50.0),
+            "始点は動く: {:?}",
+            l.a
+        );
+        assert!(
+            eq_len(l.b.x, 100.0) && eq_len(l.b.y, 0.0),
+            "範囲外の終点は動かない: {:?}",
+            l.b
+        );
+    }
+
+    /// STRETCH が Undo で完全に戻ること。
+    #[test]
+    fn stretch_undo_restores_original_geometry() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "100,0");
+        enter(&mut s, &mut doc);
+        let id = doc.entities().ids().next().unwrap();
+        let before = doc.entities().get(id).unwrap().geom.clone();
+
+        s.handle_rect_select(
+            Aabb::new(Point2::new(-5.0, -5.0), Point2::new(5.0, 5.0)),
+            WindowMode::Crossing,
+            false,
+            &mut doc,
+        );
+        feed(&mut s, &mut doc, "S");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "10,20");
+        assert_ne!(doc.entities().get(id).unwrap().geom, before);
+
+        feed(&mut s, &mut doc, "U");
+        assert_eq!(
+            doc.entities().get(id).unwrap().geom,
+            before,
+            "Undo で完全に元へ戻ること"
+        );
+    }
+
+    /// 交差窓を使わずクリックで選んだ場合は、図形が丸ごと動くこと（AutoCAD と同じ）。
+    #[test]
+    fn stretch_without_crossing_region_moves_whole_entity() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "100,0");
+        enter(&mut s, &mut doc);
+        let id = doc.entities().ids().next().unwrap();
+
+        // クリック相当。範囲は記録されない。
+        s.handle_click(Point2::new(50.0, 0.0), false, 1.0, &mut doc);
+        assert_eq!(s.selection.len(), 1);
+        assert!(s.crossing_rects.is_empty());
+
+        feed(&mut s, &mut doc, "S");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "0,10");
+
+        let cad_core::Geometry::Line(l) = &doc.entities().get(id).unwrap().geom else {
+            panic!("線分のはず");
+        };
+        assert!(eq_len(l.a.y, 10.0) && eq_len(l.b.y, 10.0), "両端が動くはず");
+        assert!(eq_len(l.a.x, 0.0) && eq_len(l.b.x, 100.0), "x は変わらない");
+    }
+
+    /// 交差窓を複数回重ねられること（AutoCAD の挙動）。
+    #[test]
+    fn multiple_crossing_windows_accumulate() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "100,0");
+        enter(&mut s, &mut doc);
+        let id = doc.entities().ids().next().unwrap();
+
+        // 両端をそれぞれ別の交差窓で囲む。
+        for center in [0.0, 100.0] {
+            s.handle_rect_select(
+                Aabb::new(
+                    Point2::new(center - 5.0, -5.0),
+                    Point2::new(center + 5.0, 5.0),
+                ),
+                WindowMode::Crossing,
+                false,
+                &mut doc,
+            );
+        }
+        assert_eq!(s.crossing_rects.len(), 2);
+
+        feed(&mut s, &mut doc, "S");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "0,7");
+
+        let cad_core::Geometry::Line(l) = &doc.entities().get(id).unwrap().geom else {
+            panic!("線分のはず");
+        };
+        assert!(eq_len(l.a.y, 7.0) && eq_len(l.b.y, 7.0), "両端とも動くはず");
+    }
+
+    /// コマンドを切り替えたら前の範囲を引きずらないこと。
+    #[test]
+    fn starting_a_new_command_clears_the_previous_region() {
+        let (mut s, mut doc) = setup();
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "100,0");
+        enter(&mut s, &mut doc);
+
+        s.handle_rect_select(
+            Aabb::new(Point2::new(-5.0, -5.0), Point2::new(5.0, 5.0)),
+            WindowMode::Crossing,
+            false,
+            &mut doc,
+        );
+        assert_eq!(s.crossing_rects.len(), 1);
+
+        s.cancel();
+        assert!(s.crossing_rects.is_empty(), "Esc で範囲も捨てる");
     }
 }
