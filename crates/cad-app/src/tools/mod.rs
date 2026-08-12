@@ -213,6 +213,24 @@ pub static COMMANDS: &[CommandSpec] = &[
         kind: CommandKind::Tool(|| Box::new(edit::StretchTool::default())),
     },
     CommandSpec {
+        name: "ROTATE",
+        aliases: &["RO"],
+        summary: "回転（基点+角度）",
+        kind: CommandKind::Tool(|| Box::new(edit::RotateTool::default())),
+    },
+    CommandSpec {
+        name: "SCALE",
+        aliases: &["SC"],
+        summary: "拡大縮小（基点+尺度）",
+        kind: CommandKind::Tool(|| Box::new(edit::ScaleTool::default())),
+    },
+    CommandSpec {
+        name: "MIRROR",
+        aliases: &["MI"],
+        summary: "鏡像（対称軸の2点）",
+        kind: CommandKind::Tool(|| Box::new(edit::MirrorTool::default())),
+    },
+    CommandSpec {
         name: "ZOOM",
         aliases: &["Z"],
         summary: "表示範囲（全体 / 範囲）",
