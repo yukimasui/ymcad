@@ -14,7 +14,7 @@
 //! [`CreateGroup`](super::CreateGroup) と同じ理由（ADR-0004 / ADR-0022）。
 
 use super::{Command, EditCtx};
-use crate::component::{self, Definition, DefinitionId, Instance, Placement};
+use crate::component::{self, Binding, Definition, DefinitionId, Instance, Placement};
 use crate::entity::{Entity, EntityId, Geometry};
 use crate::error::{CadError, Result};
 use crate::geom::Point2;
@@ -114,12 +114,17 @@ pub struct SetDefinitionContents {
     target: DefinitionId,
     origin: Point2,
     contents: Vec<Entity>,
-    /// Undo 用に控えた差し替え前の基点と中身。
-    previous: Option<(Point2, Vec<Entity>)>,
+    /// 座標への束縛。**中身と必ず一緒に持ち替える**（添字がずれるため）。
+    bindings: Vec<Binding>,
+    /// Undo 用に控えた差し替え前の基点・中身・束縛。
+    previous: Option<(Point2, Vec<Entity>, Vec<Binding>)>,
 }
 
 impl SetDefinitionContents {
-    /// 対象と新しい基点・中身を指定して作る。
+    /// 対象と新しい基点・中身を指定して作る。**束縛は空**。
+    ///
+    /// 中身を丸ごと差し替えると、既存の束縛が指す先は別の図形になる。
+    /// 保つ道が無いので捨てる（`component::binding` のモジュールドキュメント）。
     #[must_use]
     pub fn new(
         name: &'static str,
@@ -127,11 +132,24 @@ impl SetDefinitionContents {
         origin: Point2,
         contents: Vec<Entity>,
     ) -> Self {
+        Self::with_bindings(name, target, origin, contents, Vec::new())
+    }
+
+    /// 束縛も指定して作る。
+    #[must_use]
+    pub fn with_bindings(
+        name: &'static str,
+        target: DefinitionId,
+        origin: Point2,
+        contents: Vec<Entity>,
+        bindings: Vec<Binding>,
+    ) -> Self {
         Self {
             name,
             target,
             origin,
             contents,
+            bindings,
             previous: None,
         }
     }
@@ -148,17 +166,31 @@ impl Command for SetDefinitionContents {
             }
         }
 
-        let previous =
-            ctx.replace_definition_contents(self.target, self.origin, self.contents.clone())?;
+        // 束縛が指す先があること、スロットが図形に合うことを先に検査する。
+        // 通してしまうと、解決のたびに黙って無視される束縛が図面に残る。
+        for b in &self.bindings {
+            if !b.fits(&self.contents) {
+                return Err(CadError::DegenerateGeometry(
+                    "束縛が指す図形が無いか、スロットが図形の種類に合いません",
+                ));
+            }
+        }
+
+        let previous = ctx.replace_definition_contents(
+            self.target,
+            self.origin,
+            self.contents.clone(),
+            self.bindings.clone(),
+        )?;
         self.previous = Some(previous);
         Ok(())
     }
 
     fn undo(&mut self, ctx: &mut EditCtx<'_>) -> Result<()> {
-        let Some((origin, contents)) = self.previous.take() else {
+        let Some((origin, contents, bindings)) = self.previous.take() else {
             return Ok(());
         };
-        ctx.replace_definition_contents(self.target, origin, contents)?;
+        ctx.replace_definition_contents(self.target, origin, contents, bindings)?;
         Ok(())
     }
 
