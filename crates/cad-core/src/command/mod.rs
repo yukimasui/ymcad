@@ -17,7 +17,10 @@ pub use layer_ops::{
 };
 pub use stack::UndoStack;
 pub use stretch::StretchEntities;
-pub use transform::{CopyEntities, MoveEntities};
+pub use transform::{
+    CopyEntities, MirrorCopyEntities, MirrorEntities, MoveEntities, RotateCopyEntities,
+    RotateEntities, ScaleCopyEntities, ScaleEntities,
+};
 
 use crate::error::Result;
 
