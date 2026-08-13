@@ -315,6 +315,120 @@ impl Expr {
     }
 }
 
+// ---------------------------------------------------------------------------
+// 式を文字列へ戻す
+// ---------------------------------------------------------------------------
+
+/// 式を**もう一度読める形**で書き出す。
+///
+/// # なぜ必要か
+///
+/// パネルで「この座標は何で動いているか」を見せるのに要る。
+/// 木のまま持っている（[`crate::expr`] のモジュールドキュメント）ので、
+/// 表示のたびに元の文字列へ戻す手段が要る。
+///
+/// **`parse(&expr.to_string())` が同じ木を返すこと**をテストで固定している。
+/// 括弧の付け方を間違えると意味が変わるので、往復で確かめるのがいちばん確実。
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.write(f, 0)
+    }
+}
+
+impl Expr {
+    /// `min_prec` より弱い演算子なら括弧を付けて書く。
+    fn write(&self, f: &mut fmt::Formatter<'_>, min_prec: u8) -> fmt::Result {
+        match self {
+            Self::Literal(v) => write!(f, "{v}"),
+            Self::Var(name) => f.write_str(name),
+            Self::Unary(op, e) => {
+                let symbol = match op {
+                    UnOp::Neg => "-",
+                    UnOp::Not => "!",
+                };
+                f.write_str(symbol)?;
+                // 単項はどの二項より強いので、中身は最強の優先順位で書く。
+                e.write(f, u8::MAX)
+            }
+            Self::Binary(op, a, b) => {
+                let prec = op.precedence();
+                let needs = prec < min_prec;
+                if needs {
+                    f.write_str("(")?;
+                }
+                a.write(f, prec)?;
+                write!(f, " {} ", op.symbol())?;
+                // **右辺は 1 段強い優先順位で書く。**
+                // 左結合なので、`a - (b - c)` の括弧を落とすと意味が変わる。
+                b.write(f, prec + 1)?;
+                if needs {
+                    f.write_str(")")?;
+                }
+                Ok(())
+            }
+            Self::If {
+                cond,
+                then,
+                otherwise,
+            } => {
+                // `if` は最も弱いので、何かの引数になるときは常に括弧を付ける。
+                let needs = min_prec > 0;
+                if needs {
+                    f.write_str("(")?;
+                }
+                f.write_str("if ")?;
+                cond.write(f, 0)?;
+                f.write_str(" then ")?;
+                then.write(f, 0)?;
+                f.write_str(" else ")?;
+                otherwise.write(f, 0)?;
+                if needs {
+                    f.write_str(")")?;
+                }
+                Ok(())
+            }
+            Self::Call1(func, a) => {
+                write!(f, "{}(", func1_name(*func))?;
+                a.write(f, 0)?;
+                f.write_str(")")
+            }
+            Self::Call2(func, a, b) => {
+                write!(f, "{}(", func2_name(*func))?;
+                a.write(f, 0)?;
+                f.write_str(", ")?;
+                b.write(f, 0)?;
+                f.write_str(")")
+            }
+        }
+    }
+}
+
+/// 1 引数の関数の名前。**構文解析が受け付ける綴りと一致させること。**
+fn func1_name(f: Func1) -> &'static str {
+    match f {
+        Func1::Sin => "sin",
+        Func1::Cos => "cos",
+        Func1::Tan => "tan",
+        Func1::Sqrt => "sqrt",
+        Func1::Abs => "abs",
+        Func1::Floor => "floor",
+        Func1::Ceil => "ceil",
+        Func1::Round => "round",
+        Func1::Deg => "deg",
+        Func1::Rad => "rad",
+    }
+}
+
+/// 2 引数の関数の名前。
+fn func2_name(f: Func2) -> &'static str {
+    match f {
+        Func2::Min => "min",
+        Func2::Max => "max",
+        Func2::Atan2 => "atan2",
+        Func2::Pow => "pow",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +486,120 @@ mod tests {
     #[test]
     fn referenced_vars_is_empty_for_constants() {
         assert!(Expr::number(1.0).referenced_vars().is_empty());
+    }
+
+    // ---- 文字列へ戻す -----------------------------------------------------
+
+    /// **書き出して読み直すと同じ木になること。**
+    ///
+    /// 括弧の付け方を間違えると意味が変わる。往復で確かめるのがいちばん確実。
+    #[test]
+    fn formatting_round_trips_through_the_parser() {
+        let sources = [
+            "1",
+            "幅",
+            "真",
+            "'引違い'",
+            "1 + 2 * 3",
+            "(1 + 2) * 3",
+            "10 - 3 - 2",
+            "10 - (3 - 2)",
+            "1 / (2 / 3)",
+            "-幅",
+            "-(幅 + 1)",
+            "!開いている",
+            "!(a && b)",
+            "a && b || c",
+            "a && (b || c)",
+            "幅 > 500 && 高さ < 200",
+            "if 幅 > 0 then 幅 / 2 else 0",
+            "min(幅, 高さ) + 1",
+            "max(幅 / 4, 10)",
+            "sqrt(pow(a, 2) + pow(b, 2))",
+            "atan2(1, 1) + deg(rad(30))",
+            "if a then if b then 1 else 2 else 3",
+            "1 + if a then 2 else 3",
+        ];
+
+        for src in sources {
+            let original = parse(src).unwrap_or_else(|e| panic!("{src} の解析に失敗: {e}"));
+            let text = original.to_string();
+            let again =
+                parse(&text).unwrap_or_else(|e| panic!("{src} → {text} を読み直せない: {e}"));
+            assert_eq!(original, again, "{src} → {text} で木が変わった");
+        }
+    }
+
+    /// **左結合を壊さないこと。**
+    ///
+    /// `10 - (3 - 2)` の括弧を落とすと 9 が 5 になる。
+    #[test]
+    fn right_operands_keep_their_parentheses() {
+        let e = parse("10 - (3 - 2)").expect("解析");
+        assert_eq!(e.to_string(), "10 - (3 - 2)");
+
+        // 左側は括弧が要らない。
+        let e = parse("(10 - 3) - 2").expect("解析");
+        assert_eq!(e.to_string(), "10 - 3 - 2");
+    }
+
+    /// 要らない括弧は付けないこと（読みやすさ）。
+    #[test]
+    fn unnecessary_parentheses_are_dropped() {
+        assert_eq!(parse("(1) + (2)").expect("解析").to_string(), "1 + 2");
+        assert_eq!(parse("1 + (2 * 3)").expect("解析").to_string(), "1 + 2 * 3");
+        assert_eq!(parse("((幅))").expect("解析").to_string(), "幅");
+    }
+
+    /// 弱い演算子が強い演算子の中に来たら括弧を付けること。
+    #[test]
+    fn weaker_operators_are_parenthesised_inside_stronger_ones() {
+        assert_eq!(
+            parse("(1 + 2) * 3").expect("解析").to_string(),
+            "(1 + 2) * 3"
+        );
+        assert_eq!(
+            parse("(a || b) && c").expect("解析").to_string(),
+            "(a || b) && c"
+        );
+    }
+
+    /// `if` は引数になるとき括弧が要ること。
+    #[test]
+    fn conditionals_are_parenthesised_where_needed() {
+        let e = parse("1 + if a then 2 else 3").expect("解析");
+        assert!(e.to_string().contains('('), "括弧が付く: {e}");
+        assert_eq!(parse(&e.to_string()).expect("読み直せる"), e);
+
+        // いちばん外側なら括弧は要らない。
+        let e = parse("if a then 1 else 2").expect("解析");
+        assert_eq!(e.to_string(), "if a then 1 else 2");
+    }
+
+    /// 単項は中身に括弧が要ること。
+    #[test]
+    fn unary_operands_are_parenthesised() {
+        let e = parse("-(1 + 2)").expect("解析");
+        assert_eq!(e.to_string(), "-(1 + 2)");
+        assert_eq!(parse(&e.to_string()).expect("読み直せる"), e);
+    }
+
+    /// **書き出した関数名を構文解析が受け付けること。**
+    #[test]
+    fn every_function_name_round_trips() {
+        let ones = [
+            "sin", "cos", "tan", "sqrt", "abs", "floor", "ceil", "round", "deg", "rad",
+        ];
+        for name in ones {
+            let src = format!("{name}(1)");
+            let e = parse(&src).unwrap_or_else(|err| panic!("{src}: {err}"));
+            assert_eq!(e.to_string(), src);
+        }
+        for name in ["min", "max", "atan2", "pow"] {
+            let src = format!("{name}(1, 2)");
+            let e = parse(&src).unwrap_or_else(|err| panic!("{src}: {err}"));
+            assert_eq!(e.to_string(), src);
+        }
     }
 
     #[test]
