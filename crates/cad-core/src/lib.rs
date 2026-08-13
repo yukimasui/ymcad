@@ -25,6 +25,7 @@ pub mod document;
 pub mod dxf;
 pub mod entity;
 pub mod error;
+pub mod expr;
 pub mod geom;
 pub mod group;
 pub mod layer;

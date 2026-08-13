@@ -32,9 +32,11 @@ from pathlib import Path
 
 # crates/cad-core/src/native/mod.rs と一致していること。
 MAGIC = b"YMCAD\x1a\0\0"
-MAX_KNOWN_VERSION = 2
+MAX_KNOWN_VERSION = 3
 # コンポーネント定義セクションが入った最初の版。
 VERSION_WITH_COMPONENTS = 2
+# パラメータと束縛が入った最初の版。
+VERSION_WITH_PARAMS = 3
 
 KIND_NAMES = {0: "line", 1: "circle", 2: "arc", 3: "xline", 4: "polyline", 5: "instance"}
 LINETYPE_NAMES = {0: "continuous", 1: "dashed", 2: "center", 3: "hidden"}
@@ -54,6 +56,29 @@ PLACEMENT_FLIPPED = 1 << 0
 VALUE_NUMBER = 0
 VALUE_BOOL = 1
 VALUE_CHOICE = 2
+
+# パラメータの型（形式 v3）。
+PARAM_NUMBER = 0
+PARAM_BOOL = 1
+PARAM_CHOICE = 2
+
+# 式の節点（形式 v3）。子の個数はタグから決まる（前置記法）。
+EXPR_CHILDREN = {
+    0: 0,  # literal（値が続く）
+    1: 0,  # var（名前が続く）
+    2: 1,  # unary
+    3: 2,  # binary
+    4: 3,  # if
+    5: 1,  # call1
+    6: 2,  # call2
+}
+# 演算子・関数の番号の上限（これを超えたら未知）。
+MAX_UNOP = 1
+MAX_BINOP = 11
+MAX_FUNC1 = 9
+MAX_FUNC2 = 3
+# 式の入れ子の上限。Rust 側の MAX_EXPR_DEPTH と揃える。
+MAX_EXPR_DEPTH = 64
 
 # 図形ごとの固定長ペイロードに含まれる f64 の個数。
 # polyline と instance は可変長なので別扱い。
@@ -201,8 +226,48 @@ def validate(data: bytes, verbose: bool = False) -> dict[str, int]:
             for j in range(n):
                 read_entity(c, f"定義 {i}（{name}）の要素 {j}", layer_count,
                             group_count, counts, used_groups, used_definitions)
+
+            # ---- 形式 v3 以降: パラメータと束縛 ----
+            n_params = 0
+            n_bindings = 0
+            if version >= VERSION_WITH_PARAMS:
+                declared: set[str] = set()
+                n_params = c.u32()
+                for k in range(n_params):
+                    pname = read_param(c, f"定義 {i}（{name}）のパラメータ {k}")
+                    if pname in declared:
+                        raise ValidationError(
+                            f"定義 {i}（{name}）: パラメータ名が重複 {pname!r}"
+                        )
+                    declared.add(pname)
+
+                n_bindings = c.u32()
+                seen_slots: set[tuple[int, int, int]] = set()
+                for k in range(n_bindings):
+                    where = f"定義 {i}（{name}）の束縛 {k}"
+                    entity_index = c.u32()
+                    if entity_index >= n:
+                        raise ValidationError(
+                            f"{where}: 要素の参照が範囲外 {entity_index}（要素数 {n}）"
+                        )
+                    slot, extra = read_slot(c, where)
+                    key = (entity_index, slot, extra)
+                    if key in seen_slots:
+                        raise ValidationError(f"{where}: 同じ座標への束縛が重複しています")
+                    seen_slots.add(key)
+                    used = read_expr(c, where, 0)
+                    # 束縛の式が宣言されていないパラメータを参照していないこと。
+                    unknown = used - declared
+                    if unknown:
+                        raise ValidationError(
+                            f"{where}: 宣言されていないパラメータを参照 {sorted(unknown)}"
+                        )
+
             if verbose:
-                print(f"  定義[{i}] {name!r} 要素 {n} 件")
+                print(
+                    f"  定義[{i}] {name!r} 要素 {n} 件 "
+                    f"パラメータ {n_params} 件 束縛 {n_bindings} 件"
+                )
 
     # 定義の参照が範囲内であること。**前方参照があるので最後にまとめて検査する。**
     for index in sorted(used_definitions):
@@ -229,6 +294,91 @@ def validate(data: bytes, verbose: bool = False) -> dict[str, int]:
     if verbose:
         print(f"エンティティ {entity_count} 件（定義の中身を含む内訳）: {counts}")
     return counts
+
+
+def read_param(c: Cursor, where: str) -> str:
+    """パラメータの宣言を読んで検査し、名前を返す。"""
+    name = c.string()
+    if not name.strip():
+        raise ValidationError(f"{where}: パラメータ名が空です")
+    ty = c.u8()
+    if ty == PARAM_CHOICE:
+        n = c.u32()
+        if n == 0:
+            raise ValidationError(f"{where}（{name}）: 選択肢の候補がありません")
+        options = [c.string() for _ in range(n)]
+        if len(set(options)) != len(options):
+            raise ValidationError(f"{where}（{name}）: 選択肢の候補が重複しています")
+    elif ty not in (PARAM_NUMBER, PARAM_BOOL):
+        raise ValidationError(f"{where}（{name}）: 未知のパラメータ型 {ty}")
+
+    tag = c.u8()
+    if tag == OPTION_SOME:
+        lo, hi = c.f64(), c.f64()
+        if not (lo <= hi):
+            raise ValidationError(f"{where}（{name}）: 範囲が逆です（{lo} > {hi}）")
+    elif tag != OPTION_NONE:
+        raise ValidationError(f"{where}（{name}）: 未知の範囲指定 {tag}")
+
+    read_expr(c, f"{where}（{name}）の既定値", 0)
+    return name
+
+
+def read_slot(c: Cursor, where: str) -> tuple[int, int]:
+    """束縛のスロットを読む。(タグ, 付随する頂点番号) を返す。"""
+    slot = c.u8()
+    if slot > 20:
+        raise ValidationError(f"{where}: 未知の束縛スロット {slot}")
+    # ポリラインの頂点だけ番号が続く。
+    if slot in (15, 16):
+        return slot, c.u32()
+    return slot, 0
+
+
+def read_expr(c: Cursor, where: str, depth: int) -> set[str]:
+    """式を前置記法で読み、参照しているパラメータ名を返す。"""
+    if depth >= MAX_EXPR_DEPTH:
+        raise ValidationError(f"{where}: 式の入れ子が深すぎます")
+
+    tag = c.u8()
+    if tag not in EXPR_CHILDREN:
+        raise ValidationError(f"{where}: 未知の式の種別 {tag}")
+
+    if tag == 0:  # literal
+        vt = c.u8()
+        if vt == VALUE_NUMBER:
+            c.f64()
+        elif vt == VALUE_BOOL:
+            b = c.u8()
+            if b not in (0, 1):
+                raise ValidationError(f"{where}: 真偽値が 0/1 ではありません（{b}）")
+        elif vt == VALUE_CHOICE:
+            c.string()
+        else:
+            raise ValidationError(f"{where}: 未知の値の種別 {vt}")
+        return set()
+
+    if tag == 1:  # var
+        return {c.string()}
+
+    # 演算子・関数の番号を先に読む。
+    if tag == 2:
+        if c.u8() > MAX_UNOP:
+            raise ValidationError(f"{where}: 未知の単項演算子")
+    elif tag == 3:
+        if c.u8() > MAX_BINOP:
+            raise ValidationError(f"{where}: 未知の二項演算子")
+    elif tag == 5:
+        if c.u8() > MAX_FUNC1:
+            raise ValidationError(f"{where}: 未知の関数（1 引数）")
+    elif tag == 6:
+        if c.u8() > MAX_FUNC2:
+            raise ValidationError(f"{where}: 未知の関数（2 引数）")
+
+    used: set[str] = set()
+    for _ in range(EXPR_CHILDREN[tag]):
+        used |= read_expr(c, where, depth + 1)
+    return used
 
 
 def read_entity(

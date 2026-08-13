@@ -14,7 +14,10 @@ pub mod stretch;
 pub mod transform;
 
 pub use basic::{AddEntities, DeleteEntities};
-pub use component_ops::{DefineComponent, DeleteDefinition, InsertInstance, SetDefinitionContents};
+pub use component_ops::{
+    DefineComponent, DeleteDefinition, EnterDefinitionEdit, ExitDefinitionEdit, InsertInstance,
+    SetBinding, SetDefinitionContents, SetDefinitionParams, SetInstanceOverride,
+};
 pub use edit_ctx::EditCtx;
 pub use edit_geometry::{CornerEntities, CornerKind, ExtendEntity, TrimEntity};
 pub use group_ops::{CreateGroup, ExplodeEntities, Ungroup};

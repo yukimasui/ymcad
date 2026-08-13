@@ -1,6 +1,6 @@
 //! エンティティとレイヤを変更できる唯一のハンドル。
 
-use crate::component::{Definition, DefinitionId, DefinitionTable};
+use crate::component::{Binding, Definition, DefinitionId, DefinitionTable, ParamDecl};
 use crate::entity::{Entity, EntityId, EntityStore};
 use crate::error::{CadError, Result};
 use crate::geom::Point2;
@@ -201,10 +201,13 @@ impl<'a> EditCtx<'a> {
         self.definitions.restore(id, def)
     }
 
-    /// 定義の中身を差し替える。差し替え前の基点と中身を返す。
+    /// 定義の中身と束縛を差し替える。差し替え前の基点・中身・束縛を返す。
     ///
     /// **これが「定義を編集すると全インスタンスが追従する」の実体。**
     /// インスタンス側は定義を ID で参照しているだけなので、ここを変えるだけで済む。
+    ///
+    /// **中身と束縛は必ず一緒に持ち替える。** 束縛は中身への添字で座標を指すので、
+    /// 片方だけ変えると指す先がずれる（`component::binding` のモジュールドキュメント）。
     ///
     /// # Errors
     ///
@@ -214,8 +217,23 @@ impl<'a> EditCtx<'a> {
         id: DefinitionId,
         origin: Point2,
         entities: Vec<Entity>,
-    ) -> Result<(Point2, Vec<Entity>)> {
-        self.definitions.replace_contents(id, origin, entities)
+        bindings: Vec<Binding>,
+    ) -> Result<(Point2, Vec<Entity>, Vec<Binding>)> {
+        self.definitions
+            .replace_contents(id, origin, entities, bindings)
+    }
+
+    /// パラメータの宣言を差し替える。差し替え前を返す。
+    ///
+    /// # Errors
+    ///
+    /// 存在しない ID の場合 [`CadError::DefinitionNotFound`]。
+    pub fn replace_definition_params(
+        &mut self,
+        id: DefinitionId,
+        params: Vec<ParamDecl>,
+    ) -> Result<Vec<ParamDecl>> {
+        self.definitions.replace_params(id, params)
     }
 
     /// 定義名を変更する。古い名前を返す。

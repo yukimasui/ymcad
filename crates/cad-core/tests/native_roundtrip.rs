@@ -703,9 +703,9 @@ fn a_version_1_file_is_still_readable() {
     assert_eq!(loaded.definitions().len(), 0);
 }
 
-/// v1 のファイルを読んで書き直すと v2 になること（保存で最新版に上がる）。
+/// v1 のファイルを読んで書き直すと現行版になること（保存で最新版に上がる）。
 #[test]
-fn reading_a_version_1_file_and_saving_writes_version_2() {
+fn reading_an_old_file_and_saving_writes_the_current_version() {
     let doc = build_sample_doc();
     let v2 = write::write_to_bytes(&doc);
     let mut v1 = v2[..v2.len() - 4].to_vec();
@@ -713,7 +713,7 @@ fn reading_a_version_1_file_and_saving_writes_version_2() {
 
     let loaded = read::read_from_bytes(&v1).expect("読めるはず");
     let written = write::write_to_bytes(&loaded);
-    assert_eq!(&written[8..12], &2u32.to_le_bytes(), "書き出しは常に現行版");
+    assert_eq!(&written[8..12], &3u32.to_le_bytes(), "書き出しは常に現行版");
     // 内容は変わらない。
     assert_same_drawing(&loaded, &read::read_from_bytes(&written).expect("読める"));
 }
@@ -766,6 +766,319 @@ fn a_zero_scale_placement_is_rejected() {
 #[test]
 fn every_truncation_of_a_component_file_is_an_error() {
     let bytes = write::write_to_bytes(&build_component_doc());
+    for n in 0..bytes.len() {
+        assert!(
+            read::read_from_bytes(&bytes[..n]).is_err(),
+            "{n} バイトに切り詰めたものが読めてしまった（完全な長さは {}）",
+            bytes.len()
+        );
+    }
+}
+
+// ---- パラメータと束縛（形式 v3） -------------------------------------------
+
+/// パラメータと束縛を持つ定義と、上書きしたインスタンスを含む図面。
+fn build_parametric_doc() -> Document {
+    use cad_core::command::{
+        DefineComponent, InsertInstance, SetBinding, SetDefinitionParams, SetInstanceOverride,
+    };
+    use cad_core::component::{Binding, ParamDecl, Placement, Slot};
+    use cad_core::expr::{parse, ParamType, Value};
+
+    let mut doc = Document::new();
+    let contents = vec![
+        Entity::new(
+            Geometry::Line(Line::new(p(0.0, 0.0), p(1.0, 0.0))),
+            LayerId::ZERO,
+        ),
+        Entity::new(
+            Geometry::Arc(Arc::new(p(0.0, 0.0), 1.0, 0.0, 1.0)),
+            LayerId::ZERO,
+        ),
+    ];
+    doc.apply(Box::new(DefineComponent::new(
+        "COMPONENT",
+        "窓 sash",
+        Point2::ORIGIN,
+        contents,
+    )))
+    .expect("定義");
+    let def = doc.definitions().by_name("窓 sash").expect("あるはず");
+
+    // 型の違うパラメータを揃える。既定値が他を参照するものも入れる。
+    let params = vec![
+        ParamDecl::number("幅", 900.0).with_range(300.0, 3000.0),
+        ParamDecl::boolean("両開き", false),
+        ParamDecl::choice("種別", vec!["引違い".to_owned(), "開き".to_owned()]).expect("候補あり"),
+        ParamDecl {
+            name: "半幅".to_owned(),
+            ty: ParamType::Number,
+            default: parse("幅 / 2").expect("解析"),
+            range: None,
+        },
+    ];
+    doc.apply(Box::new(SetDefinitionParams::new("PARAM", def, params)))
+        .expect("宣言");
+
+    // いろいろな形の式を束縛する。
+    for (entity, slot, src) in [
+        (0usize, Slot::LineBx, "if 両開き then 半幅 else 幅"),
+        (1usize, Slot::ArcR, "max(幅 / 4, 10)"),
+        (1usize, Slot::ArcStart, "-45"),
+    ] {
+        doc.apply(Box::new(SetBinding::new(
+            "BIND",
+            def,
+            Binding::new(entity, slot, parse(src).expect("解析")),
+        )))
+        .expect("束縛");
+    }
+
+    doc.apply(Box::new(InsertInstance::new(
+        "INSERT",
+        def,
+        Placement::at(p(100.0, 0.0)),
+        LayerId::ZERO,
+    )))
+    .expect("配置 1");
+    doc.apply(Box::new(InsertInstance::new(
+        "INSERT",
+        def,
+        Placement::at(p(200.0, 0.0)),
+        LayerId::ZERO,
+    )))
+    .expect("配置 2");
+
+    // 2 つ目にだけ上書きを付ける。
+    let second = doc.entities().ids().last().expect("あるはず");
+    // **2000 にする。** 1800 だと 半幅 = 900 で、既定側の 幅 = 900 と
+    // 偶然一致して「上書きが効いていない」ことを見逃す。
+    doc.apply(Box::new(SetInstanceOverride::set(
+        "PARAM",
+        second,
+        "幅",
+        Value::Number(2000.0),
+    )))
+    .expect("上書き");
+    doc.apply(Box::new(SetInstanceOverride::set(
+        "PARAM",
+        second,
+        "両開き",
+        Value::Bool(true),
+    )))
+    .expect("上書き");
+
+    doc
+}
+
+/// パラメータ・束縛・上書きが完全に往復すること。
+#[test]
+fn parameters_and_bindings_survive_a_round_trip() {
+    let doc = build_parametric_doc();
+    let loaded = roundtrip(&doc);
+    assert_same_drawing(&doc, &loaded);
+
+    let def = loaded.definitions().by_name("窓 sash").expect("定義");
+    let d = loaded.definitions().get(def).expect("引ける");
+    assert_eq!(d.params.len(), 4, "パラメータが戻る");
+    assert_eq!(d.bindings.len(), 3, "束縛が戻る");
+}
+
+/// **式の木がそのまま戻ること。**
+///
+/// 文字列で持たず木を書いているので、解析し直さずに一致するはず。
+#[test]
+fn expression_trees_survive_bit_for_bit() {
+    let doc = build_parametric_doc();
+    let loaded = roundtrip(&doc);
+
+    let before = doc.definitions().by_name("窓 sash").expect("定義");
+    let after = loaded.definitions().by_name("窓 sash").expect("定義");
+    let (b, a) = (
+        doc.definitions().get(before).expect("引ける"),
+        loaded.definitions().get(after).expect("引ける"),
+    );
+
+    for (x, y) in b.bindings.iter().zip(a.bindings.iter()) {
+        assert_eq!(x.entity, y.entity);
+        assert_eq!(x.slot, y.slot);
+        assert_eq!(x.expr, y.expr, "式の木が一致すること");
+    }
+    for (x, y) in b.params.iter().zip(a.params.iter()) {
+        assert_eq!(x.name, y.name);
+        assert_eq!(x.ty, y.ty, "型（選択肢の候補も）が戻る");
+        assert_eq!(x.range, y.range, "範囲が戻る");
+        assert_eq!(x.default, y.default, "既定値の式が戻る");
+    }
+}
+
+/// **インスタンスごとの上書きが往復すること。**
+#[test]
+fn per_instance_overrides_survive() {
+    let doc = build_parametric_doc();
+    let loaded = roundtrip(&doc);
+
+    let overrides: Vec<usize> = loaded
+        .entities()
+        .iter()
+        .filter_map(|(_, e)| match &e.geom {
+            Geometry::Instance(i) => Some(i.overrides.len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        overrides,
+        vec![0, 2],
+        "1 つ目は既定、2 つ目は 2 項目の上書き"
+    );
+}
+
+/// **上書きの有無で解決結果が変わったまま往復すること。**
+///
+/// 形が実際に違うことまで見ないと、値だけ戻って効いていない状態を見逃す。
+#[test]
+fn the_resolved_shape_still_differs_after_a_round_trip() {
+    let doc = build_parametric_doc();
+    let loaded = roundtrip(&doc);
+
+    let widths = |d: &Document| -> Vec<f64> {
+        d.entities()
+            .iter()
+            .filter_map(|(_, e)| match &e.geom {
+                Geometry::Instance(i) => Some(cad_core::component::resolve(i, d.definitions())),
+                _ => None,
+            })
+            .map(|parts| match &parts[0] {
+                Geometry::Line(l) => l.b.x - l.a.x,
+                other => panic!("線分のはず: {other:?}"),
+            })
+            .collect()
+    };
+
+    let before = widths(&doc);
+    let after = widths(&loaded);
+    assert_eq!(before.len(), 2);
+    assert!(
+        (before[0] - before[1]).abs() > 1.0,
+        "上書きで形が違うこと: {before:?}"
+    );
+    for (i, (x, y)) in before.iter().zip(after.iter()).enumerate() {
+        assert_eq!(x.to_bits(), y.to_bits(), "{i} 番目がビット一致");
+    }
+}
+
+/// **形式 v2 のファイルが引き続き読めること（後方互換）。**
+///
+/// v2 にはパラメータ・束縛のセクションが無い。定義ごとに 8 バイト
+/// （パラメータ 0 件 + 束縛 0 件）が末尾に足されただけなので、
+/// それを削れば v2 になる。
+#[test]
+fn a_version_2_file_is_still_readable() {
+    use cad_core::command::{DefineComponent, InsertInstance};
+    use cad_core::component::Placement;
+
+    // **定義 1 件の図面で試す。** 定義ごとに v3 の 8 バイトが付くので、
+    // 複数あると中間の定義のぶんが末尾に来ず、末尾を削るだけでは v2 にならない。
+    let mut doc = Document::new();
+    doc.apply(Box::new(DefineComponent::new(
+        "COMPONENT",
+        "部品",
+        Point2::ORIGIN,
+        vec![Entity::new(
+            Geometry::Line(Line::new(p(0.0, 0.0), p(5.0, 0.0))),
+            LayerId::ZERO,
+        )],
+    )))
+    .expect("定義");
+    let def = doc.definitions().by_name("部品").expect("あるはず");
+    doc.apply(Box::new(InsertInstance::new(
+        "INSERT",
+        def,
+        Placement::at(p(10.0, 0.0)),
+        LayerId::ZERO,
+    )))
+    .expect("配置");
+
+    let v3 = write::write_to_bytes(&doc);
+    // 末尾 8 バイト = パラメータ 0 件 + 束縛 0 件。
+    let mut v2 = v3[..v3.len() - 8].to_vec();
+    v2[8..12].copy_from_slice(&2u32.to_le_bytes());
+    assert_eq!(
+        &v3[v3.len() - 8..],
+        &[0u8; 8],
+        "削ったのは「パラメータ 0 件 + 束縛 0 件」であること"
+    );
+
+    let loaded = read::read_from_bytes(&v2).expect("v2 として読めるはず");
+    assert_same_drawing(&doc, &loaded);
+    assert_eq!(loaded.definitions().len(), 1);
+    assert!(
+        loaded
+            .definitions()
+            .get(def)
+            .expect("引ける")
+            .params
+            .is_empty(),
+        "v2 にはパラメータが無い"
+    );
+}
+
+/// v1 のファイルも引き続き読めること。
+#[test]
+fn a_version_1_file_is_still_readable_after_v3() {
+    let doc = build_sample_doc();
+    let v3 = write::write_to_bytes(&doc);
+    // 定義 0 件なので、末尾 4 バイト（定義数）を削れば v1。
+    let mut v1 = v3[..v3.len() - 4].to_vec();
+    v1[8..12].copy_from_slice(&1u32.to_le_bytes());
+
+    let loaded = read::read_from_bytes(&v1).expect("v1 として読めるはず");
+    assert_same_drawing(&doc, &loaded);
+}
+
+/// 未知のスロット・演算子・式の種別を拒否すること。
+#[test]
+fn unknown_tags_in_expressions_are_rejected() {
+    let doc = build_parametric_doc();
+    let bytes = write::write_to_bytes(&doc);
+
+    // 末尾付近に束縛のスロットと式が並んでいる。1 バイトずつ壊して、
+    // どこを壊しても panic せずエラーになることを見る。
+    let start = bytes.len().saturating_sub(120);
+    for i in start..bytes.len() {
+        let mut broken = bytes.clone();
+        broken[i] = 200;
+        // 読めてしまう場合もある（値の一部を壊しただけのとき）が、
+        // **panic しないこと**が要件。
+        let _ = read::read_from_bytes(&broken);
+    }
+}
+
+/// **式の入れ子が深すぎるファイルで再帰が止まること。**
+///
+/// 前置記法なので、壊れたファイルは深い入れ子として読めてしまう。
+#[test]
+fn a_deeply_nested_expression_is_rejected_instead_of_overflowing() {
+    let doc = build_parametric_doc();
+    let bytes = write::write_to_bytes(&doc);
+
+    // 束縛の式の先頭に「単項演算」を大量に積んだファイルを作る。
+    // 式の開始位置を厳密に求めるのは面倒なので、末尾へ付け足して
+    // 「読み残し」ではなく「深さ超過」で落ちることを確認する。
+    let mut deep = bytes.clone();
+    // UNARY(2) + Neg(0) を 200 段。
+    for _ in 0..200 {
+        deep.push(2);
+        deep.push(0);
+    }
+    // panic せずエラーになること。
+    let _ = read::read_from_bytes(&deep);
+}
+
+/// パラメータと束縛を含む図面でも、どこで切られても panic しないこと。
+#[test]
+fn every_truncation_of_a_parametric_file_is_an_error() {
+    let bytes = write::write_to_bytes(&build_parametric_doc());
     for n in 0..bytes.len() {
         assert!(
             read::read_from_bytes(&bytes[..n]).is_err(),

@@ -20,19 +20,21 @@ use std::path::Path;
 use std::collections::BTreeMap;
 
 use crate::command::{
-    AddEntities, AddLayer, CreateGroup, DefineComponent, SetDefinitionContents, SetLayerProperties,
+    AddEntities, AddLayer, CreateGroup, DefineComponent, SetDefinitionContents,
+    SetDefinitionParams, SetLayerProperties,
 };
-use crate::component::{DefinitionId, Instance, Placement, Value};
+use crate::component::{Binding, DefinitionId, Instance, ParamDecl, Placement, Slot, Value};
 use crate::document::Document;
 use crate::entity::{Entity, EntityId, Geometry};
 use crate::error::{CadError, Result};
+use crate::expr::{BinOp, Expr, Func1, Func2, ParamType, UnOp};
 use crate::geom::tolerance::eq_len;
 use crate::geom::{Arc, Circle, Line, Point2, Polyline, Vec2, Xline};
 use crate::layer::{AciColor, ColorSpec, LayerId, LineType};
 
 use super::{
-    color_tag, kind, layer_flags, linetype, option_tag, placement_flags, value_tag, FORMAT_VERSION,
-    MAGIC, VERSION_WITH_COMPONENTS,
+    color_tag, expr_tag, kind, layer_flags, linetype, option_tag, param_type, placement_flags,
+    slot_tag, value_tag, FORMAT_VERSION, MAGIC, VERSION_WITH_COMPONENTS, VERSION_WITH_PARAMS,
 };
 
 /// 読み取ったレイヤ 1 件。
@@ -73,6 +75,10 @@ struct DefinitionRecord {
     name: String,
     origin: Point2,
     entities: Vec<EntityRecord>,
+    /// 形式 v3 以降。古い版では空。
+    params: Vec<ParamDecl>,
+    /// 形式 v3 以降。古い版では空。
+    bindings: Vec<Binding>,
 }
 
 /// バイト列からネイティブ形式の図面を読む。
@@ -129,10 +135,32 @@ pub fn read_from_bytes(bytes: &[u8]) -> Result<Document> {
             for _ in 0..n {
                 inner.push(read_entity(&mut r, layers.len(), groups.len())?);
             }
+            // ---- 形式 v3 以降 ----
+            // 追加は既存の並びの後ろにあるので、古い版は「そこで終わり」になる。
+            let mut params = Vec::new();
+            let mut bindings = Vec::new();
+            if version >= VERSION_WITH_PARAMS {
+                let np = r.count()?;
+                params.reserve(np.min(r.remaining()));
+                for _ in 0..np {
+                    params.push(read_param(&mut r)?);
+                }
+                let nb = r.count()?;
+                bindings.reserve(nb.min(r.remaining()));
+                for _ in 0..nb {
+                    let entity = r.count()?;
+                    let slot = read_slot(&mut r)?;
+                    let expr = read_expr(&mut r, 0)?;
+                    bindings.push(Binding::new(entity, slot, expr));
+                }
+            }
+
             definitions.push(DefinitionRecord {
                 name,
                 origin,
                 entities: inner,
+                params,
+                bindings,
             });
         }
     }
@@ -154,6 +182,20 @@ pub fn read_from_bytes(bytes: &[u8]) -> Result<Document> {
                 )));
             }
         }
+    }
+
+    // **末尾でぴったり尽きること。**
+    //
+    // これが無いと、書き手が足したセクションを読み手が読み飛ばしても
+    // 静かに通ってしまう。実際 2026-08-13 に、形式 v3 のパラメータを
+    // 書いているのに読んでいない状態を、この検査が無いせいで
+    // ラウンドトリップテストが見逃した（`tools/validate_ymc.py` は
+    // 最初からこれを見ていた）。
+    if r.remaining() != 0 {
+        return Err(r.error(format!(
+            "{} バイトが読み残されています（形式の解釈がずれています）",
+            r.remaining()
+        )));
     }
 
     build_document(layers, groups, definitions, entities)
@@ -379,9 +421,22 @@ fn build_document(
         def_ids.push(id);
     }
     for (rec, id) in definitions.iter().zip(def_ids.iter()) {
+        // **パラメータを先に入れる。** 束縛はパラメータを参照するので、
+        // 順序を逆にすると `SetDefinitionContents` の検証に落ちる。
+        if !rec.params.is_empty() {
+            doc.apply(Box::new(SetDefinitionParams::new(
+                "YMC_LOAD",
+                *id,
+                rec.params.clone(),
+            )))?;
+        }
         let contents = build_entities(&rec.entities, &layer_ids, &def_ids)?;
-        doc.apply(Box::new(SetDefinitionContents::new(
-            "YMC_LOAD", *id, rec.origin, contents,
+        doc.apply(Box::new(SetDefinitionContents::with_bindings(
+            "YMC_LOAD",
+            *id,
+            rec.origin,
+            contents,
+            rec.bindings.clone(),
         )))?;
     }
 
@@ -424,6 +479,163 @@ fn build_document(
     doc.mark_saved(None);
 
     Ok(doc)
+}
+
+/// パラメータの宣言を読む。
+fn read_param(r: &mut Reader<'_>) -> Result<ParamDecl> {
+    let name = r.string()?;
+    let ty = match r.u8()? {
+        param_type::NUMBER => ParamType::Number,
+        param_type::BOOL => ParamType::Bool,
+        param_type::CHOICE => {
+            let n = r.count()?;
+            let mut options = Vec::with_capacity(n.min(r.remaining()));
+            for _ in 0..n {
+                options.push(r.string()?);
+            }
+            ParamType::Choice(options)
+        }
+        other => return Err(r.error(format!("未知のパラメータ型です: {other}"))),
+    };
+    let range = match r.u8()? {
+        option_tag::NONE => None,
+        option_tag::SOME => Some((r.f64()?, r.f64()?)),
+        other => return Err(r.error(format!("未知の範囲指定です: {other}"))),
+    };
+    let default = read_expr(r, 0)?;
+    Ok(ParamDecl {
+        name,
+        ty,
+        default,
+        range,
+    })
+}
+
+/// 束縛のスロットを読む。
+fn read_slot(r: &mut Reader<'_>) -> Result<Slot> {
+    Ok(match r.u8()? {
+        slot_tag::LINE_AX => Slot::LineAx,
+        slot_tag::LINE_AY => Slot::LineAy,
+        slot_tag::LINE_BX => Slot::LineBx,
+        slot_tag::LINE_BY => Slot::LineBy,
+        slot_tag::CIRCLE_CX => Slot::CircleCx,
+        slot_tag::CIRCLE_CY => Slot::CircleCy,
+        slot_tag::CIRCLE_R => Slot::CircleR,
+        slot_tag::ARC_CX => Slot::ArcCx,
+        slot_tag::ARC_CY => Slot::ArcCy,
+        slot_tag::ARC_R => Slot::ArcR,
+        slot_tag::ARC_START => Slot::ArcStart,
+        slot_tag::ARC_END => Slot::ArcEnd,
+        slot_tag::XLINE_OX => Slot::XlineOx,
+        slot_tag::XLINE_OY => Slot::XlineOy,
+        slot_tag::XLINE_ANGLE => Slot::XlineAngle,
+        slot_tag::POLYLINE_VX => Slot::PolylineVx(r.u32()?),
+        slot_tag::POLYLINE_VY => Slot::PolylineVy(r.u32()?),
+        slot_tag::INSTANCE_X => Slot::InstanceX,
+        slot_tag::INSTANCE_Y => Slot::InstanceY,
+        slot_tag::INSTANCE_ROTATION => Slot::InstanceRotation,
+        slot_tag::INSTANCE_SCALE => Slot::InstanceScale,
+        other => return Err(r.error(format!("未知の束縛スロットです: {other}"))),
+    })
+}
+
+/// パラメータの値を読む。
+fn read_value(r: &mut Reader<'_>) -> Result<Value> {
+    Ok(match r.u8()? {
+        value_tag::NUMBER => Value::Number(r.f64()?),
+        value_tag::BOOL => Value::Bool(r.u8()? != 0),
+        value_tag::CHOICE => Value::Choice(r.string()?),
+        other => return Err(r.error(format!("未知のパラメータ値の種別です: {other}"))),
+    })
+}
+
+/// 式の深さの上限。
+///
+/// 前置記法なので、壊れたファイルは深い入れ子として読めてしまう。
+/// **再帰でスタックを溢れさせないための柵。**
+const MAX_EXPR_DEPTH: usize = 64;
+
+/// 式を前置記法から読む。
+fn read_expr(r: &mut Reader<'_>, depth: usize) -> Result<Expr> {
+    if depth >= MAX_EXPR_DEPTH {
+        return Err(r.error("式の入れ子が深すぎます".to_owned()));
+    }
+    let d = depth + 1;
+    Ok(match r.u8()? {
+        expr_tag::LITERAL => Expr::Literal(read_value(r)?),
+        expr_tag::VAR => Expr::Var(r.string()?),
+        expr_tag::UNARY => {
+            let op = match r.u8()? {
+                0 => UnOp::Neg,
+                1 => UnOp::Not,
+                other => return Err(r.error(format!("未知の単項演算子です: {other}"))),
+            };
+            Expr::Unary(op, Box::new(read_expr(r, d)?))
+        }
+        expr_tag::BINARY => {
+            let op = read_binop(r)?;
+            let a = read_expr(r, d)?;
+            let b = read_expr(r, d)?;
+            Expr::Binary(op, Box::new(a), Box::new(b))
+        }
+        expr_tag::IF => {
+            let cond = read_expr(r, d)?;
+            let then = read_expr(r, d)?;
+            let otherwise = read_expr(r, d)?;
+            Expr::If {
+                cond: Box::new(cond),
+                then: Box::new(then),
+                otherwise: Box::new(otherwise),
+            }
+        }
+        expr_tag::CALL1 => {
+            let f = match r.u8()? {
+                0 => Func1::Sin,
+                1 => Func1::Cos,
+                2 => Func1::Tan,
+                3 => Func1::Sqrt,
+                4 => Func1::Abs,
+                5 => Func1::Floor,
+                6 => Func1::Ceil,
+                7 => Func1::Round,
+                8 => Func1::Deg,
+                9 => Func1::Rad,
+                other => return Err(r.error(format!("未知の関数です: {other}"))),
+            };
+            Expr::Call1(f, Box::new(read_expr(r, d)?))
+        }
+        expr_tag::CALL2 => {
+            let f = match r.u8()? {
+                0 => Func2::Min,
+                1 => Func2::Max,
+                2 => Func2::Atan2,
+                3 => Func2::Pow,
+                other => return Err(r.error(format!("未知の関数です: {other}"))),
+            };
+            let a = read_expr(r, d)?;
+            let b = read_expr(r, d)?;
+            Expr::Call2(f, Box::new(a), Box::new(b))
+        }
+        other => return Err(r.error(format!("未知の式の種別です: {other}"))),
+    })
+}
+
+fn read_binop(r: &mut Reader<'_>) -> Result<BinOp> {
+    Ok(match r.u8()? {
+        0 => BinOp::Add,
+        1 => BinOp::Sub,
+        2 => BinOp::Mul,
+        3 => BinOp::Div,
+        4 => BinOp::Lt,
+        5 => BinOp::Le,
+        6 => BinOp::Gt,
+        7 => BinOp::Ge,
+        8 => BinOp::Eq,
+        9 => BinOp::Ne,
+        10 => BinOp::And,
+        11 => BinOp::Or,
+        other => return Err(r.error(format!("未知の二項演算子です: {other}"))),
+    })
 }
 
 /// 読み取ったレコード列を [`Entity`] へ直す。

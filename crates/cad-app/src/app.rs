@@ -6,6 +6,7 @@ use cad_core::geom::{Aabb, Point2};
 use cad_core::Document;
 
 use crate::cmdline::Submission;
+use crate::component_panel::{ComponentPanel, PanelRequest};
 use crate::file_ops::{self, FileOps, FileOutcome};
 use crate::input::{self, ViewAction};
 use crate::layer_panel::LayerPanel;
@@ -100,6 +101,8 @@ pub struct CadApp {
     resolved: ResolvedInstances,
     /// レイヤパネル。
     layer_panel: LayerPanel,
+    /// コンポーネントのパネル。
+    component_panel: ComponentPanel,
     /// ファイル操作と未保存確認。
     files: FileOps,
     /// 終了してよいと判断した状態。
@@ -129,6 +132,7 @@ impl CadApp {
             snap: SnapState::new(),
             resolved: ResolvedInstances::new(),
             layer_panel: LayerPanel::new(),
+            component_panel: ComponentPanel::new(),
             files: FileOps::new(),
             quitting: false,
             snapped: None,
@@ -243,6 +247,7 @@ impl CadApp {
             for action in self.session.take_ui_actions() {
                 match action {
                     UiAction::ToggleLayerPanel => self.layer_panel.toggle(),
+                    UiAction::ToggleComponentPanel => self.component_panel.toggle(),
                     UiAction::File(a) => {
                         let outcome = self.files.request(a, &mut self.doc);
                         self.report_file_outcome(outcome);
@@ -312,6 +317,7 @@ impl CadApp {
             &self.viewport,
             &self.session.selection,
             &mut self.resolved,
+            self.session.editing(),
         );
 
         let preview = self.session.preview(self.cursor_model, &self.doc);
@@ -518,6 +524,32 @@ impl CadApp {
     }
 }
 
+impl CadApp {
+    /// コンポーネントパネルを描画し、返ってきたコマンドと依頼を処理する。
+    fn component_area(&mut self, ui: &mut egui::Ui) {
+        if !self.component_panel.is_open() {
+            return;
+        }
+        egui::Panel::right("components")
+            .default_size(460.0)
+            .show(ui, |ui| {
+                let (commands, request) =
+                    self.component_panel
+                        .show(ui, &self.doc, &self.session.selection);
+                for cmd in commands {
+                    self.session.apply_external(cmd, &mut self.doc);
+                }
+                if let Some(PanelRequest::Insert(def)) = request {
+                    // 名前を打たせずに INSERT を始める。
+                    self.session.start_tool_directly(
+                        Box::new(crate::tools::component::InsertTool::for_definition(def)),
+                        &mut self.doc,
+                    );
+                }
+            });
+    }
+}
+
 impl eframe::App for CadApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
@@ -527,6 +559,7 @@ impl eframe::App for CadApp {
         egui::Panel::bottom("cmdline").show(ui, |ui| self.command_area(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         self.layer_area(ui);
+        self.component_area(ui);
         egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
     }
 }
