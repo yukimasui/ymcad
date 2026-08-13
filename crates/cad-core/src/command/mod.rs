@@ -15,8 +15,8 @@ pub mod transform;
 
 pub use basic::{AddEntities, DeleteEntities};
 pub use component_ops::{
-    DefineComponent, DeleteDefinition, InsertInstance, SetBinding, SetDefinitionContents,
-    SetDefinitionParams, SetInstanceOverride,
+    DefineComponent, DeleteDefinition, EnterDefinitionEdit, ExitDefinitionEdit, InsertInstance,
+    SetBinding, SetDefinitionContents, SetDefinitionParams, SetInstanceOverride,
 };
 pub use edit_ctx::EditCtx;
 pub use edit_geometry::{CornerEntities, CornerKind, ExtendEntity, TrimEntity};
