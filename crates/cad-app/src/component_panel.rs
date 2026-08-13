@@ -20,11 +20,12 @@
 //! パネルは [`Command`] を返すだけで、適用は呼び出し側が行う
 //! （`docs/DECISIONS.md` の ADR-0012。レイヤパネルと同じ）。
 
-use cad_core::command::SetInstanceOverride;
+use cad_core::command::{SetDefinitionParams, SetInstanceOverride};
 use cad_core::component::{DefinitionId, ParamDecl};
 use cad_core::expr::{ParamType, Value};
 use cad_core::{Command, Document, EntityId, Geometry};
 
+use crate::editing::EditSession;
 use crate::selection::Selection;
 
 /// 数値をドラッグで変えるときの 1 px あたりの変化量。
@@ -39,10 +40,46 @@ pub enum PanelRequest {
     Insert(DefinitionId),
 }
 
+/// 新しく宣言するパラメータの下書き。
+///
+/// **名前だけは打つしかない**（新しい名前を決める作業なので）。
+/// 型と既定値はウィジェットで選ぶ。
+#[derive(Debug, Clone)]
+struct ParamDraft {
+    name: String,
+    ty: DraftType,
+    number: f64,
+    boolean: bool,
+    /// 選択肢を `|` で区切ったもの。
+    options: String,
+}
+
+impl Default for ParamDraft {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            ty: DraftType::Number,
+            number: 0.0,
+            boolean: false,
+            options: String::new(),
+        }
+    }
+}
+
+/// 下書きの型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DraftType {
+    Number,
+    Bool,
+    Choice,
+}
+
 /// コンポーネントのパネル。
 #[derive(Debug, Default)]
 pub struct ComponentPanel {
     open: bool,
+    /// 新しいパラメータの下書き。
+    draft: ParamDraft,
 }
 
 impl ComponentPanel {
@@ -70,6 +107,7 @@ impl ComponentPanel {
         ui: &mut egui::Ui,
         doc: &Document,
         selection: &Selection,
+        editing: Option<&EditSession>,
     ) -> (Vec<Box<dyn Command>>, Option<PanelRequest>) {
         let mut commands: Vec<Box<dyn Command>> = Vec::new();
         let mut request = None;
@@ -83,6 +121,13 @@ impl ComponentPanel {
         Self::show_definitions(ui, doc, &mut request);
         ui.separator();
         Self::show_parameters(ui, doc, selection, &mut commands);
+
+        // 宣言は「いま対象になっている定義」に対して行う。
+        // パネル専用の選択状態を増やさずに済む。
+        if let Some(def) = target_definition(doc, selection, editing) {
+            ui.separator();
+            self.show_declarations(ui, doc, def, &mut commands);
+        }
 
         (commands, request)
     }
@@ -130,12 +175,21 @@ impl ComponentPanel {
             ui.weak("（インスタンスを選択すると出ます）");
             return;
         }
-        if targets.len() > 1 {
-            ui.weak(format!(
-                "（{} 個選択中。1 つだけ選ぶと編集できます）",
-                targets.len()
-            ));
+        // **同じ定義のインスタンスなら、まとめて変えられる。**
+        // 値は先頭のものを見せ、変更は全部へ流す。
+        let definitions: Vec<_> = targets
+            .iter()
+            .filter_map(|id| match &doc.entities().get(*id)?.geom {
+                Geometry::Instance(i) => Some(i.definition),
+                _ => None,
+            })
+            .collect();
+        if definitions.windows(2).any(|w| w[0] != w[1]) {
+            ui.weak("（別々のコンポーネントが混ざっています）");
             return;
+        }
+        if targets.len() > 1 {
+            ui.weak(format!("（{} 個をまとめて変更します）", targets.len()));
         }
 
         let id = targets[0];
@@ -162,7 +216,7 @@ impl ComponentPanel {
                 for decl in &def.params {
                     let overridden = inst.overrides.contains_key(&decl.name);
                     let current = env.get(&decl.name).cloned();
-                    Self::show_param_row(ui, id, decl, current, overridden, commands);
+                    Self::show_param_row(ui, &targets, decl, current, overridden, commands);
                 }
             });
     }
@@ -170,7 +224,7 @@ impl ComponentPanel {
     /// パラメータ 1 行。
     fn show_param_row(
         ui: &mut egui::Ui,
-        target: EntityId,
+        targets: &[EntityId],
         decl: &ParamDecl,
         current: Option<Value>,
         overridden: bool,
@@ -190,12 +244,15 @@ impl ComponentPanel {
             };
 
             if let Some(new_value) = Self::value_widget(ui, decl, &value) {
-                commands.push(Box::new(SetInstanceOverride::set(
-                    "PSET",
-                    target,
-                    decl.name.clone(),
-                    new_value,
-                )));
+                // 選択中のすべてへ流す。1 つだけならこれまでと同じ。
+                for target in targets {
+                    commands.push(Box::new(SetInstanceOverride::set(
+                        "PSET",
+                        *target,
+                        decl.name.clone(),
+                        new_value.clone(),
+                    )));
+                }
             }
 
             // 上書きしているときだけ戻せる。
@@ -205,11 +262,136 @@ impl ComponentPanel {
                     .on_hover_text("定義の既定値へ戻す")
                     .clicked()
             {
-                commands.push(Box::new(SetInstanceOverride::reset(
-                    "PSET",
-                    target,
-                    decl.name.clone(),
-                )));
+                for target in targets {
+                    commands.push(Box::new(SetInstanceOverride::reset(
+                        "PSET",
+                        *target,
+                        decl.name.clone(),
+                    )));
+                }
+            }
+        });
+    }
+
+    /// パラメータの宣言と、いま効いている束縛。
+    ///
+    /// **宣言はコマンドラインを通さずここで完結させる**（Issue #15）。
+    fn show_declarations(
+        &mut self,
+        ui: &mut egui::Ui,
+        doc: &Document,
+        def: DefinitionId,
+        commands: &mut Vec<Box<dyn Command>>,
+    ) {
+        let Some(definition) = doc.definitions().get(def) else {
+            return;
+        };
+        ui.label(format!("「{}」の宣言", definition.name));
+
+        // ---- いまの宣言 ----
+        egui::ScrollArea::vertical()
+            .id_salt("component_declarations")
+            .auto_shrink([false, true])
+            .max_height(200.0)
+            .show(ui, |ui| {
+                for decl in &definition.params {
+                    ui.horizontal(|ui| {
+                        ui.label(&decl.name);
+                        ui.weak(decl.ty.name());
+                        // 既定値は式なので、読める形にして見せる。
+                        ui.weak(format!("= {}", decl.default));
+                        if let Some((lo, hi)) = decl.range {
+                            ui.weak(format!("[{lo} 〜 {hi}]"));
+                        }
+                        if ui
+                            .button("削除")
+                            .on_hover_text("この宣言を消す（束縛で使っていると断られます）")
+                            .clicked()
+                        {
+                            let rest: Vec<ParamDecl> = definition
+                                .params
+                                .iter()
+                                .filter(|p| p.name != decl.name)
+                                .cloned()
+                                .collect();
+                            commands.push(Box::new(SetDefinitionParams::new("PARAM", def, rest)));
+                        }
+                    });
+                }
+                if definition.params.is_empty() {
+                    ui.weak("（まだありません）");
+                }
+            });
+
+        // ---- 束縛の一覧（読み取り専用）----
+        //
+        // 「どの座標が何で動いているか」が見えないと、式を直しようがない。
+        if !definition.bindings.is_empty() {
+            ui.add_space(4.0);
+            ui.weak("束縛");
+            for b in &definition.bindings {
+                let kind = definition
+                    .entities
+                    .get(b.entity)
+                    .map_or("?", |e| e.geom.type_name());
+                ui.weak(format!(
+                    "\u{3000}{}[{}] の {} ← {}",
+                    kind,
+                    b.entity,
+                    b.slot.label(),
+                    b.expr
+                ));
+            }
+        }
+
+        // ---- 新しく宣言する ----
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label("追加");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.draft.name)
+                    .hint_text("パラメータ名")
+                    .desired_width(100.0),
+            );
+            egui::ComboBox::from_id_salt("param_draft_type")
+                .selected_text(match self.draft.ty {
+                    DraftType::Number => "数値",
+                    DraftType::Bool => "真偽",
+                    DraftType::Choice => "選択",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.draft.ty, DraftType::Number, "数値");
+                    ui.selectable_value(&mut self.draft.ty, DraftType::Bool, "真偽");
+                    ui.selectable_value(&mut self.draft.ty, DraftType::Choice, "選択");
+                });
+
+            match self.draft.ty {
+                DraftType::Number => {
+                    ui.add(egui::DragValue::new(&mut self.draft.number).speed(DRAG_SPEED));
+                }
+                DraftType::Bool => {
+                    ui.checkbox(&mut self.draft.boolean, "");
+                }
+                DraftType::Choice => {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.draft.options)
+                            .hint_text("引違い|開き")
+                            .desired_width(120.0),
+                    );
+                }
+            }
+
+            let ready = !self.draft.name.trim().is_empty();
+            if ui.add_enabled(ready, egui::Button::new("宣言")).clicked() {
+                if let Some(decl) = self.draft.build() {
+                    let mut params = definition.params.clone();
+                    match params.iter().position(|p| p.name == decl.name) {
+                        Some(i) => params[i] = decl,
+                        None => params.push(decl),
+                    }
+                    commands.push(Box::new(SetDefinitionParams::new("PARAM", def, params)));
+                    self.draft = ParamDraft::default();
+                }
             }
         });
     }
@@ -258,6 +440,62 @@ impl ComponentPanel {
             }
         }
     }
+}
+
+impl ParamDraft {
+    /// 下書きから宣言を作る。名前が空、または選択肢が足りなければ `None`。
+    fn build(&self) -> Option<ParamDecl> {
+        let name = self.draft_name()?;
+        match self.ty {
+            DraftType::Number => Some(ParamDecl::number(name, self.number)),
+            DraftType::Bool => Some(ParamDecl::boolean(name, self.boolean)),
+            DraftType::Choice => {
+                let options: Vec<String> = self
+                    .options
+                    .split('|')
+                    .map(|o| o.trim().to_owned())
+                    .filter(|o| !o.is_empty())
+                    .collect();
+                // 候補が 1 つしかない選択肢は意味が無い。
+                (options.len() >= 2).then(|| ParamDecl::choice(name, options))?
+            }
+        }
+    }
+
+    fn draft_name(&self) -> Option<String> {
+        let name = self.name.trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    }
+}
+
+/// パラメータを宣言する対象の定義。
+///
+/// **パネル専用の選択状態を増やさない。** 次の順で決める。
+///
+/// 1. インプレース編集中ならその定義
+/// 2. インスタンスを選んでいればその定義（全部同じ定義のときだけ）
+/// 3. どちらでもなければ無し
+fn target_definition(
+    doc: &Document,
+    selection: &Selection,
+    editing: Option<&EditSession>,
+) -> Option<DefinitionId> {
+    if let Some(session) = editing {
+        return Some(session.definition());
+    }
+    let mut found: Option<DefinitionId> = None;
+    for id in selected_instances(doc, selection) {
+        let def = match &doc.entities().get(id)?.geom {
+            Geometry::Instance(i) => i.definition,
+            _ => continue,
+        };
+        match found {
+            // 別々の定義が混ざっていたら決められない。
+            Some(seen) if seen != def => return None,
+            _ => found = Some(def),
+        }
+    }
+    found
 }
 
 /// 選択されているインスタンスの ID。
@@ -340,7 +578,7 @@ mod tests {
                 egui::vec2(400.0, 800.0),
             )),
         );
-        let out = panel.show(&mut ui, doc, selection);
+        let out = panel.show(&mut ui, doc, selection, None);
         let mut finished = ctx.end_pass();
         // `TexturesDelta` は未適用のまま drop すると panic する。
         finished.textures_delta.clear();
@@ -444,11 +682,9 @@ mod tests {
         );
     }
 
-    /// 複数のインスタンスを選んでいるときは編集させないこと。
-    ///
-    /// どれの値を出すか決められないので、まとめて変える設計にするまでは避ける。
+    /// **同じ定義なら複数選択でもまとめて編集できること。**
     #[test]
-    fn multiple_instances_are_not_editable() {
+    fn multiple_instances_of_the_same_definition_are_editable() {
         let (mut doc, first) = doc_with_params();
         let def = doc.definitions().by_name("窓").expect("あるはず");
         doc.apply(Box::new(InsertInstance::new(
@@ -467,7 +703,107 @@ mod tests {
 
         let mut panel = ComponentPanel::new();
         panel.toggle();
+        // 触っていなければコマンドは出ないが、描画は通ること。
         let (c, _) = run_panel(&mut panel, &doc, &sel);
-        assert!(c.is_empty(), "複数選択では編集させない");
+        assert!(c.is_empty());
+    }
+
+    /// **別々の定義が混ざっていたら編集させないこと。**
+    ///
+    /// どちらのパラメータを出すか決められない。
+    #[test]
+    fn instances_of_different_definitions_are_not_editable() {
+        let (mut doc, first) = doc_with_params();
+        doc.apply(Box::new(DefineComponent::new(
+            "COMPONENT",
+            "扉",
+            Point2::ORIGIN,
+            vec![Entity::new(
+                Geometry::Line(Line::new(Point2::ORIGIN, Point2::new(2.0, 0.0))),
+                LayerId::ZERO,
+            )],
+        )))
+        .expect("2 つ目の定義");
+        let other = doc.definitions().by_name("扉").expect("あるはず");
+        doc.apply(Box::new(InsertInstance::new(
+            "INSERT",
+            other,
+            Placement::at(Point2::new(90.0, 0.0)),
+            LayerId::ZERO,
+        )))
+        .expect("配置");
+        let second = doc.entities().ids().last().expect("あるはず");
+
+        let mut sel = Selection::new();
+        sel.insert(first);
+        sel.insert(second);
+        assert!(
+            target_definition(&doc, &sel, None).is_none(),
+            "定義が混ざっていたら決められない"
+        );
+    }
+
+    /// **宣言の対象は「編集中 → 選択中」の順で決まること。**
+    #[test]
+    fn the_target_definition_comes_from_the_selection() {
+        let (doc, inst) = doc_with_params();
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+
+        assert!(target_definition(&doc, &Selection::new(), None).is_none());
+        let mut sel = Selection::new();
+        sel.insert(inst);
+        assert_eq!(target_definition(&doc, &sel, None), Some(def));
+    }
+
+    /// 下書きから宣言が作れること。
+    #[test]
+    fn a_draft_builds_a_declaration() {
+        let mut draft = ParamDraft {
+            name: "幅".to_owned(),
+            ty: DraftType::Number,
+            number: 900.0,
+            ..ParamDraft::default()
+        };
+        let decl = draft.build().expect("作れる");
+        assert_eq!(decl.name, "幅");
+        assert_eq!(decl.ty, cad_core::expr::ParamType::Number);
+
+        draft.ty = DraftType::Bool;
+        assert_eq!(
+            draft.build().expect("作れる").ty,
+            cad_core::expr::ParamType::Bool
+        );
+
+        draft.ty = DraftType::Choice;
+        draft.options = "引違い|開き".to_owned();
+        let decl = draft.build().expect("作れる");
+        assert_eq!(
+            decl.ty,
+            cad_core::expr::ParamType::Choice(vec!["引違い".to_owned(), "開き".to_owned()])
+        );
+    }
+
+    /// **名前が空、または選択肢が 1 つ以下なら作らないこと。**
+    #[test]
+    fn an_incomplete_draft_builds_nothing() {
+        let empty = ParamDraft::default();
+        assert!(empty.build().is_none(), "名前が空");
+
+        let one_option = ParamDraft {
+            name: "種別".to_owned(),
+            ty: DraftType::Choice,
+            options: "引違い".to_owned(),
+            ..ParamDraft::default()
+        };
+        assert!(
+            one_option.build().is_none(),
+            "候補が 1 つでは選択にならない"
+        );
+
+        let blank = ParamDraft {
+            name: "  ".to_owned(),
+            ..ParamDraft::default()
+        };
+        assert!(blank.build().is_none(), "空白だけの名前");
     }
 }
