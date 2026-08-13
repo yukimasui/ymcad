@@ -102,6 +102,11 @@ pub struct ToolCtx<'a> {
     /// `CommandKind::Tool` は引数を取らない関数ポインタなので生成時に渡せず、
     /// ツールは `ToolCtx` 経由で読む。書き戻しは [`StepOutcome::Setting`] で行う。
     pub settings: ToolSettings,
+    /// コンポーネントの編集中ならそのセッション。
+    ///
+    /// 編集中は**定義の中身が実エンティティとして図面にある**ので、
+    /// `BIND` がクリックで座標を指せる。
+    pub editing: Option<&'a crate::editing::EditSession>,
 }
 
 /// コマンド間で保持する設定。

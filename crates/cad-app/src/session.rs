@@ -195,6 +195,7 @@ impl Session {
             layer: doc.layers().current(),
             crossing_rects: &self.crossing_rects,
             settings: self.settings,
+            editing: self.editing.as_ref(),
         }
     }
 
@@ -398,6 +399,7 @@ impl Session {
                 layer: doc.layers().current(),
                 crossing_rects: &self.crossing_rects,
                 settings: self.settings,
+                editing: self.editing.as_ref(),
             };
             tool.step(input, &ctx)
         };
@@ -3094,5 +3096,180 @@ mod flow_tests {
         // 入るのを取り消す → インスタンスへ戻る。
         feed(&mut s, &mut doc, "U");
         assert_eq!(instance_count(&doc), 1);
+    }
+
+    // ---- BIND のクリック操作（Issue #15） ----------------------------------
+
+    /// **編集中に図形をクリックして束縛できること。**
+    ///
+    /// 要素番号もスロット名も打たない。番号でパラメータを選ぶところまで
+    /// **すべて ASCII** なので日本語入力を通さない。
+    #[test]
+    fn bind_by_clicking_while_editing() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+
+        // 編集に入る。
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        assert!(s.editing().is_some());
+
+        // 線分の終点あたりをクリック → X を選ぶ → パラメータを番号で選ぶ。
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 10.0, 0.0);
+        feed(&mut s, &mut doc, "X");
+        feed(&mut s, &mut doc, "1");
+
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+        let bindings = &doc.definitions().get(def).expect("引ける").bindings;
+        assert_eq!(bindings.len(), 1, "束縛ができる");
+        assert_eq!(bindings[0].slot, cad_core::component::Slot::LineBx, "終点X");
+    }
+
+    /// **クリック位置に近いつまみが選ばれること。**
+    ///
+    /// 始点側をクリックすれば始点、終点側なら終点。
+    #[test]
+    fn the_nearest_handle_is_chosen() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+
+        // 始点 (0,0) 側をクリックする。
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 0.5, 0.0);
+        feed(&mut s, &mut doc, "Y");
+        feed(&mut s, &mut doc, "1");
+
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+        let bindings = &doc.definitions().get(def).expect("引ける").bindings;
+        assert_eq!(
+            bindings[0].slot,
+            cad_core::component::Slot::LineAy,
+            "始点Y が選ばれる"
+        );
+    }
+
+    /// 式も打てること（番号でなくてもよい）。
+    #[test]
+    fn bind_by_click_still_accepts_an_expression() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 10.0, 0.0);
+        feed(&mut s, &mut doc, "X");
+        feed(&mut s, &mut doc, "幅 * 2");
+
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+        let bindings = &doc.definitions().get(def).expect("引ける").bindings;
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].expr,
+            cad_core::expr::parse("幅 * 2").expect("解析")
+        );
+    }
+
+    /// 番号が範囲外なら断ること。
+    #[test]
+    fn an_out_of_range_parameter_number_is_reported() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 10.0, 0.0);
+        feed(&mut s, &mut doc, "X");
+        feed(&mut s, &mut doc, "9");
+        assert!(s.cmdline.history().any(|l| l.text.contains("番号は 1〜1")));
+    }
+
+    /// X / Y 以外を入力したら断ること。
+    #[test]
+    fn the_axis_must_be_x_or_y() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 10.0, 0.0);
+        feed(&mut s, &mut doc, "Z");
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+        assert!(s.has_active_tool(), "断られてもコマンドは続く");
+    }
+
+    /// **編集中に描いた図形はまだ束縛できないこと。**
+    ///
+    /// 定義にはまだ入っていないので、指す添字が決まらない。
+    #[test]
+    fn a_freshly_drawn_entity_cannot_be_bound_yet() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+
+        // 編集中に 1 本描く。
+        draw_line(&mut s, &mut doc, "0,20", "10,20");
+
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 5.0, 20.0);
+        assert!(s
+            .cmdline
+            .history()
+            .any(|l| l.text.contains("まだ束縛できません")));
+    }
+
+    /// 編集していないときは、これまでどおり名前から辿れること。
+    #[test]
+    fn bind_still_works_from_the_command_line_when_not_editing() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+
+        feed(&mut s, &mut doc, "BI");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "0");
+        feed(&mut s, &mut doc, "終点X");
+        feed(&mut s, &mut doc, "1"); // 番号でも選べる
+
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+        assert_eq!(
+            doc.definitions().get(def).expect("引ける").bindings.len(),
+            1
+        );
+    }
+
+    /// 編集中でないのに図形をクリックしたら案内すること。
+    #[test]
+    fn clicking_outside_an_edit_is_guided() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        assert!(s.cmdline.history().any(|l| l.text.contains("EDITCOMP")));
     }
 }
