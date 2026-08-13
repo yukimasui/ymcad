@@ -9,6 +9,7 @@
 mod app;
 mod cmdline;
 mod component_panel;
+mod editing;
 mod file_ops;
 mod input;
 mod jp_font;
