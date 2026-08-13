@@ -15,6 +15,7 @@
 pub mod component;
 pub mod draw;
 pub mod edit;
+pub mod param;
 
 use cad_core::geom::{Aabb, Point2};
 use cad_core::{Command, Document, EntityId, Geometry, LayerId};
@@ -143,6 +144,21 @@ pub trait Tool: std::fmt::Debug {
     /// TRIM / EXTEND / FILLET / CHAMFER のように、対象を選択フェーズではなく
     /// コマンド実行中に指すコマンドで使う。
     fn wants_entity(&self) -> bool {
+        false
+    }
+
+    /// いま**生の文字列**を待っているか。
+    ///
+    /// 通常の入力は `Session::interpret` が座標・数値として解釈し、
+    /// 残りを**大文字化して全角を正規化**した [`StepInput::Word`] にする。
+    /// オプション（`C` / `2P`）にはこれが正しいが、
+    /// **名前や式には有害**。`if` が `IF` になって式の予約語と合わなくなり、
+    /// `データー` の長音が `-` に直されて名前が壊れる。
+    ///
+    /// これが `true` の間は、打った文字列がそのまま `Word` で届く。
+    /// `wants_entity` と同じく**状態で切り替えてよい**
+    /// （`COMPONENT` は基点のときは点、名前のときは生文字列）。
+    fn wants_raw_text(&self) -> bool {
         false
     }
 
@@ -349,6 +365,30 @@ pub static COMMANDS: &[CommandSpec] = &[
         kind: CommandKind::Tool(|| Box::new(component::RedefineTool::default())),
     },
     CommandSpec {
+        name: "COMPONENTS",
+        aliases: &["CS"],
+        summary: "コンポーネントのパネルを開閉（配置・パラメータ）",
+        kind: CommandKind::Immediate(Immediate::ComponentPanel),
+    },
+    CommandSpec {
+        name: "PARAM",
+        aliases: &["PA"],
+        summary: "コンポーネントにパラメータを宣言する",
+        kind: CommandKind::Tool(|| Box::new(param::ParamTool::default())),
+    },
+    CommandSpec {
+        name: "BIND",
+        aliases: &["BI"],
+        summary: "コンポーネントの座標に式を束縛する",
+        kind: CommandKind::Tool(|| Box::new(param::BindTool::default())),
+    },
+    CommandSpec {
+        name: "PSET",
+        aliases: &["PS"],
+        summary: "インスタンスのパラメータを変える（R でリセット）",
+        kind: CommandKind::Tool(|| Box::new(param::ParamSetTool::default())),
+    },
+    CommandSpec {
         name: "ZOOM",
         aliases: &["Z"],
         summary: "表示範囲（全体 / 範囲）",
@@ -476,6 +516,8 @@ pub enum Immediate {
     Redo,
     /// レイヤパネルの開閉。
     LayerPanel,
+    /// コンポーネントパネルの開閉。
+    ComponentPanel,
     /// ファイル操作。
     File(FileAction),
 }
@@ -488,6 +530,7 @@ impl Immediate {
             Self::Undo => "UNDO",
             Self::Redo => "REDO",
             Self::LayerPanel => "LAYER",
+            Self::ComponentPanel => "COMPONENTS",
             Self::File(a) => a.command_name(),
         }
     }

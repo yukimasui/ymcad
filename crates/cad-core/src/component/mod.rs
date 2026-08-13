@@ -43,10 +43,15 @@
 //! AutoCAD の `INSERT` は X/Y 別倍率を持つが、あれは**円を壊す失敗機能**。
 //! 一様倍率なら既存の 5 変種が変換で閉じ、`Ellipse` / `EllipticArc` が要らない。
 
+pub mod binding;
+
+pub use binding::{Binding, ParamDecl, Slot};
+
 use std::collections::BTreeMap;
 
 use crate::entity::{Entity, Geometry};
 use crate::error::{CadError, Result};
+use crate::expr::{eval, Env};
 use crate::geom::tolerance::is_zero_len;
 use crate::geom::{Aabb, Line, Point2};
 
@@ -139,19 +144,7 @@ impl Placement {
     }
 }
 
-/// パラメータの値。
-///
-/// 段階 2 の式で使う。段階 1 では `overrides` が常に空なので出番が無いが、
-/// **永続化の形を先に決めておく**ために置いてある（後から足すと形式変更になる）。
-#[derive(Clone, Debug, PartialEq)]
-pub enum Value {
-    /// 数値。
-    Number(f64),
-    /// 真偽。
-    Bool(bool),
-    /// 選択肢（`ParamType::Choice` の候補のいずれか）。
-    Choice(String),
-}
+pub use crate::expr::Value;
 
 /// 配置されたコンポーネント。
 #[derive(Clone, Debug, PartialEq)]
@@ -200,19 +193,113 @@ pub struct Definition {
     pub name: String,
     /// 基点。挿入時にここが指定点へ来る。
     pub origin: Point2,
+    /// パラメータの宣言。**宣言順がパネルの表示順**になる。
+    pub params: Vec<ParamDecl>,
     /// 中身。**ふつうの [`Entity`]** で、式は入っていない。
     pub entities: Vec<Entity>,
+    /// 座標への式の束縛。**パラメトリックにしたい座標だけ**を疎に上書きする。
+    ///
+    /// `entity` は [`Self::entities`] への添字。**中身と必ず一緒に持ち替える**
+    /// （[`binding`] のモジュールドキュメントを参照）。
+    pub bindings: Vec<Binding>,
 }
 
 impl Definition {
-    /// 名前・基点・中身から作る。
+    /// 名前・基点・中身から作る。パラメータと束縛は空。
     #[must_use]
     pub fn new(name: impl Into<String>, origin: Point2, entities: Vec<Entity>) -> Self {
         Self {
             name: name.into(),
             origin,
+            params: Vec::new(),
             entities,
+            bindings: Vec::new(),
         }
+    }
+
+    /// 名前でパラメータの宣言を引く。
+    #[must_use]
+    pub fn param(&self, name: &str) -> Option<&ParamDecl> {
+        self.params.iter().find(|p| p.name == name)
+    }
+
+    /// パラメータの値を決める。
+    ///
+    /// **上書きが優先され、無い項目は既定値の式を評価する。**
+    /// これが Figma のインスタンスと同じ継承。項目を消せば既定値へ戻る。
+    ///
+    /// 既定値は他のパラメータを参照してよいので、**依存の順に評価する**。
+    /// 循環はコマンドが弾くが、万一残っていても無限ループしないよう
+    /// 「1 周して 1 つも解決しなければ打ち切る」形にしてある。
+    ///
+    /// 型に合わない上書きや評価に失敗した既定値は**捨てる**。
+    /// その名前は環境に入らないので、参照している式が失敗し、
+    /// その座標は定義のままになる（図形は消えない）。
+    #[must_use]
+    pub fn param_env(&self, overrides: &BTreeMap<String, Value>) -> Env {
+        let mut env = Env::new();
+
+        // 1. 妥当な上書きを先に入れる。
+        for decl in &self.params {
+            if let Some(v) = overrides.get(&decl.name) {
+                if decl.accepts(v) {
+                    env.insert(decl.name.clone(), v.clone());
+                }
+            }
+        }
+
+        // 2. 残りを依存の順に評価する。
+        let mut pending: Vec<&ParamDecl> = self
+            .params
+            .iter()
+            .filter(|d| !env.contains_key(&d.name))
+            .collect();
+
+        while !pending.is_empty() {
+            let before = pending.len();
+            pending.retain(|decl| {
+                // 参照先がまだ決まっていなければ後回し。
+                let ready = decl
+                    .default
+                    .referenced_vars()
+                    .iter()
+                    .all(|v| env.contains_key(*v));
+                if !ready {
+                    return true;
+                }
+                if let Ok(value) = eval(&decl.default, &env) {
+                    if decl.accepts(&value) {
+                        env.insert(decl.name.clone(), value);
+                    }
+                }
+                false
+            });
+            // 1 周して 1 つも減らなければ、残りは循環しているか参照先が無い。
+            if pending.len() == before {
+                break;
+            }
+        }
+
+        env
+    }
+
+    /// 束縛を適用した中身を返す。
+    ///
+    /// 評価に失敗した束縛は**その座標だけ定義のまま**にする。
+    /// 図形ごと消すと「パラメータを変えたら図形が消えた」という最悪の壊れ方になる。
+    #[must_use]
+    pub fn evaluated_entities(&self, env: &Env) -> Vec<Entity> {
+        let mut out = self.entities.clone();
+        for b in &self.bindings {
+            let Some(entity) = out.get_mut(b.entity) else {
+                continue;
+            };
+            let Ok(Value::Number(n)) = eval(&b.expr, env) else {
+                continue;
+            };
+            b.slot.apply(&mut entity.geom, n);
+        }
+        out
     }
 }
 
@@ -341,7 +428,8 @@ impl DefinitionTable {
         id: DefinitionId,
         origin: Point2,
         entities: Vec<Entity>,
-    ) -> Result<(Point2, Vec<Entity>)> {
+        bindings: Vec<Binding>,
+    ) -> Result<(Point2, Vec<Entity>, Vec<Binding>)> {
         let def = self
             .defs
             .get_mut(id.index() as usize)
@@ -349,7 +437,22 @@ impl DefinitionTable {
             .ok_or(CadError::DefinitionNotFound)?;
         let old_origin = std::mem::replace(&mut def.origin, origin);
         let old_entities = std::mem::replace(&mut def.entities, entities);
-        Ok((old_origin, old_entities))
+        let old_bindings = std::mem::replace(&mut def.bindings, bindings);
+        Ok((old_origin, old_entities, old_bindings))
+    }
+
+    /// パラメータの宣言を差し替える。差し替え前を返す。
+    pub(crate) fn replace_params(
+        &mut self,
+        id: DefinitionId,
+        params: Vec<ParamDecl>,
+    ) -> Result<Vec<ParamDecl>> {
+        let def = self
+            .defs
+            .get_mut(id.index() as usize)
+            .and_then(|d| d.as_mut())
+            .ok_or(CadError::DefinitionNotFound)?;
+        Ok(std::mem::replace(&mut def.params, params))
     }
 
     /// 定義名を変更する。古い名前を返す。
@@ -409,7 +512,15 @@ fn resolve_into(inst: &Instance, defs: &DefinitionTable, depth: usize, out: &mut
         return;
     };
 
-    for entity in &def.entities {
+    // パラメータを決めてから中身へ束縛を適用する。
+    // 束縛が 1 つも無ければ、これは中身の複製と同じ（クラシックなブロック）。
+    let entities = if def.bindings.is_empty() {
+        def.entities.clone()
+    } else {
+        def.evaluated_entities(&def.param_env(&inst.overrides))
+    };
+
+    for entity in &entities {
         match &entity.geom {
             // 入れ子。内側のインスタンスを先に展開し、その結果に外側の配置をかける。
             // 属性は内側のものをそのまま残す。
@@ -524,6 +635,65 @@ pub fn would_create_cycle(
         }
     }
     false
+}
+
+/// パラメータの既定値どうしが循環していないか調べる。
+///
+/// 循環していれば、その輪に含まれる名前を 1 つ返す。
+///
+/// **コマンドが宣言を受け取る前に必ず呼ぶ。** 循環したまま入れると
+/// [`Definition::param_env`] がそのパラメータを解決できず、
+/// 参照している束縛が黙って効かなくなる。
+#[must_use]
+pub fn param_cycle(params: &[ParamDecl]) -> Option<String> {
+    /// 探索の状態。
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        /// 未訪問。
+        White,
+        /// 探索中（ここへ戻ってきたら循環）。
+        Grey,
+        /// 探索済み。
+        Black,
+    }
+
+    let mut mark: BTreeMap<&str, Mark> = params
+        .iter()
+        .map(|p| (p.name.as_str(), Mark::White))
+        .collect();
+
+    // 明示的なスタックで深さ優先探索する（再帰だと深い依存でスタックを溢れさせる）。
+    for start in params {
+        if mark.get(start.name.as_str()) != Some(&Mark::White) {
+            continue;
+        }
+        let mut stack = vec![(start.name.as_str(), 0usize)];
+        while let Some((name, index)) = stack.pop() {
+            let Some(decl) = params.iter().find(|p| p.name == name) else {
+                continue;
+            };
+            let deps = decl.default.referenced_vars();
+
+            if index == 0 {
+                mark.insert(name, Mark::Grey);
+            }
+            if index >= deps.len() {
+                mark.insert(name, Mark::Black);
+                continue;
+            }
+
+            // 次の依存へ進む前に、自分を「続きから」戻す。
+            stack.push((name, index + 1));
+            let dep = deps[index];
+            match mark.get(dep) {
+                Some(Mark::Grey) => return Some(dep.to_owned()),
+                Some(Mark::White) => stack.push((dep, 0)),
+                // 探索済み、または宣言されていない名前（別のエラーで弾かれる）。
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 /// 定義の中で参照されている定義 ID を列挙する（重複あり）。
@@ -971,6 +1141,7 @@ mod tests {
                     other,
                     Placement::at(Point2::ORIGIN),
                 )))],
+                Vec::new(),
             )
             .expect("差し替えられる");
         }
@@ -1002,6 +1173,7 @@ mod tests {
                 c,
                 Placement::at(Point2::ORIGIN),
             )))],
+            Vec::new(),
         )
         .expect("差し替えられる");
 
@@ -1153,9 +1325,10 @@ mod tests {
     #[test]
     fn replace_contents_returns_the_previous_state() {
         let (mut t, id) = table_with(sample_contents(), p(1.0, 1.0));
-        let (old_origin, old) = t
-            .replace_contents(id, p(2.0, 2.0), Vec::new())
+        let (old_origin, old, old_bindings) = t
+            .replace_contents(id, p(2.0, 2.0), Vec::new(), Vec::new())
             .expect("差し替えられる");
+        assert!(old_bindings.is_empty());
 
         assert!(eq_len(old_origin.x, 1.0), "元の基点が返る");
         assert_eq!(old.len(), 4, "元の中身が返る");
@@ -1199,5 +1372,304 @@ mod tests {
             ],
         );
         assert_eq!(referenced_definitions(&def), vec![inner]);
+    }
+
+    // ---- パラメータと束縛 -------------------------------------------------
+    //
+    // ここが段階 2 の主眼。ダイナミックブロックの「アクション」を
+    // 型付きパラメータ + 式で置き換えたことの検証。
+
+    use crate::expr::{parse, Value};
+
+    /// 幅で長さが決まる線分を持つ定義。
+    ///
+    /// ```text
+    /// パラメータ  幅: Number = 900
+    /// 幾何        LINE (0,0) - (幅, 0)
+    /// ```
+    fn parametric_table() -> (DefinitionTable, DefinitionId) {
+        let mut t = DefinitionTable::new();
+        let mut def = Definition::new(
+            "窓",
+            Point2::ORIGIN,
+            vec![ent(Geometry::Line(Line::new(p(0.0, 0.0), p(1.0, 0.0))))],
+        );
+        def.params = vec![ParamDecl::number("幅", 900.0).with_range(300.0, 3000.0)];
+        def.bindings = vec![Binding::new(0, Slot::LineBx, parse("幅").expect("解析"))];
+        let id = t.insert(def);
+        (t, id)
+    }
+
+    /// 解決された線分の終点 X。
+    fn resolved_width(inst: &Instance, defs: &DefinitionTable) -> f64 {
+        let out = resolve(inst, defs);
+        let Geometry::Line(l) = &out[0] else {
+            panic!("線分のはず: {:?}", out[0])
+        };
+        l.b.x
+    }
+
+    /// **既定値が効くこと。**
+    #[test]
+    fn a_parameter_default_drives_the_geometry() {
+        let (defs, id) = parametric_table();
+        let inst = Instance::new(id, Placement::at(Point2::ORIGIN));
+        assert!(eq_len(resolved_width(&inst, &defs), 900.0));
+    }
+
+    /// **インスタンスごとの上書きが効くこと。**
+    ///
+    /// これがダイナミックブロックの「アクション」で難しかったこと。
+    #[test]
+    fn an_instance_override_changes_only_that_instance() {
+        let (defs, id) = parametric_table();
+
+        let plain = Instance::new(id, Placement::at(Point2::ORIGIN));
+        let mut wide = Instance::new(id, Placement::at(Point2::ORIGIN));
+        wide.overrides
+            .insert("幅".to_owned(), Value::Number(1800.0));
+
+        assert!(eq_len(resolved_width(&plain, &defs), 900.0), "既定のまま");
+        assert!(eq_len(resolved_width(&wide, &defs), 1800.0), "上書きが効く");
+    }
+
+    /// **上書きを消すと既定値へ戻ること（リセット）。**
+    #[test]
+    fn removing_an_override_returns_to_the_default() {
+        let (defs, id) = parametric_table();
+        let mut inst = Instance::new(id, Placement::at(Point2::ORIGIN));
+        inst.overrides
+            .insert("幅".to_owned(), Value::Number(1800.0));
+        assert!(eq_len(resolved_width(&inst, &defs), 1800.0));
+
+        inst.overrides.remove("幅");
+        assert!(eq_len(resolved_width(&inst, &defs), 900.0), "既定値へ戻る");
+    }
+
+    /// **範囲外の上書きは捨てて既定値を使うこと。**
+    ///
+    /// 通すと縮退した図形になる。範囲はコマンドが弾くが、
+    /// ファイルを手で書き換えられても壊れないようにここでも見る。
+    #[test]
+    fn an_out_of_range_override_falls_back_to_the_default() {
+        let (defs, id) = parametric_table();
+        let mut inst = Instance::new(id, Placement::at(Point2::ORIGIN));
+        inst.overrides
+            .insert("幅".to_owned(), Value::Number(999_999.0));
+        assert!(eq_len(resolved_width(&inst, &defs), 900.0), "既定値を使う");
+    }
+
+    /// 型の違う上書きも捨てること。
+    #[test]
+    fn an_override_of_the_wrong_type_is_discarded() {
+        let (defs, id) = parametric_table();
+        let mut inst = Instance::new(id, Placement::at(Point2::ORIGIN));
+        inst.overrides.insert("幅".to_owned(), Value::Bool(true));
+        assert!(eq_len(resolved_width(&inst, &defs), 900.0));
+    }
+
+    /// **式が合成できること。** `幅 = 高さ × 2 + 10` の類。
+    #[test]
+    fn expressions_compose_over_several_parameters() {
+        let mut t = DefinitionTable::new();
+        let mut def = Definition::new(
+            "棚",
+            Point2::ORIGIN,
+            vec![ent(Geometry::Line(Line::new(p(0.0, 0.0), p(1.0, 0.0))))],
+        );
+        def.params = vec![
+            ParamDecl::number("高さ", 50.0),
+            // 既定値が別のパラメータを参照する。
+            ParamDecl {
+                name: "幅".to_owned(),
+                ty: crate::expr::ParamType::Number,
+                default: parse("高さ * 2 + 10").expect("解析"),
+                range: None,
+            },
+        ];
+        def.bindings = vec![Binding::new(0, Slot::LineBx, parse("幅").expect("解析"))];
+        let id = t.insert(def);
+
+        let inst = Instance::new(id, Placement::at(Point2::ORIGIN));
+        assert!(eq_len(resolved_width(&inst, &t), 110.0), "50 * 2 + 10");
+
+        // 参照元を変えると連動する。
+        let mut taller = Instance::new(id, Placement::at(Point2::ORIGIN));
+        taller
+            .overrides
+            .insert("高さ".to_owned(), Value::Number(100.0));
+        assert!(eq_len(resolved_width(&taller, &t), 210.0), "連動する");
+    }
+
+    /// **依存の順に評価すること（宣言順に依存しない）。**
+    #[test]
+    fn defaults_are_evaluated_in_dependency_order() {
+        let mut t = DefinitionTable::new();
+        let mut def = Definition::new(
+            "順序",
+            Point2::ORIGIN,
+            vec![ent(Geometry::Line(Line::new(p(0.0, 0.0), p(1.0, 0.0))))],
+        );
+        // 依存する側を**先に**宣言する。
+        def.params = vec![
+            ParamDecl {
+                name: "合計".to_owned(),
+                ty: crate::expr::ParamType::Number,
+                default: parse("a + b").expect("解析"),
+                range: None,
+            },
+            ParamDecl::number("a", 3.0),
+            ParamDecl::number("b", 4.0),
+        ];
+        def.bindings = vec![Binding::new(0, Slot::LineBx, parse("合計").expect("解析"))];
+        let id = t.insert(def);
+
+        let inst = Instance::new(id, Placement::at(Point2::ORIGIN));
+        assert!(eq_len(resolved_width(&inst, &t), 7.0));
+    }
+
+    /// **条件式で形が切り替わること。**
+    ///
+    /// ダイナミックブロックの「表示状態」に相当するものが式で書ける。
+    #[test]
+    fn a_condition_switches_the_shape() {
+        let mut t = DefinitionTable::new();
+        let mut def = Definition::new(
+            "扉",
+            Point2::ORIGIN,
+            vec![ent(Geometry::Line(Line::new(p(0.0, 0.0), p(1.0, 0.0))))],
+        );
+        def.params = vec![
+            ParamDecl::boolean("両開き", false),
+            ParamDecl::number("幅", 900.0),
+        ];
+        def.bindings = vec![Binding::new(
+            0,
+            Slot::LineBx,
+            parse("if 両開き then 幅 / 2 else 幅").expect("解析"),
+        )];
+        let id = t.insert(def);
+
+        let single = Instance::new(id, Placement::at(Point2::ORIGIN));
+        assert!(eq_len(resolved_width(&single, &t), 900.0));
+
+        let mut double = Instance::new(id, Placement::at(Point2::ORIGIN));
+        double
+            .overrides
+            .insert("両開き".to_owned(), Value::Bool(true));
+        assert!(eq_len(resolved_width(&double, &t), 450.0));
+    }
+
+    /// **循環した既定値でも無限ループしないこと。**
+    ///
+    /// 循環はコマンドが弾くが、最後の砦としてここでも止まる必要がある。
+    /// 解決できなかったパラメータは環境に入らず、参照する束縛が失敗して
+    /// その座標は定義のままになる。
+    #[test]
+    fn cyclic_defaults_do_not_loop_forever() {
+        let mut t = DefinitionTable::new();
+        let mut def = Definition::new(
+            "循環",
+            Point2::ORIGIN,
+            vec![ent(Geometry::Line(Line::new(p(0.0, 0.0), p(7.0, 0.0))))],
+        );
+        def.params = vec![
+            ParamDecl {
+                name: "a".to_owned(),
+                ty: crate::expr::ParamType::Number,
+                default: parse("b").expect("解析"),
+                range: None,
+            },
+            ParamDecl {
+                name: "b".to_owned(),
+                ty: crate::expr::ParamType::Number,
+                default: parse("a").expect("解析"),
+                range: None,
+            },
+        ];
+        def.bindings = vec![Binding::new(0, Slot::LineBx, parse("a").expect("解析"))];
+        let id = t.insert(def);
+
+        let inst = Instance::new(id, Placement::at(Point2::ORIGIN));
+        // 有限時間で返り、束縛は効かず定義のまま。
+        assert!(eq_len(resolved_width(&inst, &t), 7.0), "定義のまま");
+    }
+
+    /// **評価に失敗した束縛は、その座標だけ定義のままにすること。**
+    ///
+    /// 図形ごと消すと「パラメータを変えたら図形が消えた」という最悪の壊れ方になる。
+    #[test]
+    fn a_failing_binding_leaves_that_scalar_at_its_literal() {
+        let mut t = DefinitionTable::new();
+        let mut def = Definition::new(
+            "壊れた式",
+            Point2::ORIGIN,
+            vec![ent(Geometry::Line(Line::new(p(0.0, 0.0), p(5.0, 0.0))))],
+        );
+        // 宣言していないパラメータを参照する束縛。
+        def.bindings = vec![Binding::new(
+            0,
+            Slot::LineBx,
+            parse("ない名前").expect("解析"),
+        )];
+        let id = t.insert(def);
+
+        let inst = Instance::new(id, Placement::at(Point2::ORIGIN));
+        let out = resolve(&inst, &t);
+        assert_eq!(out.len(), 1, "図形は消えない");
+        assert!(eq_len(resolved_width(&inst, &t), 5.0), "定義のまま");
+    }
+
+    /// 0 除算になる束縛でも図形が壊れないこと。
+    #[test]
+    fn a_division_by_zero_binding_keeps_the_literal() {
+        let mut t = DefinitionTable::new();
+        let mut def = Definition::new(
+            "0除算",
+            Point2::ORIGIN,
+            vec![ent(Geometry::Line(Line::new(p(0.0, 0.0), p(5.0, 0.0))))],
+        );
+        def.params = vec![ParamDecl::number("分母", 0.0)];
+        def.bindings = vec![Binding::new(
+            0,
+            Slot::LineBx,
+            parse("100 / 分母").expect("解析"),
+        )];
+        let id = t.insert(def);
+
+        let inst = Instance::new(id, Placement::at(Point2::ORIGIN));
+        assert!(eq_len(resolved_width(&inst, &t), 5.0), "定義のまま");
+    }
+
+    /// **束縛が無ければクラシックなブロックとして振る舞うこと。**
+    ///
+    /// 段階 1 と段階 2 が地続きであることの確認。
+    #[test]
+    fn a_definition_without_bindings_behaves_like_a_classic_block() {
+        let (defs, id) = table_with(sample_contents(), p(1.0, 1.0));
+        let inst = Instance::new(id, Placement::at(p(7.0, -3.0)));
+        assert_eq!(resolve(&inst, &defs).len(), 4, "中身がそのまま出る");
+    }
+
+    /// パラメータと配置の変換が両立すること。
+    #[test]
+    fn parameters_and_placement_compose() {
+        let (defs, id) = parametric_table();
+        let mut inst = Instance::new(
+            id,
+            Placement::new(p(10.0, 0.0), 0.0, 2.0, false).expect("妥当"),
+        );
+        inst.overrides.insert("幅".to_owned(), Value::Number(500.0));
+
+        // 幅 500 の線分を 2 倍にして (10,0) へ置く → 終点 X = 10 + 1000。
+        assert!(eq_len(resolved_width(&inst, &defs), 1010.0));
+    }
+
+    #[test]
+    fn param_lookup_by_name() {
+        let (defs, id) = parametric_table();
+        let def = defs.get(id).expect("引ける");
+        assert!(def.param("幅").is_some());
+        assert!(def.param("ない").is_none());
     }
 }

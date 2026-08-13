@@ -201,6 +201,19 @@ pub struct InsertTool {
     state: InsertState,
 }
 
+impl InsertTool {
+    /// **定義を決めた状態で始める。**
+    ///
+    /// パネルの「配置」ボタンから呼ぶ。名前を打つ段階を飛ばせるので、
+    /// 日本語入力を通さずに配置できる。
+    #[must_use]
+    pub fn for_definition(def: cad_core::DefinitionId) -> Self {
+        Self {
+            state: InsertState::Position { def },
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq)]
 enum InsertState {
     /// 定義名の入力待ち。

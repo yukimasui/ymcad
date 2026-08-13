@@ -47,8 +47,16 @@
 //!
 //! --- 以下は形式 v2 以降 ---
 //! definition_count u32
-//!   per definition: name | origin(2×f64) | entity_count u32 → エンティティと同じ形
+//!   per definition: name | origin(2×f64)
+//!                 | entity_count u32 → エンティティと同じ形
+//!                 --- 以下は形式 v3 以降 ---
+//!                 | param_count u32   → 宣言（名前・型・範囲・既定値の式）
+//!                 | binding_count u32 → 束縛（添字・スロット・式）
 //! ```
+//!
+//! **式は木のまま前置記法で書く。** 文字列で持つと読み込みのたびに
+//! 字句解析と型検査をやり直すことになり、`Document` に入っている式は
+//! 常に妥当という約束（`crate::expr`）が保てない。
 //!
 //! **定義はエンティティより後に置く。** v1 のファイルは定義セクションが無いだけで
 //! 前半がそのまま読めるので、後方互換の分岐が「最後まで読んだら終わり」で済む。
@@ -89,13 +97,16 @@ pub(crate) const MAGIC: &[u8; 8] = b"YMCAD\x1a\0\0";
 /// |---|---|
 /// | 1 | 最初の形式（レイヤ・グループ・エンティティ） |
 /// | 2 | コンポーネント定義とインスタンス |
+/// | 3 | パラメータの宣言と式の束縛 |
 ///
-/// **古い版は読めるまま保つ。** v1 のファイルには定義セクションが無いだけで、
-/// エンティティの表現は変わっていない。
-pub(crate) const FORMAT_VERSION: u32 = 2;
+/// **古い版は読めるまま保つ。** 追加は常に既存の並びの**後ろ**へ足す。
+pub(crate) const FORMAT_VERSION: u32 = 3;
 
 /// コンポーネント定義セクションが入った最初の版。
 pub(crate) const VERSION_WITH_COMPONENTS: u32 = 2;
+
+/// パラメータと束縛が入った最初の版。
+pub(crate) const VERSION_WITH_PARAMS: u32 = 3;
 
 /// 標準のファイル拡張子（ドットなし）。
 pub const EXTENSION: &str = "ymc";
@@ -160,6 +171,84 @@ pub(crate) mod layer_flags {
     pub const VISIBLE: u8 = 1 << 0;
     /// ロックされているか。
     pub const LOCKED: u8 = 1 << 1;
+}
+
+/// パラメータの型を表すタグ（形式 v3 以降）。
+pub(crate) mod param_type {
+    /// 数値。
+    pub const NUMBER: u8 = 0;
+    /// 真偽。
+    pub const BOOL: u8 = 1;
+    /// 選択肢。候補の個数と文字列が続く。
+    pub const CHOICE: u8 = 2;
+}
+
+/// 式の節点を表すタグ（形式 v3 以降）。
+///
+/// **前置記法で書く。** 子の個数はタグから決まるので、括弧や終端記号が要らない。
+pub(crate) mod expr_tag {
+    /// 定数。値のタグが続く。
+    pub const LITERAL: u8 = 0;
+    /// パラメータ参照。名前が続く。
+    pub const VAR: u8 = 1;
+    /// 単項演算。演算子と子 1 つ。
+    pub const UNARY: u8 = 2;
+    /// 二項演算。演算子と子 2 つ。
+    pub const BINARY: u8 = 3;
+    /// 条件式。子 3 つ。
+    pub const IF: u8 = 4;
+    /// 1 引数の関数。関数番号と子 1 つ。
+    pub const CALL1: u8 = 5;
+    /// 2 引数の関数。関数番号と子 2 つ。
+    pub const CALL2: u8 = 6;
+}
+
+/// 束縛できるスカラーの位置を表すタグ（形式 v3 以降）。
+///
+/// **既存の値は変えない。** 変えると過去のファイルの束縛が別の座標を指す。
+pub(crate) mod slot_tag {
+    /// 線分の始点 X。
+    pub const LINE_AX: u8 = 0;
+    /// 線分の始点 Y。
+    pub const LINE_AY: u8 = 1;
+    /// 線分の終点 X。
+    pub const LINE_BX: u8 = 2;
+    /// 線分の終点 Y。
+    pub const LINE_BY: u8 = 3;
+    /// 円の中心 X。
+    pub const CIRCLE_CX: u8 = 4;
+    /// 円の中心 Y。
+    pub const CIRCLE_CY: u8 = 5;
+    /// 円の半径。
+    pub const CIRCLE_R: u8 = 6;
+    /// 円弧の中心 X。
+    pub const ARC_CX: u8 = 7;
+    /// 円弧の中心 Y。
+    pub const ARC_CY: u8 = 8;
+    /// 円弧の半径。
+    pub const ARC_R: u8 = 9;
+    /// 円弧の開始角。
+    pub const ARC_START: u8 = 10;
+    /// 円弧の終了角。
+    pub const ARC_END: u8 = 11;
+    /// 作図線の通過点 X。
+    pub const XLINE_OX: u8 = 12;
+    /// 作図線の通過点 Y。
+    pub const XLINE_OY: u8 = 13;
+    /// 作図線の角度。
+    pub const XLINE_ANGLE: u8 = 14;
+    /// ポリラインの頂点 X。頂点番号が続く。
+    pub const POLYLINE_VX: u8 = 15;
+    /// ポリラインの頂点 Y。頂点番号が続く。
+    pub const POLYLINE_VY: u8 = 16;
+    /// インスタンスの配置 X。
+    pub const INSTANCE_X: u8 = 17;
+    /// インスタンスの配置 Y。
+    pub const INSTANCE_Y: u8 = 18;
+    /// インスタンスの回転。
+    pub const INSTANCE_ROTATION: u8 = 19;
+    /// インスタンスの倍率。
+    pub const INSTANCE_SCALE: u8 = 20;
 }
 
 /// 線種を表すタグ。

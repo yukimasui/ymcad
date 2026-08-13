@@ -15,9 +15,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cad_core::command::{
-    AddEntities, AddLayer, CreateGroup, DefineComponent, InsertInstance, SetLayerProperties,
+    AddEntities, AddLayer, CreateGroup, DefineComponent, InsertInstance, SetBinding,
+    SetDefinitionParams, SetInstanceOverride, SetLayerProperties,
 };
-use cad_core::component::Placement;
+use cad_core::component::{Binding, ParamDecl, Placement, Slot};
+use cad_core::expr::{parse, ParamType, Value};
 use cad_core::geom::{Arc, Circle, Line, Point2, Polyline, Vec2, Xline};
 use cad_core::layer::LineType;
 use cad_core::{AciColor, ColorSpec, Document, Entity, EntityId, Geometry, Instance, LayerId};
@@ -172,12 +174,47 @@ fn build() -> cad_core::Result<Document> {
         .by_name("外 assembly")
         .ok_or(cad_core::CadError::DefinitionNotFound)?;
 
+    // ---- パラメータと束縛（形式 v3 以降） ----
+    let params = vec![
+        ParamDecl::number("幅", 4.0).with_range(1.0, 100.0),
+        ParamDecl::boolean("反転", false),
+        ParamDecl::choice("種別", vec!["引違い".to_owned(), "開き".to_owned()])
+            .ok_or(cad_core::CadError::DegenerateGeometry("選択肢"))?,
+        ParamDecl {
+            name: "半幅".to_owned(),
+            ty: ParamType::Number,
+            default: parse("幅 / 2").map_err(|_| cad_core::CadError::DegenerateGeometry("式"))?,
+            range: None,
+        },
+    ];
+    doc.apply(Box::new(SetDefinitionParams::new("PARAM", inner, params)))?;
+    for (entity, slot, src) in [
+        (0usize, Slot::LineBx, "if 反転 then 半幅 else 幅"),
+        (1usize, Slot::CircleR, "max(幅 / 4, 0.5)"),
+    ] {
+        let expr = parse(src).map_err(|_| cad_core::CadError::DegenerateGeometry("式"))?;
+        doc.apply(Box::new(SetBinding::new(
+            "BIND",
+            inner,
+            Binding::new(entity, slot, expr),
+        )))?;
+    }
+
     doc.apply(Box::new(InsertInstance::new(
         "INSERT",
         inner,
         Placement::at(Point2::new(30.0, 0.0)),
         walls,
     )))?;
+    // 直前に置いたインスタンスへ上書きを付ける。
+    if let Some(last) = doc.entities().ids().last() {
+        doc.apply(Box::new(SetInstanceOverride::set(
+            "PARAM",
+            last,
+            "幅",
+            Value::Number(8.0),
+        )))?;
+    }
     doc.apply(Box::new(InsertInstance::new(
         "INSERT",
         outer,

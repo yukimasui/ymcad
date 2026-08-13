@@ -8,6 +8,7 @@
 
 mod app;
 mod cmdline;
+mod component_panel;
 mod file_ops;
 mod input;
 mod jp_font;
