@@ -317,6 +317,7 @@ impl CadApp {
             &self.viewport,
             &self.session.selection,
             &mut self.resolved,
+            self.session.editing(),
         );
 
         let preview = self.session.preview(self.cursor_model, &self.doc);

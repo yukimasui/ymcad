@@ -1368,6 +1368,377 @@ mod tests {
             "反映される"
         );
     }
+
+    // ---- インプレース編集 -------------------------------------------------
+
+    /// 線分 2 本の定義に「幅」を宣言し、1 本目の終点 X に束縛して配置する。
+    fn setup_editable(
+        e: &mut EntityStore,
+        l: &mut LayerTable,
+        g: &mut GroupTable,
+        d: &mut DefinitionTable,
+    ) -> (DefinitionId, EntityId) {
+        let contents = vec![line_entity(0.0), line_entity(5.0)];
+        let mut def = DefineComponent::new("COMPONENT", "窓", Point2::ORIGIN, contents);
+        let def_id;
+        {
+            let mut ctx = EditCtx::new(e, l, g, d);
+            def.execute(&mut ctx).expect("定義");
+            def_id = def.created().expect("ID");
+            SetDefinitionParams::new("PARAM", def_id, vec![ParamDecl::number("幅", 3.0)])
+                .execute(&mut ctx)
+                .expect("宣言");
+            SetBinding::new(
+                "BIND",
+                def_id,
+                Binding::new(0, Slot::LineBx, parse("幅").expect("解析")),
+            )
+            .execute(&mut ctx)
+            .expect("束縛");
+        }
+        let mut ins = InsertInstance::new(
+            "INSERT",
+            def_id,
+            Placement::new(p(100.0, 50.0), 0.5, 2.0, false).expect("妥当"),
+            LayerId::ZERO,
+        );
+        {
+            let mut ctx = EditCtx::new(e, l, g, d);
+            ins.execute(&mut ctx).expect("配置");
+        }
+        (def_id, ins.created().expect("ID"))
+    }
+
+    /// **編集に入ると中身が実エンティティになること。**
+    #[test]
+    fn entering_replaces_the_instance_with_its_contents() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (_, inst) = setup_editable(&mut e, &mut l, &mut g, &mut d);
+        assert_eq!(e.len(), 1, "はじめはインスタンス 1 つ");
+
+        let mut cmd = EnterDefinitionEdit::new("EDITCOMP", inst);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.execute(&mut ctx).expect("編集に入れる");
+        }
+
+        assert_eq!(e.len(), 2, "線分 2 本になる");
+        assert!(!e.contains(inst), "インスタンスは外れる");
+        assert_eq!(cmd.created().len(), 2, "定義の中身と同じ数");
+    }
+
+    /// **画面上の見た目が変わらないこと。**
+    ///
+    /// 元のインスタンスを解決した図形と、編集に入って置かれた図形が一致すること。
+    /// ここがずれると「編集に入った瞬間に図形が飛ぶ」。
+    #[test]
+    fn entering_keeps_the_shapes_where_they_were() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (_, inst) = setup_editable(&mut e, &mut l, &mut g, &mut d);
+
+        // 入る前の見え方（束縛は「幅 = 3」で評価される）。
+        let Geometry::Instance(i) = &e.get(inst).expect("あるはず").geom else {
+            panic!()
+        };
+        let before = component::resolve(i, &d);
+
+        let mut cmd = EnterDefinitionEdit::new("EDITCOMP", inst);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.execute(&mut ctx).expect("編集に入れる");
+        }
+        let after: Vec<Geometry> = cmd
+            .created()
+            .iter()
+            .map(|id| e.get(*id).expect("あるはず").geom.clone())
+            .collect();
+
+        assert_eq!(before.len(), after.len());
+        // 束縛が効いている 1 本目だけは、定義そのままの形が置かれる
+        // （評価後の形を置くと、書き戻したときに束縛が固定されてしまう）。
+        let Geometry::Line(b1) = &before[1] else {
+            panic!()
+        };
+        let Geometry::Line(a1) = &after[1] else {
+            panic!()
+        };
+        assert!(
+            eq_len(b1.a.x, a1.a.x) && eq_len(b1.b.x, a1.b.x),
+            "束縛の無い要素は同じ位置"
+        );
+    }
+
+    /// **編集を通しても束縛が保たれること。**
+    ///
+    /// 束縛は添字で座標を指すので、順序が変わると指す先がずれる。
+    #[test]
+    fn bindings_survive_a_round_trip_through_editing() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (def_id, inst) = setup_editable(&mut e, &mut l, &mut g, &mut d);
+        let placement = match &e.get(inst).expect("あるはず").geom {
+            Geometry::Instance(i) => i.placement,
+            other => panic!("インスタンスのはず: {other:?}"),
+        };
+
+        let mut enter = EnterDefinitionEdit::new("EDITCOMP", inst);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            enter.execute(&mut ctx).expect("入る");
+        }
+        let members: Vec<EntityId> = enter.created().to_vec();
+
+        // そのまま出る（何も編集しない）。
+        let origins = vec![Some(0), Some(1)];
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            ExitDefinitionEdit::new("EDITCOMP", def_id, placement, members, origins)
+                .execute(&mut ctx)
+                .expect("出る");
+        }
+
+        let def = d.get(def_id).expect("引ける");
+        assert_eq!(def.entities.len(), 2, "中身は 2 本のまま");
+        assert_eq!(def.bindings.len(), 1, "**束縛が残る**");
+        assert_eq!(def.bindings[0].entity, 0);
+        assert_eq!(def.bindings[0].slot, Slot::LineBx);
+        assert_eq!(e.len(), 1, "インスタンスが置き直される");
+    }
+
+    /// **順序が入れ替わっても束縛が付いて回ること。**
+    #[test]
+    fn bindings_follow_their_entity_when_the_order_changes() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (def_id, inst) = setup_editable(&mut e, &mut l, &mut g, &mut d);
+        let placement = match &e.get(inst).expect("あるはず").geom {
+            Geometry::Instance(i) => i.placement,
+            other => panic!("{other:?}"),
+        };
+
+        let mut enter = EnterDefinitionEdit::new("EDITCOMP", inst);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            enter.execute(&mut ctx).expect("入る");
+        }
+        // 並びを逆にして出る（元の 0 番が新しい 1 番になる）。
+        let mut members: Vec<EntityId> = enter.created().to_vec();
+        members.reverse();
+        let origins = vec![Some(1), Some(0)];
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            ExitDefinitionEdit::new("EDITCOMP", def_id, placement, members, origins)
+                .execute(&mut ctx)
+                .expect("出る");
+        }
+
+        let def = d.get(def_id).expect("引ける");
+        assert_eq!(def.bindings.len(), 1);
+        assert_eq!(def.bindings[0].entity, 1, "**添字が付け替わる**");
+    }
+
+    /// 消された要素の束縛は捨てられること（指す先が無いので残せない）。
+    #[test]
+    fn bindings_of_deleted_entities_are_dropped() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (def_id, inst) = setup_editable(&mut e, &mut l, &mut g, &mut d);
+        let placement = match &e.get(inst).expect("あるはず").geom {
+            Geometry::Instance(i) => i.placement,
+            other => panic!("{other:?}"),
+        };
+
+        let mut enter = EnterDefinitionEdit::new("EDITCOMP", inst);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            enter.execute(&mut ctx).expect("入る");
+        }
+        // 束縛が付いている 0 番を残さずに出る。
+        let members = vec![enter.created()[1]];
+        let origins = vec![Some(1)];
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            ExitDefinitionEdit::new("EDITCOMP", def_id, placement, members, origins)
+                .execute(&mut ctx)
+                .expect("出る");
+        }
+
+        let def = d.get(def_id).expect("引ける");
+        assert_eq!(def.entities.len(), 1);
+        assert!(def.bindings.is_empty(), "指す先が無い束縛は残さない");
+    }
+
+    /// 新しく描いた要素も定義に入ること。
+    #[test]
+    fn newly_drawn_entities_join_the_definition() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (def_id, inst) = setup_editable(&mut e, &mut l, &mut g, &mut d);
+        let placement = match &e.get(inst).expect("あるはず").geom {
+            Geometry::Instance(i) => i.placement,
+            other => panic!("{other:?}"),
+        };
+
+        let mut enter = EnterDefinitionEdit::new("EDITCOMP", inst);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            enter.execute(&mut ctx).expect("入る");
+        }
+        // 編集中に 1 本描く。
+        let extra = e.insert(line_entity(99.0));
+        let mut members: Vec<EntityId> = enter.created().to_vec();
+        members.push(extra);
+        let origins = vec![Some(0), Some(1), None];
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            ExitDefinitionEdit::new("EDITCOMP", def_id, placement, members, origins)
+                .execute(&mut ctx)
+                .expect("出る");
+        }
+
+        let def = d.get(def_id).expect("引ける");
+        assert_eq!(def.entities.len(), 3, "描いた 1 本が加わる");
+        assert_eq!(def.bindings.len(), 1, "既存の束縛は残る");
+    }
+
+    /// **編集して書き戻しても図形がずれないこと。**
+    ///
+    /// `place` と `unplace` が対になっていることの結合確認。
+    #[test]
+    fn editing_and_writing_back_does_not_move_the_shapes() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (def_id, inst) = setup_editable(&mut e, &mut l, &mut g, &mut d);
+        let before = d.get(def_id).expect("引ける").entities.clone();
+        let placement = match &e.get(inst).expect("あるはず").geom {
+            Geometry::Instance(i) => i.placement,
+            other => panic!("{other:?}"),
+        };
+
+        let mut enter = EnterDefinitionEdit::new("EDITCOMP", inst);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            enter.execute(&mut ctx).expect("入る");
+        }
+        let members: Vec<EntityId> = enter.created().to_vec();
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            ExitDefinitionEdit::new(
+                "EDITCOMP",
+                def_id,
+                placement,
+                members,
+                vec![Some(0), Some(1)],
+            )
+            .execute(&mut ctx)
+            .expect("出る");
+        }
+
+        let after = &d.get(def_id).expect("引ける").entities;
+        assert_eq!(after.len(), before.len());
+        for (i, (a, b)) in before.iter().zip(after.iter()).enumerate() {
+            let (Geometry::Line(x), Geometry::Line(y)) = (&a.geom, &b.geom) else {
+                panic!("線分のはず")
+            };
+            assert!(
+                eq_len(x.a.x, y.a.x),
+                "{i} 番目の始点 X: {} → {}",
+                x.a.x,
+                y.a.x
+            );
+            assert!(
+                eq_len(x.b.x, y.b.x),
+                "{i} 番目の終点 X: {} → {}",
+                x.b.x,
+                y.b.x
+            );
+            assert!(eq_len(x.a.y, y.a.y), "{i} 番目の始点 Y");
+            assert!(eq_len(x.b.y, y.b.y), "{i} 番目の終点 Y");
+        }
+    }
+
+    #[test]
+    fn entering_undo_restores_the_instance() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (_, inst) = setup_editable(&mut e, &mut l, &mut g, &mut d);
+        let before = e.get(inst).cloned().expect("あるはず");
+
+        let mut cmd = EnterDefinitionEdit::new("EDITCOMP", inst);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            cmd.execute(&mut ctx).expect("入る");
+            cmd.undo(&mut ctx).expect("戻す");
+        }
+        assert_eq!(e.len(), 1);
+        assert_eq!(e.get(inst), Some(&before), "同じ ID・内容で戻る");
+    }
+
+    #[test]
+    fn exiting_undo_restores_the_edited_entities_and_the_definition() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (def_id, inst) = setup_editable(&mut e, &mut l, &mut g, &mut d);
+        let placement = match &e.get(inst).expect("あるはず").geom {
+            Geometry::Instance(i) => i.placement,
+            other => panic!("{other:?}"),
+        };
+
+        let mut enter = EnterDefinitionEdit::new("EDITCOMP", inst);
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            enter.execute(&mut ctx).expect("入る");
+        }
+        let members: Vec<EntityId> = enter.created().to_vec();
+
+        // 1 本消して出る。
+        let mut exit = ExitDefinitionEdit::new(
+            "EDITCOMP",
+            def_id,
+            placement,
+            vec![members[0]],
+            vec![Some(0)],
+        );
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            exit.execute(&mut ctx).expect("出る");
+        }
+        assert_eq!(d.get(def_id).expect("引ける").entities.len(), 1);
+
+        {
+            let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+            exit.undo(&mut ctx).expect("戻す");
+        }
+        assert_eq!(
+            d.get(def_id).expect("引ける").entities.len(),
+            2,
+            "定義が戻る"
+        );
+        assert_eq!(e.len(), 2, "編集中の要素が戻る");
+        assert!(
+            e.contains(members[0]) && e.contains(members[1]),
+            "同じ ID で戻る"
+        );
+    }
+
+    #[test]
+    fn entering_a_plain_entity_is_rejected() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let plain = e.insert(line_entity(0.0));
+
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+        let r = EnterDefinitionEdit::new("EDITCOMP", plain).execute(&mut ctx);
+        assert!(matches!(r, Err(CadError::NotEditable(_))), "{r:?}");
+    }
+
+    /// 対応表の長さが合わなければ拒否すること（内部の取り違えを早く出す）。
+    #[test]
+    fn a_mismatched_origins_table_is_rejected() {
+        let (mut e, mut l, mut g, mut d) = new_parts();
+        let (def_id, inst) = setup_editable(&mut e, &mut l, &mut g, &mut d);
+        let placement = match &e.get(inst).expect("あるはず").geom {
+            Geometry::Instance(i) => i.placement,
+            other => panic!("{other:?}"),
+        };
+
+        let mut ctx = EditCtx::new(&mut e, &mut l, &mut g, &mut d);
+        let r = ExitDefinitionEdit::new("EDITCOMP", def_id, placement, vec![inst], Vec::new())
+            .execute(&mut ctx);
+        assert!(matches!(r, Err(CadError::NotEditable(_))), "{r:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1724,6 +2095,251 @@ impl Command for SetInstanceOverride {
             overrides,
         };
         ctx.entity_mut(self.target)?.geom = Geometry::Instance(new_inst);
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+// ---------------------------------------------------------------------------
+// インプレース編集
+// ---------------------------------------------------------------------------
+
+/// 定義の編集を始める。
+///
+/// インスタンスを図面から外し、**定義の中身を実エンティティとして図面へ置く**。
+/// こうすると LINE / TRIM / MOVE といった既存のツールがそのまま使える。
+/// 専用の編集モードを作るより、経路が 1 本で済む。
+///
+/// 置く位置は元のインスタンスの配置なので、**画面上の見た目は変わらない**。
+/// 「編集に入った瞬間に図形が飛ぶ」ことがない。
+#[derive(Debug)]
+pub struct EnterDefinitionEdit {
+    name: &'static str,
+    /// 編集の入口になったインスタンス。
+    instance: EntityId,
+    /// Undo 用に控えた元のインスタンス。
+    removed: Option<Entity>,
+    /// 図面へ置いた要素。**定義の中身と同じ順**。
+    created: Vec<EntityId>,
+}
+
+impl EnterDefinitionEdit {
+    /// 編集の入口になるインスタンスを指定して作る。
+    #[must_use]
+    pub fn new(name: &'static str, instance: EntityId) -> Self {
+        Self {
+            name,
+            instance,
+            removed: None,
+            created: Vec::new(),
+        }
+    }
+
+    /// 図面へ置いた要素の ID。**定義の中身と同じ順**なので、
+    /// 呼び出し側は添字で元の要素と対応づけられる（束縛の付け替えに使う）。
+    #[must_use]
+    pub fn created(&self) -> &[EntityId] {
+        &self.created
+    }
+}
+
+impl Command for EnterDefinitionEdit {
+    fn execute(&mut self, ctx: &mut EditCtx<'_>) -> Result<()> {
+        self.created.clear();
+
+        let entity = ctx
+            .entities()
+            .get(self.instance)
+            .cloned()
+            .ok_or(CadError::EntityNotFound)?;
+        let Geometry::Instance(inst) = &entity.geom else {
+            return Err(CadError::NotEditable(
+                "コンポーネントのインスタンスではありません",
+            ));
+        };
+        let def = ctx
+            .definitions()
+            .get(inst.definition)
+            .ok_or(CadError::DefinitionNotFound)?;
+
+        // **束縛を評価した形ではなく、定義そのままの形を置く。**
+        // 評価後の形を置いて書き戻すと、束縛が「いまの値」で固定されてしまう。
+        let placed: Vec<Entity> = def
+            .entities
+            .iter()
+            .map(|e| {
+                let mut moved = e.clone();
+                moved.geom = component::place(&e.geom, def.origin, inst.placement);
+                moved
+            })
+            .collect();
+
+        self.removed = Some(ctx.remove_entity(self.instance)?);
+        for e in placed {
+            self.created.push(ctx.add_entity(e));
+        }
+        Ok(())
+    }
+
+    fn undo(&mut self, ctx: &mut EditCtx<'_>) -> Result<()> {
+        for id in self.created.drain(..).rev() {
+            ctx.remove_entity(id)?;
+        }
+        if let Some(entity) = self.removed.take() {
+            ctx.restore_entity(self.instance, entity)?;
+        }
+        Ok(())
+    }
+
+    fn name(&self) -> &'static str {
+        self.name
+    }
+}
+
+/// 定義の編集を終える。
+///
+/// 図面に置かれていた要素を**定義座標へ戻して**定義の中身にし、
+/// 図面からは外してインスタンスを置き直す。
+///
+/// # 束縛の付け替え
+///
+/// 束縛は「中身への添字」で座標を指すので、編集で順序が変わると指す先がずれる。
+/// `origins` に「図面の要素 → 元の定義での添字」を渡すことで、
+/// **編集を通しても束縛が保たれる**。
+///
+/// - 消された要素の束縛は捨てる（指す先が無いので残せない）
+/// - 新しく描いた要素には束縛が無い
+#[derive(Debug)]
+pub struct ExitDefinitionEdit {
+    name: &'static str,
+    definition: DefinitionId,
+    /// 編集に入ったときの配置。定義座標へ戻すのに使う。
+    placement: Placement,
+    /// 定義の中身にする要素。**図面での並び順**。
+    members: Vec<EntityId>,
+    /// `members` と同じ長さ。元の定義での添字（新しい要素は `None`）。
+    origins: Vec<Option<usize>>,
+    /// Undo 用に控えた、取り除いた要素。
+    removed: Vec<(EntityId, Entity)>,
+    /// Undo 用に控えた差し替え前の定義。
+    previous: Option<(Point2, Vec<Entity>, Vec<Binding>)>,
+    /// 置き直したインスタンス。
+    created: Option<EntityId>,
+}
+
+impl ExitDefinitionEdit {
+    /// 編集の結果を書き戻すコマンドを作る。
+    ///
+    /// `members` は図面に置かれている要素、`origins` はそれぞれの
+    /// 「元の定義での添字」（新しく描いたものは `None`）。長さは同じであること。
+    #[must_use]
+    pub fn new(
+        name: &'static str,
+        definition: DefinitionId,
+        placement: Placement,
+        members: Vec<EntityId>,
+        origins: Vec<Option<usize>>,
+    ) -> Self {
+        Self {
+            name,
+            definition,
+            placement,
+            members,
+            origins,
+            removed: Vec::new(),
+            previous: None,
+            created: None,
+        }
+    }
+
+    /// 置き直したインスタンスの ID。適用前は `None`。
+    #[must_use]
+    pub fn created(&self) -> Option<EntityId> {
+        self.created
+    }
+}
+
+impl Command for ExitDefinitionEdit {
+    fn execute(&mut self, ctx: &mut EditCtx<'_>) -> Result<()> {
+        self.removed.clear();
+        self.created = None;
+
+        if self.members.len() != self.origins.len() {
+            return Err(CadError::NotEditable(
+                "内部エラー: 編集中の要素と対応表の数が合いません",
+            ));
+        }
+
+        let def = ctx
+            .definitions()
+            .get(self.definition)
+            .ok_or(CadError::DefinitionNotFound)?;
+        let (def_origin, layer) = (def.origin, ctx.layers().current());
+        let old_bindings = def.bindings.clone();
+
+        // ---- 定義座標へ戻す ----
+        let mut contents = Vec::with_capacity(self.members.len());
+        for id in &self.members {
+            let entity = ctx
+                .entities()
+                .get(*id)
+                .cloned()
+                .ok_or(CadError::EntityNotFound)?;
+            let mut back = entity;
+            back.geom = component::unplace(&back.geom, def_origin, self.placement);
+            contents.push(back);
+        }
+
+        // ---- 束縛を付け替える ----
+        //
+        // 元の添字 → 新しい添字の対応を作る。編集で消えた要素は入らない。
+        let mut remap: BTreeMap<usize, usize> = BTreeMap::new();
+        for (new_index, origin) in self.origins.iter().enumerate() {
+            if let Some(old) = origin {
+                remap.insert(*old, new_index);
+            }
+        }
+        let bindings: Vec<Binding> = old_bindings
+            .iter()
+            .filter_map(|b| {
+                let new_index = remap.get(&b.entity)?;
+                let moved = Binding::new(*new_index, b.slot, b.expr.clone());
+                // 編集で図形の種類が変わっていたら、その束縛は捨てる。
+                moved.fits(&contents).then_some(moved)
+            })
+            .collect();
+
+        // ---- 書き戻す ----
+        self.previous = Some(ctx.replace_definition_contents(
+            self.definition,
+            def_origin,
+            contents,
+            bindings,
+        )?);
+
+        for id in &self.members {
+            let removed = ctx.remove_entity(*id)?;
+            self.removed.push((*id, removed));
+        }
+
+        let geom = Geometry::Instance(Instance::new(self.definition, self.placement));
+        self.created = Some(ctx.add_entity(Entity::new(geom, layer)));
+        Ok(())
+    }
+
+    fn undo(&mut self, ctx: &mut EditCtx<'_>) -> Result<()> {
+        if let Some(id) = self.created.take() {
+            ctx.remove_entity(id)?;
+        }
+        for (id, entity) in self.removed.drain(..).rev() {
+            ctx.restore_entity(id, entity)?;
+        }
+        if let Some((origin, contents, bindings)) = self.previous.take() {
+            ctx.replace_definition_contents(self.definition, origin, contents, bindings)?;
+        }
         Ok(())
     }
 

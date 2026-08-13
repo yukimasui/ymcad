@@ -542,6 +542,9 @@ fn resolve_into(inst: &Instance, defs: &DefinitionTable, depth: usize, out: &mut
 
 /// 定義座標の図形をワールド座標へ移す。
 ///
+/// [`unplace`] と**必ず対で読むこと**。片方だけ直すと、
+/// インプレース編集で書き戻すたびに図形がずれる。
+///
 /// **順序が重要。**
 ///
 /// 1. 基点を原点へ寄せる
@@ -556,7 +559,8 @@ fn resolve_into(inst: &Instance, defs: &DefinitionTable, depth: usize, out: &mut
 ///
 /// 反転に `Geometry::mirrored` を使うのは意図的で、
 /// **円弧の開始角・終了角の入れ替え（ADR-0020）を再実装しないため**。
-fn place(geom: &Geometry, def_origin: Point2, p: Placement) -> Geometry {
+#[must_use]
+pub fn place(geom: &Geometry, def_origin: Point2, p: Placement) -> Geometry {
     let centered = geom.translated(Point2::ORIGIN - def_origin);
     let flipped = if p.flipped {
         centered.mirrored(&X_AXIS)
@@ -567,6 +571,28 @@ fn place(geom: &Geometry, def_origin: Point2, p: Placement) -> Geometry {
     let scaled = flipped.scaled(Point2::ORIGIN, p.scale);
     let rotated = scaled.rotated(Point2::ORIGIN, p.rotation);
     rotated.translated(p.origin - Point2::ORIGIN)
+}
+
+/// [`place`] の逆。ワールド座標の図形を定義座標へ戻す。
+///
+/// **インプレース編集の要。** 画面上で編集した図形を定義へ書き戻すのに使う。
+/// `place` と**必ず対で読むこと**。片方だけ直すと、編集するたびに図形がずれる。
+///
+/// 手順は `place` の逆順・逆操作:
+/// 配置先から原点へ → 逆回転 → 逆倍率 → 反転 → 基点へ戻す。
+#[must_use]
+pub fn unplace(geom: &Geometry, def_origin: Point2, p: Placement) -> Geometry {
+    let back = geom.translated(Point2::ORIGIN - p.origin);
+    let unrotated = back.rotated(Point2::ORIGIN, -p.rotation);
+    // 倍率は `Placement::new` が正の有限値を保証しているので、逆数は安全。
+    let unscaled = unrotated.scaled(Point2::ORIGIN, 1.0 / p.scale);
+    let unflipped = if p.flipped {
+        // 鏡像は自分自身が逆変換。
+        unscaled.mirrored(&X_AXIS)
+    } else {
+        unscaled
+    };
+    unflipped.translated(def_origin - Point2::ORIGIN)
 }
 
 /// 反転に使う、原点を通る水平線。
@@ -1663,6 +1689,91 @@ mod tests {
 
         // 幅 500 の線分を 2 倍にして (10,0) へ置く → 終点 X = 10 + 1000。
         assert!(eq_len(resolved_width(&inst, &defs), 1010.0));
+    }
+
+    // ---- 逆変換（インプレース編集の要） -----------------------------------
+
+    /// **`place` → `unplace` が恒等変換になること。**
+    ///
+    /// ここがずれると、定義を編集して書き戻すたびに図形が少しずつ動く。
+    /// 反転・回転・倍率・基点をすべて混ぜて確かめる。
+    #[test]
+    fn unplace_undoes_place() {
+        let origins = [Point2::ORIGIN, p(3.0, -7.0)];
+        let placements = [
+            Placement::at(p(100.0, 200.0)),
+            Placement::new(p(-50.0, 20.0), 0.7, 2.5, false).expect("妥当"),
+            Placement::new(p(10.0, 10.0), -1.3, 0.25, true).expect("妥当"),
+            Placement::new(Point2::ORIGIN, FRAC_PI_2, 1.0, true).expect("妥当"),
+        ];
+
+        for def_origin in origins {
+            for pl in placements {
+                for entity in sample_contents() {
+                    let placed = place(&entity.geom, def_origin, pl);
+                    let back = unplace(&placed, def_origin, pl);
+                    assert!(
+                        same_points(&probe(&entity.geom), &probe(&back)),
+                        "基点={def_origin:?} 配置={pl:?} で戻らない\n元: {:?}\n戻り: {back:?}",
+                        entity.geom
+                    );
+                }
+            }
+        }
+    }
+
+    /// 作図線でも恒等になること（方向の単位ベクトルが崩れないこと）。
+    #[test]
+    fn unplace_undoes_place_for_xlines() {
+        let x = Xline::new(p(1.0, 2.0), Vec2::new(3.0, 4.0)).expect("作図線");
+        let geom = Geometry::Xline(x);
+        let pl = Placement::new(p(5.0, -5.0), 1.1, 3.0, true).expect("妥当");
+
+        let placed = place(&geom, p(1.0, 1.0), pl);
+        let back = unplace(&placed, p(1.0, 1.0), pl);
+        let Geometry::Xline(got) = &back else {
+            panic!("作図線のはず: {back:?}")
+        };
+        assert!(eq_len(got.direction.len(), 1.0), "単位ベクトルのまま");
+        assert!(same_points(&probe(&geom), &probe(&back)));
+    }
+
+    /// 円弧の掃引の向きも戻ること（反転を通しても補角にならない）。
+    #[test]
+    fn unplace_preserves_the_arc_sweep() {
+        let arc = Arc::new(p(0.0, 0.0), 5.0, 0.25, 2.0);
+        let geom = Geometry::Arc(arc);
+        let pl = Placement::new(p(3.0, 4.0), 0.9, 2.0, true).expect("妥当");
+
+        let placed = place(&geom, Point2::ORIGIN, pl);
+        let back = unplace(&placed, Point2::ORIGIN, pl);
+        let Geometry::Arc(got) = &back else { panic!() };
+        assert!(
+            eq_len(got.sweep(), arc.sweep()),
+            "掃引角が戻る: {} → {}",
+            arc.sweep(),
+            got.sweep()
+        );
+    }
+
+    /// 入れ子のインスタンスも戻ること（配置の合成が対称であること）。
+    #[test]
+    fn unplace_undoes_place_for_instances() {
+        let mut t = DefinitionTable::new();
+        let inner = t.insert(Definition::new("内", Point2::ORIGIN, sample_contents()));
+        let geom = Geometry::Instance(Instance::new(
+            inner,
+            Placement::new(p(7.0, 8.0), 0.5, 1.5, true).expect("妥当"),
+        ));
+        let pl = Placement::new(p(-2.0, 3.0), -0.6, 4.0, true).expect("妥当");
+
+        let placed = place(&geom, p(1.0, 1.0), pl);
+        let back = unplace(&placed, p(1.0, 1.0), pl);
+        // 中身まで展開して比べる（配置の数値だけでなく、見た目が戻ること）。
+        let (Geometry::Instance(a), Geometry::Instance(b)) = (&geom, &back) else {
+            panic!("インスタンスのはず")
+        };
+        assert!(same_geoms(&resolve(a, &t), &resolve(b, &t)));
     }
 
     #[test]

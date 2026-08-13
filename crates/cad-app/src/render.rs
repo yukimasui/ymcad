@@ -4,6 +4,7 @@
 //! モデル座標からスクリーン座標への変換は必ず [`Viewport`] を経由すること
 //! （このモジュールに `as f32` を書かない）。
 
+use crate::editing::EditSession;
 use crate::resolved::ResolvedInstances;
 use crate::selection::{Selection, WindowMode};
 use crate::viewport::{px_to_f32, Viewport};
@@ -218,6 +219,11 @@ const SELECTED_COLOR: egui::Color32 = egui::Color32::from_rgb(0x4f, 0xc3, 0xf7);
 /// ラバーバンド（確定前）の色。
 const PREVIEW_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
 
+/// コンポーネント編集中に、編集対象外を淡くする割合。
+///
+/// 消してしまうと位置関係が分からなくなるので、**見えるが目立たない**程度にする。
+const DIMMED_ALPHA: f32 = 0.25;
+
 /// 図面のエンティティを描く。
 ///
 /// 非表示レイヤの要素と、画面外の要素は描かない。
@@ -230,6 +236,7 @@ pub fn draw_entities(
     vp: &Viewport,
     selection: &Selection,
     resolved: &mut ResolvedInstances,
+    editing: Option<&EditSession>,
 ) {
     let view = vp.visible_model_rect();
     if view.is_empty() {
@@ -251,11 +258,19 @@ pub fn draw_entities(
         }
 
         let selected = selection.contains(id);
+        // コンポーネントを編集している間は、**編集の対象外を淡くする**。
+        // モーダルにせずに「いまどこを触っているか」を示すための唯一の手がかり。
+        let dimmed = editing.is_some_and(|s| !s.contains(id));
         let color = if selected {
             SELECTED_COLOR
         } else {
             let (r, g, b) = doc.layers().resolve_color(entity).rgb();
-            egui::Color32::from_rgb(r, g, b)
+            let base = egui::Color32::from_rgb(r, g, b);
+            if dimmed {
+                base.gamma_multiply(DIMMED_ALPHA)
+            } else {
+                base
+            }
         };
         let width = if selected {
             SELECTED_STROKE_PX
@@ -902,6 +917,7 @@ mod tests {
             &vp,
             &crate::selection::Selection::new(),
             &mut resolved,
+            None,
         );
 
         assert!(finish_and_count(&ctx) > 0, "インスタンスが描かれていない");
@@ -921,6 +937,7 @@ mod tests {
             &vp,
             &crate::selection::Selection::new(),
             &mut resolved,
+            None,
         );
 
         assert_eq!(finish_and_count(&ctx), 0, "空の図面では何も描かない");

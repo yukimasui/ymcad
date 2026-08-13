@@ -24,6 +24,7 @@
 use cad_core::command::{SetBinding, SetDefinitionParams, SetInstanceOverride};
 use cad_core::component::{Binding, DefinitionId, ParamDecl, Slot};
 use cad_core::expr::{eval, parse, Env, ParamType, Value};
+use cad_core::geom::Point2;
 use cad_core::{Document, EntityId, Geometry};
 
 use super::{StepInput, StepOutcome, Tool, ToolCtx};
@@ -103,6 +104,172 @@ fn slots_for(geom: &Geometry) -> Vec<Slot> {
         }
     }
     out
+}
+
+/// クリックで指せる「つまみ」。
+///
+/// 図形の上のどこをクリックしたかで、駆動したい座標を決める。
+/// 番号やスロット名を打たせないための仕組み。
+#[derive(Debug, Clone, Copy)]
+enum Handle {
+    /// 点。X と Y の 2 つのスロットを持つ。
+    Point {
+        /// この点の位置。クリックとの距離を測る。
+        at: Point2,
+        /// X のスロット。
+        x: Slot,
+        /// Y のスロット。
+        y: Slot,
+        /// 表示名。
+        label: &'static str,
+    },
+    /// 単独のスカラー（半径・角度・倍率）。
+    Scalar {
+        /// 代表点。クリックとの距離を測る。
+        at: Point2,
+        /// スロット。
+        slot: Slot,
+        /// 表示名。
+        label: &'static str,
+    },
+}
+
+impl Handle {
+    fn position(self) -> Point2 {
+        match self {
+            Self::Point { at, .. } | Self::Scalar { at, .. } => at,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Point { label, .. } | Self::Scalar { label, .. } => label,
+        }
+    }
+}
+
+/// 図形の上でクリックして指せるつまみを並べる。
+///
+/// **ポリラインの頂点は数が可変**なので、頂点ごとに 1 つ作る。
+fn handles(geom: &Geometry) -> Vec<Handle> {
+    match geom {
+        Geometry::Line(l) => vec![
+            Handle::Point {
+                at: l.a,
+                x: Slot::LineAx,
+                y: Slot::LineAy,
+                label: "始点",
+            },
+            Handle::Point {
+                at: l.b,
+                x: Slot::LineBx,
+                y: Slot::LineBy,
+                label: "終点",
+            },
+        ],
+        Geometry::Circle(c) => vec![
+            Handle::Point {
+                at: c.center,
+                x: Slot::CircleCx,
+                y: Slot::CircleCy,
+                label: "中心",
+            },
+            Handle::Scalar {
+                // 円周の右端を半径のつまみにする。
+                at: Point2::new(c.center.x + c.radius, c.center.y),
+                slot: Slot::CircleR,
+                label: "半径",
+            },
+        ],
+        Geometry::Arc(a) => vec![
+            Handle::Point {
+                at: a.center,
+                x: Slot::ArcCx,
+                y: Slot::ArcCy,
+                label: "中心",
+            },
+            Handle::Scalar {
+                at: a.start_point(),
+                slot: Slot::ArcStart,
+                label: "開始角",
+            },
+            Handle::Scalar {
+                at: a.end_point(),
+                slot: Slot::ArcEnd,
+                label: "終了角",
+            },
+            Handle::Scalar {
+                at: a.point_at(0.5),
+                slot: Slot::ArcR,
+                label: "半径",
+            },
+        ],
+        Geometry::Xline(x) => vec![
+            Handle::Point {
+                at: x.origin,
+                x: Slot::XlineOx,
+                y: Slot::XlineOy,
+                label: "通過点",
+            },
+            Handle::Scalar {
+                at: x.point_at(1.0),
+                slot: Slot::XlineAngle,
+                label: "角度",
+            },
+        ],
+        Geometry::Polyline(p) => p
+            .vertices
+            .iter()
+            .enumerate()
+            .filter_map(|(i, v)| {
+                let i = u32::try_from(i).ok()?;
+                Some(Handle::Point {
+                    at: *v,
+                    x: Slot::PolylineVx(i),
+                    y: Slot::PolylineVy(i),
+                    label: "頂点",
+                })
+            })
+            .collect(),
+        Geometry::Instance(i) => vec![
+            Handle::Point {
+                at: i.placement.origin,
+                x: Slot::InstanceX,
+                y: Slot::InstanceY,
+                label: "配置",
+            },
+            Handle::Scalar {
+                at: i.placement.origin,
+                slot: Slot::InstanceRotation,
+                label: "回転",
+            },
+            Handle::Scalar {
+                at: i.placement.origin,
+                slot: Slot::InstanceScale,
+                label: "倍率",
+            },
+        ],
+    }
+}
+
+/// クリック位置に最も近いつまみ。
+fn nearest_handle(geom: &Geometry, at: Point2) -> Option<Handle> {
+    handles(geom).into_iter().min_by(|a, b| {
+        let (da, db) = ((a.position() - at).len(), (b.position() - at).len());
+        da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+    })
+}
+
+/// パラメータを番号で選べるように並べる。
+///
+/// **数字は ASCII なので日本語入力を通さない。** 名前を打つより速い。
+fn numbered_params(names: &[String]) -> String {
+    names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| format!("{}: {n}", i + 1))
+        .collect::<Vec<_>>()
+        .join("  ")
 }
 
 /// スロットの入力名（`終点X`、`頂点X2` のような形）。
@@ -263,8 +430,12 @@ pub struct BindTool {
 
 #[derive(Debug, Default, Clone, PartialEq)]
 enum BindState {
+    /// 最初の状態。
+    ///
+    /// **編集中なら図形をクリックで指す**。編集していなければ、
+    /// 打たれた文字列を定義名として受けて従来の道へ落ちる。
     #[default]
-    Definition,
+    Pick,
     Entity {
         def: DefinitionId,
         listing: String,
@@ -274,11 +445,25 @@ enum BindState {
         entity: usize,
         listing: String,
     },
+    /// 点を指したので X か Y かを選ぶ。
+    ///
+    /// `X` / `Y` は ASCII 1 文字なので**日本語入力を通さない**。
+    Axis {
+        def: DefinitionId,
+        entity: usize,
+        x: Slot,
+        y: Slot,
+        label: &'static str,
+    },
     Expression {
         def: DefinitionId,
         entity: usize,
         slot: Slot,
+        /// 何を束縛しているか（`終点X` など）。取り違えを防ぐために出す。
+        target: String,
         params: String,
+        /// 番号で選べるパラメータ名（宣言順）。
+        names: Vec<String>,
     },
 }
 
@@ -288,47 +473,183 @@ impl Tool for BindTool {
     }
 
     /// 定義名・スロット名・式のいずれも、打ったままの文字列で受け取る。
+    /// 図形を指す段階だけは対象外。
     fn wants_raw_text(&self) -> bool {
-        true
+        !matches!(self.state, BindState::Pick)
     }
 
     fn prompt(&self) -> String {
         match &self.state {
-            BindState::Definition => "コンポーネント名を入力:".to_owned(),
+            BindState::Pick => {
+                "パラメータで動かしたい点をクリック（編集中でなければ名前を入力）:".to_owned()
+            }
             BindState::Entity { listing, .. } => {
                 format!("束縛する要素の番号を入力:\n{listing}")
             }
             BindState::SlotChoice { listing, .. } => {
                 format!("束縛する座標の名前を入力:\n{listing}")
             }
-            BindState::Expression { params, .. } => {
-                format!("式を入力:\n\u{3000}使えるパラメータ: {params}")
+            BindState::Axis { label, .. } => {
+                format!("「{label}」のどちらを動かすか [X / Y]:")
+            }
+            BindState::Expression { target, params, .. } => {
+                format!("「{target}」を動かす式を入力（番号で選べます）:\n\u{3000}{params}")
             }
         }
     }
 
+    /// 編集中は図形をクリックで指す。
+    fn wants_entity(&self) -> bool {
+        matches!(self.state, BindState::Pick)
+    }
+
     fn step(&mut self, input: StepInput, ctx: &ToolCtx<'_>) -> StepOutcome {
+        // ---- クリックで指す（編集中）----
+        if let StepInput::Entity { id, at } = input {
+            return self.pick_by_click(ctx, id, at);
+        }
+
         let text = match input {
             StepInput::Word(w) => w,
             StepInput::Number(n) => number_as_name(n),
             StepInput::Enter | StepInput::SelectionReady => return StepOutcome::Finish,
-            StepInput::Point(_) | StepInput::Entity { .. } => {
-                return StepOutcome::Reject("文字で入力してください".to_owned())
+            StepInput::Point(_) => {
+                return match self.state {
+                    // 編集していないのに `BIND` を始めたら、定義名から辿る道へ落とす。
+                    BindState::Pick => {
+                        StepOutcome::Reject("図形の上をクリックしてください".to_owned())
+                    }
+                    _ => StepOutcome::Reject("文字で入力してください".to_owned()),
+                };
             }
+            StepInput::Entity { .. } => unreachable!("上で処理済み"),
         };
 
         match self.state.clone() {
-            BindState::Definition => self.pick_definition(ctx, &text),
+            // 編集していないときは、最初の入力を定義名として受ける。
+            BindState::Pick => self.pick_definition(ctx, &text),
             BindState::Entity { def, .. } => self.pick_entity(ctx, def, &text),
             BindState::SlotChoice { def, entity, .. } => self.pick_slot(ctx, def, entity, &text),
+            BindState::Axis {
+                def,
+                entity,
+                x,
+                y,
+                label,
+            } => self.pick_axis(ctx, def, entity, x, y, label, &text),
             BindState::Expression {
-                def, entity, slot, ..
-            } => Self::commit(def, entity, slot, &text),
+                def,
+                entity,
+                slot,
+                names,
+                ..
+            } => Self::commit(def, entity, slot, &names, &text),
         }
     }
 }
 
 impl BindTool {
+    /// 編集中の図形をクリックして、そこのつまみを選ぶ。
+    fn pick_by_click(&mut self, ctx: &ToolCtx<'_>, id: EntityId, at: Point2) -> StepOutcome {
+        let Some(session) = ctx.editing else {
+            return StepOutcome::Reject(
+                "クリックで指せるのは編集中だけです（EDITCOMP で始めます）".to_owned(),
+            );
+        };
+        let (members, origins) = session.members(ctx.doc);
+        let Some(pos) = members.iter().position(|m| *m == id) else {
+            return StepOutcome::Reject("編集中の図形をクリックしてください".to_owned());
+        };
+        let Some(Some(entity)) = origins.get(pos) else {
+            return StepOutcome::Reject(
+                "編集中に描いた図形はまだ束縛できません（ENDCOMP で確定してから）".to_owned(),
+            );
+        };
+        let Some(geom) = ctx.doc.entities().get(id).map(|e| &e.geom) else {
+            return StepOutcome::Reject("選択が古くなっています".to_owned());
+        };
+        let Some(handle) = nearest_handle(geom, at) else {
+            return StepOutcome::Reject("この図形には動かせる点がありません".to_owned());
+        };
+
+        let def = session.definition();
+        match handle {
+            Handle::Point { x, y, label, .. } => {
+                self.state = BindState::Axis {
+                    def,
+                    entity: *entity,
+                    x,
+                    y,
+                    label,
+                };
+                StepOutcome::Continue
+            }
+            Handle::Scalar { slot, .. } => {
+                self.ask_expression(ctx, def, *entity, slot, handle.label().to_owned())
+            }
+        }
+    }
+
+    /// 点のどちらの軸を動かすかを決める。
+    #[allow(clippy::too_many_arguments)]
+    fn pick_axis(
+        &mut self,
+        ctx: &ToolCtx<'_>,
+        def: DefinitionId,
+        entity: usize,
+        x: Slot,
+        y: Slot,
+        label: &'static str,
+        text: &str,
+    ) -> StepOutcome {
+        let slot = match text.trim().to_ascii_uppercase().as_str() {
+            "X" => x,
+            "Y" => y,
+            other => {
+                return StepOutcome::Reject(format!(
+                    "「{label}」の X か Y を選んでください（入力: {other}）"
+                ))
+            }
+        };
+        // 「始点」＋「X」で「始点X」と見せる。
+        self.ask_expression(
+            ctx,
+            def,
+            entity,
+            slot,
+            format!("{label}{}", text.trim().to_ascii_uppercase()),
+        )
+    }
+
+    /// 式の入力へ進む。使えるパラメータを番号つきで見せる。
+    fn ask_expression(
+        &mut self,
+        ctx: &ToolCtx<'_>,
+        def: DefinitionId,
+        entity: usize,
+        slot: Slot,
+        target: String,
+    ) -> StepOutcome {
+        let Some(definition) = ctx.doc.definitions().get(def) else {
+            return StepOutcome::Reject("コンポーネントが見つかりません".to_owned());
+        };
+        let names: Vec<String> = definition.params.iter().map(|p| p.name.clone()).collect();
+        let params = if names.is_empty() {
+            "（パラメータがありません。PARAM で宣言してください）".to_owned()
+        } else {
+            numbered_params(&names)
+        };
+        self.state = BindState::Expression {
+            def,
+            entity,
+            slot,
+            target,
+            params,
+            names,
+        };
+        StepOutcome::Continue
+    }
+
     fn pick_definition(&mut self, ctx: &ToolCtx<'_>, name: &str) -> StepOutcome {
         let def = match find_definition(ctx.doc, name) {
             Ok(d) => d,
@@ -406,27 +727,31 @@ impl BindTool {
             return StepOutcome::Reject(format!("「{wanted}」は選べません"));
         };
 
-        let params = if definition.params.is_empty() {
-            "（まだありません。PARAM で宣言してください）".to_owned()
-        } else {
-            definition
-                .params
-                .iter()
-                .map(|p| p.name.as_str())
-                .collect::<Vec<_>>()
-                .join(" / ")
-        };
-        self.state = BindState::Expression {
-            def,
-            entity,
-            slot,
-            params,
-        };
-        StepOutcome::Continue
+        self.ask_expression(ctx, def, entity, slot, slot_input_name(slot))
     }
 
-    fn commit(def: DefinitionId, entity: usize, slot: Slot, text: &str) -> StepOutcome {
-        match parse(text.trim()) {
+    /// 式を受け取って束縛する。
+    ///
+    /// **数字だけならパラメータの番号として扱う。** 名前を打たずに済ませるため。
+    fn commit(
+        def: DefinitionId,
+        entity: usize,
+        slot: Slot,
+        names: &[String],
+        text: &str,
+    ) -> StepOutcome {
+        let trimmed = text.trim();
+
+        // 数字 1 つならパラメータの番号。ASCII なので日本語入力を通さない。
+        let source = match trimmed.parse::<usize>() {
+            Ok(n) if n >= 1 && n <= names.len() => names[n - 1].clone(),
+            Ok(n) if !names.is_empty() => {
+                return StepOutcome::Reject(format!("番号は 1〜{} です（入力: {n}）", names.len()))
+            }
+            _ => trimmed.to_owned(),
+        };
+
+        match parse(&source) {
             Ok(expr) => StepOutcome::Apply(Box::new(SetBinding::new(
                 "BIND",
                 def,

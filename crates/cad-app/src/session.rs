@@ -4,10 +4,12 @@
 //! 図面を変更するのは `Document::apply` / `undo` / `redo` だけで、
 //! ラバーバンドなどの途中状態は一切 `Document` に入れない。
 
+use cad_core::command::ExitDefinitionEdit;
 use cad_core::geom::{Aabb, Point2};
 use cad_core::{Document, Geometry};
 
 use crate::cmdline::{coord, CommandLine, LineKind, Submission};
+use crate::editing::EditSession;
 use crate::input::ViewAction;
 use crate::selection::{self, Selection, WindowMode};
 use crate::tools::{self, Immediate, StepInput, StepOutcome, Tool, ToolCtx, ToolSettings};
@@ -38,6 +40,8 @@ pub struct Session {
     tool: Option<Box<dyn Tool>>,
     /// ツール開始前の選択待ち段階か。
     awaiting_selection: bool,
+    /// コンポーネントの編集セッション。編集中だけ `Some`。
+    editing: Option<EditSession>,
     /// 選択に使われた交差窓の矩形（モデル座標）。
     ///
     /// STRETCH が「どの点を動かすか」を決めるのに使う。窓選択やクリックでは増えない。
@@ -68,6 +72,7 @@ impl Session {
             selection: Selection::new(),
             tool: None,
             awaiting_selection: false,
+            editing: None,
             crossing_rects: Vec::new(),
             view_actions: Vec::new(),
             ui_actions: Vec::new(),
@@ -103,6 +108,51 @@ impl Session {
     #[must_use]
     pub fn wants_entity(&self) -> bool {
         self.tool.as_ref().is_some_and(|t| t.wants_entity())
+    }
+
+    /// コンポーネントの編集中か。
+    #[must_use]
+    pub fn editing(&self) -> Option<&EditSession> {
+        self.editing.as_ref()
+    }
+
+    /// コンポーネントの編集を終えて定義へ書き戻す。
+    ///
+    /// 編集中でなければ案内を出すだけ。
+    fn end_component_edit(&mut self, doc: &mut Document) {
+        let Some(session) = self.editing.take() else {
+            self.cmdline
+                .error("コンポーネントを編集していません（EDITCOMP で始めます）");
+            return;
+        };
+
+        let (members, origins) = session.members(doc);
+        if members.is_empty() {
+            // 中身が全部消されている。空の定義を作ると使い道が無いので断る。
+            self.cmdline
+                .error("中身がすべて消されています。1 つ以上残してください");
+            // 編集は続けられるよう、セッションを戻す。
+            self.editing = Some(session);
+            return;
+        }
+
+        let cmd = Box::new(ExitDefinitionEdit::new(
+            "ENDCOMP",
+            session.definition(),
+            session.placement(),
+            members,
+            origins,
+        ));
+        match doc.apply(cmd) {
+            Ok(()) => {
+                self.selection.clear();
+                self.cmdline.info("コンポーネントの編集を終えました");
+            }
+            Err(e) => {
+                self.cmdline.error(format!("書き戻せませんでした: {e}"));
+                self.editing = Some(session);
+            }
+        }
     }
 
     /// 実行中のツールが**生の文字列**を待っているか。
@@ -145,6 +195,7 @@ impl Session {
             layer: doc.layers().current(),
             crossing_rects: &self.crossing_rects,
             settings: self.settings,
+            editing: self.editing.as_ref(),
         }
     }
 
@@ -308,6 +359,10 @@ impl Session {
                 self.ui_actions.push(UiAction::ToggleComponentPanel);
                 return;
             }
+            Immediate::EndComponentEdit => {
+                self.end_component_edit(doc);
+                return;
+            }
             Immediate::File(action) => {
                 self.ui_actions.push(UiAction::File(action));
                 return;
@@ -344,6 +399,7 @@ impl Session {
                 layer: doc.layers().current(),
                 crossing_rects: &self.crossing_rects,
                 settings: self.settings,
+                editing: self.editing.as_ref(),
             };
             tool.step(input, &ctx)
         };
@@ -368,6 +424,28 @@ impl Session {
             StepOutcome::Setting(settings) => {
                 self.settings = settings;
                 self.tool = Some(tool);
+            }
+            StepOutcome::ApplyAndEdit {
+                command,
+                definition,
+                placement,
+            } => {
+                // 適用の前後で差分を取り、置かれた要素を編集セッションに記録する。
+                // 並びはスロット昇順 = 挿入順 = 定義の中身の順。
+                let before: Vec<cad_core::EntityId> = doc.entities().ids().collect();
+                self.apply(command, name, doc);
+                let entered: Vec<cad_core::EntityId> = doc
+                    .entities()
+                    .ids()
+                    .filter(|id| !before.contains(id))
+                    .collect();
+                if entered.is_empty() {
+                    // 適用に失敗した（エラーは `apply` が出している）。
+                    return;
+                }
+                self.editing = Some(EditSession::new(doc, definition, placement, entered));
+                self.cmdline
+                    .info("コンポーネントを編集中です（ENDCOMP で確定）");
             }
             StepOutcome::Finish => {}
         }
@@ -2800,5 +2878,398 @@ mod flow_tests {
                 .is_empty(),
             "宣言が戻る"
         );
+    }
+
+    // ---- インプレース編集（段階 3） ----------------------------------------
+
+    /// 線分 2 本のコンポーネント「窓」を作り、インスタンス 1 つが置かれた状態にする。
+    fn setup_two_line_component() -> (Session, Document) {
+        let (mut s, mut doc) = setup();
+        draw_line(&mut s, &mut doc, "0,0", "10,0");
+        draw_line(&mut s, &mut doc, "0,5", "10,5");
+        for id in doc.entities().ids().collect::<Vec<_>>() {
+            s.selection.insert(id);
+        }
+        feed(&mut s, &mut doc, "B");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "窓");
+        s.selection.clear();
+        (s, doc)
+    }
+
+    fn definition_len(doc: &Document) -> usize {
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+        doc.definitions().get(def).expect("引ける").entities.len()
+    }
+
+    /// **編集に入ると中身が実エンティティになり、出ると戻ること。**
+    #[test]
+    fn editing_a_component_round_trips() {
+        let (mut s, mut doc) = setup_two_line_component();
+        assert_eq!(doc.entities().len(), 1, "インスタンス 1 つ");
+
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        assert!(s.editing().is_some(), "編集中になる");
+        assert_eq!(doc.entities().len(), 2, "線分 2 本が出る");
+        assert_eq!(instance_count(&doc), 0, "インスタンスは外れる");
+
+        feed(&mut s, &mut doc, "BC");
+        assert!(s.editing().is_none(), "編集が終わる");
+        assert_eq!(doc.entities().len(), 1, "インスタンスへ戻る");
+        assert_eq!(instance_count(&doc), 1);
+        assert_eq!(definition_len(&doc), 2, "定義の中身は 2 本のまま");
+    }
+
+    /// **編集中に描いたものが定義に入ること。**
+    #[test]
+    fn entities_drawn_while_editing_join_the_definition() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+
+        // 編集中に 1 本描く。
+        draw_line(&mut s, &mut doc, "0,10", "10,10");
+        assert_eq!(doc.entities().len(), 3);
+
+        feed(&mut s, &mut doc, "BC");
+        assert_eq!(definition_len(&doc), 3, "描いた 1 本が定義に入る");
+        assert_eq!(doc.entities().len(), 1);
+    }
+
+    /// **編集中に消したものが定義から外れること。**
+    #[test]
+    fn entities_deleted_while_editing_leave_the_definition() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+
+        let member = s.editing().expect("編集中").members(&doc).0[0];
+        s.selection.insert(member);
+        feed(&mut s, &mut doc, "E");
+
+        feed(&mut s, &mut doc, "BC");
+        assert_eq!(definition_len(&doc), 1, "1 本になる");
+    }
+
+    /// **全部消して出ようとしたら断ること。**
+    ///
+    /// 空の定義を作っても使い道が無い。編集は続けられる。
+    #[test]
+    fn exiting_with_nothing_left_is_refused() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+
+        for id in doc.entities().ids().collect::<Vec<_>>() {
+            s.selection.insert(id);
+        }
+        feed(&mut s, &mut doc, "E");
+        assert_eq!(doc.entities().len(), 0);
+
+        feed(&mut s, &mut doc, "BC");
+        assert!(s.editing().is_some(), "編集は続く");
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+    }
+
+    /// **編集の結果が全インスタンスに反映されること。**
+    #[test]
+    fn editing_updates_every_instance() {
+        let (mut s, mut doc) = setup_two_line_component();
+        // 2 つ目を配置する。
+        feed(&mut s, &mut doc, "I");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "100,0");
+        enter(&mut s, &mut doc);
+        enter(&mut s, &mut doc);
+        assert_eq!(instance_count(&doc), 2);
+
+        // 1 つ目を編集して 1 本消す。
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        // **編集対象から選ぶこと。** `ids().next()` だと、編集で 1 つ目の
+        // スロットが空いたぶん、もう 1 つのインスタンスを拾ってしまう。
+        let member = s.editing().expect("編集中").members(&doc).0[0];
+        s.selection.insert(member);
+        feed(&mut s, &mut doc, "E");
+        feed(&mut s, &mut doc, "BC");
+
+        assert_eq!(instance_count(&doc), 2, "インスタンスは 2 つのまま");
+        // 両方とも中身が 1 本になっていること。
+        for (_, e) in doc.entities().iter() {
+            let cad_core::Geometry::Instance(i) = &e.geom else {
+                continue;
+            };
+            assert_eq!(
+                cad_core::component::resolve(i, doc.definitions()).len(),
+                1,
+                "**触っていない側も変わる**"
+            );
+        }
+    }
+
+    /// **束縛が編集を通しても残ること。**
+    #[test]
+    fn bindings_survive_in_place_editing() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        feed(&mut s, &mut doc, "BI");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "0");
+        feed(&mut s, &mut doc, "終点X");
+        feed(&mut s, &mut doc, "幅");
+
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+        assert_eq!(
+            doc.definitions().get(def).expect("引ける").bindings.len(),
+            1
+        );
+
+        // 編集に入って、何もせず出る。
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        feed(&mut s, &mut doc, "BC");
+
+        assert_eq!(
+            doc.definitions().get(def).expect("引ける").bindings.len(),
+            1,
+            "束縛が残る"
+        );
+    }
+
+    /// インスタンス以外をクリックしたら断ること。
+    #[test]
+    fn editing_a_plain_entity_is_refused() {
+        let (mut s, mut doc) = setup_two_line_component();
+        draw_line(&mut s, &mut doc, "0,50", "10,50");
+
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 50.0);
+        assert!(s.editing().is_none(), "編集に入らない");
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+    }
+
+    /// 編集していないのに `ENDCOMP` を打ったら案内すること。
+    #[test]
+    fn ending_without_editing_is_reported() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "BC");
+        assert!(s
+            .cmdline
+            .history()
+            .any(|l| l.text.contains("編集していません")));
+    }
+
+    /// **編集中に「編集外」を判定できること**（描画で淡くするのに使う）。
+    #[test]
+    fn the_edit_session_knows_what_is_inside() {
+        let (mut s, mut doc) = setup_two_line_component();
+        // 編集の外に 1 本描いておく。
+        draw_line(&mut s, &mut doc, "0,50", "10,50");
+        let outside = doc.entities().ids().last().expect("あるはず");
+
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        let session = s.editing().expect("編集中");
+
+        assert!(!session.contains(outside), "外側は編集対象ではない");
+        let (members, _) = session.members(&doc);
+        assert_eq!(members.len(), 2, "編集対象は定義の中身だけ");
+        assert!(!members.contains(&outside));
+    }
+
+    /// 編集の出入りが Undo で戻ること。
+    #[test]
+    fn in_place_editing_undoes() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        feed(&mut s, &mut doc, "BC");
+        assert_eq!(instance_count(&doc), 1);
+
+        // 出るのを取り消す → 編集中の要素が戻る。
+        feed(&mut s, &mut doc, "U");
+        assert_eq!(doc.entities().len(), 2, "線分 2 本へ戻る");
+        // 入るのを取り消す → インスタンスへ戻る。
+        feed(&mut s, &mut doc, "U");
+        assert_eq!(instance_count(&doc), 1);
+    }
+
+    // ---- BIND のクリック操作（Issue #15） ----------------------------------
+
+    /// **編集中に図形をクリックして束縛できること。**
+    ///
+    /// 要素番号もスロット名も打たない。番号でパラメータを選ぶところまで
+    /// **すべて ASCII** なので日本語入力を通さない。
+    #[test]
+    fn bind_by_clicking_while_editing() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+
+        // 編集に入る。
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        assert!(s.editing().is_some());
+
+        // 線分の終点あたりをクリック → X を選ぶ → パラメータを番号で選ぶ。
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 10.0, 0.0);
+        feed(&mut s, &mut doc, "X");
+        feed(&mut s, &mut doc, "1");
+
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+        let bindings = &doc.definitions().get(def).expect("引ける").bindings;
+        assert_eq!(bindings.len(), 1, "束縛ができる");
+        assert_eq!(bindings[0].slot, cad_core::component::Slot::LineBx, "終点X");
+    }
+
+    /// **クリック位置に近いつまみが選ばれること。**
+    ///
+    /// 始点側をクリックすれば始点、終点側なら終点。
+    #[test]
+    fn the_nearest_handle_is_chosen() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+
+        // 始点 (0,0) 側をクリックする。
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 0.5, 0.0);
+        feed(&mut s, &mut doc, "Y");
+        feed(&mut s, &mut doc, "1");
+
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+        let bindings = &doc.definitions().get(def).expect("引ける").bindings;
+        assert_eq!(
+            bindings[0].slot,
+            cad_core::component::Slot::LineAy,
+            "始点Y が選ばれる"
+        );
+    }
+
+    /// 式も打てること（番号でなくてもよい）。
+    #[test]
+    fn bind_by_click_still_accepts_an_expression() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 10.0, 0.0);
+        feed(&mut s, &mut doc, "X");
+        feed(&mut s, &mut doc, "幅 * 2");
+
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+        let bindings = &doc.definitions().get(def).expect("引ける").bindings;
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(
+            bindings[0].expr,
+            cad_core::expr::parse("幅 * 2").expect("解析")
+        );
+    }
+
+    /// 番号が範囲外なら断ること。
+    #[test]
+    fn an_out_of_range_parameter_number_is_reported() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 10.0, 0.0);
+        feed(&mut s, &mut doc, "X");
+        feed(&mut s, &mut doc, "9");
+        assert!(s.cmdline.history().any(|l| l.text.contains("番号は 1〜1")));
+    }
+
+    /// X / Y 以外を入力したら断ること。
+    #[test]
+    fn the_axis_must_be_x_or_y() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 10.0, 0.0);
+        feed(&mut s, &mut doc, "Z");
+        assert!(s.cmdline.history().any(|l| l.kind == LineKind::Error));
+        assert!(s.has_active_tool(), "断られてもコマンドは続く");
+    }
+
+    /// **編集中に描いた図形はまだ束縛できないこと。**
+    ///
+    /// 定義にはまだ入っていないので、指す添字が決まらない。
+    #[test]
+    fn a_freshly_drawn_entity_cannot_be_bound_yet() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+        feed(&mut s, &mut doc, "BE");
+        click(&mut s, &mut doc, 5.0, 0.0);
+
+        // 編集中に 1 本描く。
+        draw_line(&mut s, &mut doc, "0,20", "10,20");
+
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 5.0, 20.0);
+        assert!(s
+            .cmdline
+            .history()
+            .any(|l| l.text.contains("まだ束縛できません")));
+    }
+
+    /// 編集していないときは、これまでどおり名前から辿れること。
+    #[test]
+    fn bind_still_works_from_the_command_line_when_not_editing() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "PA");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "幅");
+        feed(&mut s, &mut doc, "900");
+
+        feed(&mut s, &mut doc, "BI");
+        feed(&mut s, &mut doc, "窓");
+        feed(&mut s, &mut doc, "0");
+        feed(&mut s, &mut doc, "終点X");
+        feed(&mut s, &mut doc, "1"); // 番号でも選べる
+
+        let def = doc.definitions().by_name("窓").expect("あるはず");
+        assert_eq!(
+            doc.definitions().get(def).expect("引ける").bindings.len(),
+            1
+        );
+    }
+
+    /// 編集中でないのに図形をクリックしたら案内すること。
+    #[test]
+    fn clicking_outside_an_edit_is_guided() {
+        let (mut s, mut doc) = setup_two_line_component();
+        feed(&mut s, &mut doc, "BI");
+        click(&mut s, &mut doc, 5.0, 0.0);
+        assert!(s.cmdline.history().any(|l| l.text.contains("EDITCOMP")));
     }
 }

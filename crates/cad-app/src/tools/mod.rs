@@ -67,6 +67,18 @@ pub enum StepOutcome {
     Reject(String),
     /// コマンド間で覚える設定を更新し、同じツールのまま入力を続ける。
     Setting(ToolSettings),
+    /// コマンドを適用し、**コンポーネントの編集セッションを始める**。
+    ///
+    /// `EDITCOMP` 専用。適用でどの要素が置かれたかは `Session` が差分から求める。
+    /// コマンド名で分岐すると、名前を変えたときに静かに壊れる。
+    ApplyAndEdit {
+        /// 適用するコマンド（`EnterDefinitionEdit`）。
+        command: Box<dyn Command>,
+        /// 編集する定義。
+        definition: cad_core::DefinitionId,
+        /// 入口になったインスタンスの配置。
+        placement: cad_core::component::Placement,
+    },
 }
 
 /// ツールが図面を読むための文脈。
@@ -90,6 +102,11 @@ pub struct ToolCtx<'a> {
     /// `CommandKind::Tool` は引数を取らない関数ポインタなので生成時に渡せず、
     /// ツールは `ToolCtx` 経由で読む。書き戻しは [`StepOutcome::Setting`] で行う。
     pub settings: ToolSettings,
+    /// コンポーネントの編集中ならそのセッション。
+    ///
+    /// 編集中は**定義の中身が実エンティティとして図面にある**ので、
+    /// `BIND` がクリックで座標を指せる。
+    pub editing: Option<&'a crate::editing::EditSession>,
 }
 
 /// コマンド間で保持する設定。
@@ -365,6 +382,18 @@ pub static COMMANDS: &[CommandSpec] = &[
         kind: CommandKind::Tool(|| Box::new(component::RedefineTool::default())),
     },
     CommandSpec {
+        name: "EDITCOMP",
+        aliases: &["BE", "BEDIT"],
+        summary: "コンポーネントをその場で編集する（ENDCOMP で確定）",
+        kind: CommandKind::Tool(|| Box::new(component::EditComponentTool)),
+    },
+    CommandSpec {
+        name: "ENDCOMP",
+        aliases: &["BC"],
+        summary: "コンポーネントの編集を終えて定義へ書き戻す",
+        kind: CommandKind::Immediate(Immediate::EndComponentEdit),
+    },
+    CommandSpec {
         name: "COMPONENTS",
         aliases: &["CS"],
         summary: "コンポーネントのパネルを開閉（配置・パラメータ）",
@@ -518,6 +547,8 @@ pub enum Immediate {
     LayerPanel,
     /// コンポーネントパネルの開閉。
     ComponentPanel,
+    /// コンポーネントの編集を終える。
+    EndComponentEdit,
     /// ファイル操作。
     File(FileAction),
 }
@@ -531,6 +562,7 @@ impl Immediate {
             Self::Redo => "REDO",
             Self::LayerPanel => "LAYER",
             Self::ComponentPanel => "COMPONENTS",
+            Self::EndComponentEdit => "ENDCOMP",
             Self::File(a) => a.command_name(),
         }
     }

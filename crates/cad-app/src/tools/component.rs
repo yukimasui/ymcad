@@ -18,7 +18,8 @@
 //! ```
 
 use cad_core::command::{
-    DefineComponent, DeleteEntities, InsertInstance, MacroCommand, SetDefinitionContents,
+    DefineComponent, DeleteEntities, EnterDefinitionEdit, InsertInstance, MacroCommand,
+    SetDefinitionContents,
 };
 use cad_core::component::Placement;
 use cad_core::geom::Point2;
@@ -479,5 +480,58 @@ impl RedefineTool {
                 Box::new(DeleteEntities::new("REDEFINE", targets)),
             ],
         )))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// EDITCOMP — 定義をその場で編集する
+// ---------------------------------------------------------------------------
+
+/// インスタンスをクリックして、その定義の編集に入る。
+///
+/// 編集そのものは既存のツールで行い、終わったら `ENDCOMP` で書き戻す。
+/// **モーダルにしない**（周りの図形が見えたまま、いつものコマンドが使える）。
+#[derive(Debug, Default)]
+pub struct EditComponentTool;
+
+impl Tool for EditComponentTool {
+    fn name(&self) -> &'static str {
+        "EDITCOMP"
+    }
+
+    fn prompt(&self) -> String {
+        "編集するコンポーネントのインスタンスをクリック:".to_owned()
+    }
+
+    fn wants_entity(&self) -> bool {
+        true
+    }
+
+    fn step(&mut self, input: StepInput, ctx: &ToolCtx<'_>) -> StepOutcome {
+        match input {
+            StepInput::Entity { id, .. } => {
+                let Some(entity) = ctx.doc.entities().get(id) else {
+                    return StepOutcome::Reject("選択が古くなっています".to_owned());
+                };
+                let Geometry::Instance(inst) = &entity.geom else {
+                    return StepOutcome::Reject(
+                        "コンポーネントのインスタンスをクリックしてください".to_owned(),
+                    );
+                };
+                if ctx.doc.definitions().get(inst.definition).is_none() {
+                    return StepOutcome::Reject("コンポーネントが見つかりません".to_owned());
+                }
+                StepOutcome::ApplyAndEdit {
+                    command: Box::new(EnterDefinitionEdit::new("EDITCOMP", id)),
+                    definition: inst.definition,
+                    placement: inst.placement,
+                }
+            }
+            StepInput::Point(_) => {
+                StepOutcome::Reject("インスタンスの上をクリックしてください".to_owned())
+            }
+            StepInput::Enter | StepInput::SelectionReady => StepOutcome::Finish,
+            _ => StepOutcome::Reject("インスタンスをクリックしてください".to_owned()),
+        }
     }
 }
