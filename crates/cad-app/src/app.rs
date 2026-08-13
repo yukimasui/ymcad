@@ -533,9 +533,12 @@ impl CadApp {
         egui::Panel::right("components")
             .default_size(460.0)
             .show(ui, |ui| {
-                let (commands, request) =
-                    self.component_panel
-                        .show(ui, &self.doc, &self.session.selection);
+                let (commands, request) = self.component_panel.show(
+                    ui,
+                    &self.doc,
+                    &self.session.selection,
+                    self.session.editing(),
+                );
                 for cmd in commands {
                     self.session.apply_external(cmd, &mut self.doc);
                 }
