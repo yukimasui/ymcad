@@ -156,7 +156,7 @@
 ### 1-F. CI とドキュメント
 - [x] `.github/workflows/ci.yml`（fmt / clippy -D warnings / test / build --release）
 - [x] CI に `cad-core` の UI 依存検査を入れる（**fail-closed** な形。下記「落とし穴」参照）
-- [x] `README.md`（概要・ビルド手順・Ubuntu 依存パッケージ・キーバインド表）
+- [x] `README.md`（概要・動機・設計方針・ビルド手順。操作の詳細は `docs/MANUAL.md` へ分離）
 - [x] `docs/ARCHITECTURE.md`
 - [x] `docs/ROADMAP.md`（非スコープ項目を将来候補として列挙）
 
