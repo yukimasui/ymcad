@@ -6,14 +6,9 @@
 ![Rust](https://img.shields.io/badge/Rust-1.85-000000?logo=rust&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue)
 
-<!--
-  スクリーンショット差し替え手順:
-  GitHub の Issue または PR のコメント入力欄に画像をドラッグ&ドロップすると
-  https://github.com/user-attachments/assets/... の URL が生成されます
-  （コメントは投稿しなくて構いません）。その URL を使って下の行を
-  ![ymcad の画面](URL)
-  に置き換えてください。
--->
+![ymcad の画面。暗いキャンバスに線分・円・矩形・三角形を作図し、下部にステータスバーとコマンドラインが並ぶ](docs/images/screenshot.png)
+
+<sub>ステータスバーには倍率・要素数・画層・選択数・OSNAP の状態と、直近の描画時間が常に出ています。</sub>
 
 ## なぜ作ったか
 
