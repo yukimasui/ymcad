@@ -280,6 +280,38 @@ fn input_does_not_move_when_composition_starts_while_a_tool_runs() {
     assert_eq!(input_rect(&h), before, "変換中");
 }
 
+/// キャンバスの右端寄りでも、変換が始まった前後で入力欄が 1px も動かないこと。
+///
+/// `[変換中]` のぶん Area が広がると、`constrain_to` が次のフレームで
+/// Area をキャンバスの内側へ押し戻し、入力欄が左へずれていた（PR #21 の再レビュー。
+/// 実測 -21〜-46px）。ずれが起きる帯は Area の幅しだいで動くので、
+/// 右端寄りを一定間隔でなめて、どこでも動かないことを確かめる。
+#[test]
+fn input_does_not_move_when_composition_starts_near_the_right_edge() {
+    let mut h = app_with_dynamic(true);
+    hover(&mut h, P1);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    assert!(h.state().session.has_active_tool(), "前提");
+
+    let right = h.state().viewport.rect().right();
+    let mut x = right - 400.0;
+    while x < right {
+        let cursor = egui::pos2(x, 300.0);
+        hover(&mut h, cursor);
+        let before = input_rect(&h);
+
+        frame(&mut h, [preedit("に")]);
+        assert_eq!(input_rect(&h), before, "変換開始のフレーム（x = {x}）");
+        settle(&mut h);
+        assert_eq!(input_rect(&h), before, "変換中・押し戻されない（x = {x}）");
+
+        // 変換を取り消して次の位置へ。
+        frame(&mut h, [preedit("")]);
+        x += 10.0;
+    }
+}
+
 /// 変換中はマウスを動かしても入力欄が動かず、Enter で確定しない。
 /// 確定（Commit）で追従に戻る。
 #[test]

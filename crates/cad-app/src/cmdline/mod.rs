@@ -30,6 +30,8 @@ const HISTORY_LIMIT: usize = 200;
 const HISTORY_VISIBLE_ROWS: f32 = 10.0;
 /// 入力欄の `TextEdit` の ID。
 const INPUT_ID: &str = "ymcad_cmdline_input";
+/// 変換中の目印。
+const COMPOSING_BADGE: &str = "[変換中]";
 /// `[変換中]` の色。
 const COMPOSING_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
 /// エラーの色。
@@ -460,7 +462,10 @@ impl CommandLine {
     /// 変換中は確定処理を止めているので、その旨をユーザーに見せる。
     fn show_composing_badge(&self, ui: &mut egui::Ui) {
         if self.composing {
-            ui.colored_label(COMPOSING_COLOR, egui::RichText::new("[変換中]").monospace());
+            ui.colored_label(
+                COMPOSING_COLOR,
+                egui::RichText::new(COMPOSING_BADGE).monospace(),
+            );
         }
     }
 
@@ -625,7 +630,18 @@ impl CommandLine {
                         ui.horizontal(|ui| {
                             self.show_input(ui, DYN_INPUT_WIDTH);
                             // `[変換中]` は入力欄の後ろに置く。前に置くと入力欄が右へずれる。
-                            self.show_composing_badge(ui);
+                            // 変換していないときも幅は確保して見えなくするだけにする。
+                            // 変換が始まって Area が広がると、キャンバスの右端寄りでは
+                            // `constrain_to` が次のフレームで Area を左へ押し戻し、
+                            // 入力欄（と候補ウィンドウ）が跳ねる。
+                            ui.add_visible(
+                                self.composing,
+                                egui::Label::new(
+                                    egui::RichText::new(COMPOSING_BADGE)
+                                        .monospace()
+                                        .color(COMPOSING_COLOR),
+                                ),
+                            );
                         });
                         // ここから下は入力欄の位置に影響しない。
                         self.show_suggestions(ui);
