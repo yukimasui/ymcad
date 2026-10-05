@@ -666,7 +666,8 @@ Geometry::Instance(_) => {}
 - [x] アイコンは `crates/cad-app/assets/icons/<名前>.svg`（白一色、ルートに `fill="none"`、`currentColor` 禁止。画素で検査）。差し替えはファイルを置き換えてビルドし直すだけ
 - [x] 操作レビューを受けて: LAYER をホームへ、UNDO / REDO / SAVE をタブ行の右端に常設、ツールチップ 2 行、別タブの実行中コマンドに印、狭いときの送れる印、分かりにくいアイコン 10 個を描き直し
 - [x] パネルの開閉（LAYER / COMPONENTS）は実行中のコマンドを中断しない。変換中にボタンを押しても何もしない
-- [ ] コード・操作の再レビュー → develop へマージ（直交・極 PR #35 を先に入れ、リボンを後からリベースする予定）
+- [x] 直交・極 PR #35 を先にマージし、リボンを develop（eaa9db5）の上へリベース済み
+- [ ] コード・操作の再レビュー → develop へマージ
 
 ### ユーザーの目視確認が必要な項目
 - [ ] アイコンが何のコマンドか分かるか（とくに EXPLODE は等倍だと切れ目のあるポリラインに見える懸念）
@@ -731,7 +732,7 @@ UI を変えたらこれで撮って目で見る。比較（差分で落とす�
 
 ## Issue #29 の状況（直交モード F8 と極トラッキング F10）
 
-ブランチ `feature/ortho-polar`（develop = 3bd979a から）。設計判断は ADR-0038（ADR-0037 はリボンが使う予定で欠番）。
+ブランチ `feature/ortho-polar`（develop = 3bd979a から）。設計判断は ADR-0038（ADR-0037 はリボン）。
 
 - [x] `drafting.rs`（状態と純粋関数: 直交の射影・極の吸い付き・優先順位）、`Tool::tracking_base`（RECTANGLE は外す）
 - [x] ラバーバンドとクリックを `CadApp::track` → `drafting::track_cursor` の 1 本に載せた（寸法入力の固定はその後段）
