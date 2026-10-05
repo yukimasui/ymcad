@@ -709,14 +709,24 @@ type ToggleState = fn(&CadApp) -> bool;
 /// 幅を指定したアプリ。文字の幅を実機に合わせるため、日本語フォントを読み込む。
 /// 読み込まないと漢字が代替の □ になってステータスバーの幅が実機と変わり、境目の幅で結果が違う
 /// （元の並びの不具合は、640px ならフォント無しでも再現するが、800px ではフォント無しだと
-/// DYN が画面内に収まって再現しなかった）。
+/// DYN が画面内に収まって再現しなかった）。さらにフォントが無いと「日本語フォント未検出」が
+/// 並びに入り、1280px でも描画時間が省かれる。
+///
+/// **フォントが見つからなければ理由つきで落とす**（fail-closed）。黙ってフォント無しで進めると、
+/// 検出力の落ちたテストが通ってしまう。CI では `fonts-noto-cjk` を入れている。
 fn app_with_width(width: f32) -> Harness<'static, CadApp> {
     let mut h = Harness::builder()
         .with_size(egui::vec2(width, SCREEN.y))
         .build_eframe(|cc| {
-            let font = crate::jp_font::install(&cc.egui_ctx)
-                .map(|f| format!("{} (face {})", f.path.display(), f.index));
-            CadApp::new(font)
+            let font = crate::jp_font::install(&cc.egui_ctx).expect(
+                "日本語フォントが見つからない（jp_font::CANDIDATES のどれも無い）。\
+                 Ubuntu なら `sudo apt-get install fonts-noto-cjk` で入る",
+            );
+            CadApp::new(Some(format!(
+                "{} (face {})",
+                font.path.display(),
+                font.index
+            )))
         });
     h.run_steps(SETTLE);
     h
