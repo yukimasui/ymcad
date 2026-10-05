@@ -2670,3 +2670,288 @@ fn no_hints_or_padding_when_the_ribbon_fits() {
         "LINE は表示範囲の左端から帯の幅未満にある（余白が無い）: {gap}px"
     );
 }
+
+// ---- 未保存確認のモーダル（Issue #24） ----------------------------------------
+
+/// LINE 実行中に線を 1 本引いて（未保存になる）、Ctrl+N で未保存確認のモーダルを出す。
+///
+/// 図面に保存先（`dir.join(MODAL_FILE)`）を与えておく。無いと「保存する」が rfd のファイルダイアログを開き、
+/// テストが返ってこなくなる。
+/// モーダルのテストの保存先のファイル名。
+const MODAL_FILE: &str = "modal.ymc";
+
+fn app_with_unsaved_modal(
+    on: bool,
+    name: &str,
+) -> (Harness<'static, CadApp>, crate::test_util::TempDir) {
+    app_with_unsaved_modal_holding(on, name, false)
+}
+
+/// `hold_enter` … モーダルが出る前から Enter を押しっぱなしにする（離すイベントを送らない）。
+/// 以降に送る Enter はキーリピートになる（egui が押下中のキーを見て `repeat` を決める）。
+fn app_with_unsaved_modal_holding(
+    on: bool,
+    name: &str,
+    hold_enter: bool,
+) -> (Harness<'static, CadApp>, crate::test_util::TempDir) {
+    let mut h = app_with_dynamic(on);
+    // Drop で消える。assert で落ちても残らない。
+    let dir = crate::test_util::TempDir::new(&format!("modal_{name}"));
+    h.state_mut().doc.mark_saved(Some(dir.join(MODAL_FILE)));
+    hover(&mut h, P1);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, P1);
+    click(&mut h, P2);
+    assert_eq!(lines(&h).len(), 1, "前提: 線が 1 本ある");
+    assert!(h.state().doc.is_dirty(), "前提: 未保存");
+    assert!(h.state().session.has_active_tool(), "前提: LINE 実行中");
+    if hold_enter {
+        let [down, _up] = key(egui::Key::Enter);
+        frame(&mut h, [down]);
+        settle(&mut h);
+    }
+    let ctrl_n = egui::Event::Key {
+        key: egui::Key::N,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::CTRL,
+    };
+    frame(&mut h, [ctrl_n]);
+    settle(&mut h);
+    assert!(h.state().files.is_confirming(), "前提: モーダルが出ている");
+    (h, dir)
+}
+
+/// 「保存する」のフォーカスを外す（フォーカスが無いときにキーがどこへ行くかを見るため）。
+/// モーダル内の見出しをクリックする。
+fn drop_modal_focus(h: &mut Harness<'_, CadApp>) {
+    use egui_kittest::kittest::Queryable as _;
+
+    let heading = h
+        .get_by_label("保存されていない変更があります")
+        .rect()
+        .center();
+    click(h, heading);
+    assert!(h.state().files.is_confirming(), "前提: まだ開いている");
+    assert!(
+        !h.get_by_label("保存する (Enter)").is_focused(),
+        "前提: フォーカスが外れた"
+    );
+}
+
+/// モーダルが出ている間、コマンドラインは Enter / Space / Esc / 文字キーを扱わない。
+///
+/// 扱うと、Enter で直前のコマンドが再実行され、Esc で実行中のコマンドが中断され、
+/// Space で LINE が進み、文字が入力欄に溜まる。
+#[test]
+fn modal_keeps_enter_space_escape_and_text_from_the_command_line() {
+    for on in [false, true] {
+        let (mut h, _dir) = app_with_unsaved_modal(on, "keys");
+        drop_modal_focus(&mut h);
+        let lines_before = h.state().session.cmdline.history().count();
+
+        // Enter はモーダルが「保存する」として扱うので、ここでは押さない（別のテストで固定）。
+        press(&mut h, egui::Key::Space);
+        type_text(&mut h, "L");
+        press(&mut h, egui::Key::ArrowUp);
+        press(&mut h, egui::Key::Tab);
+        assert!(
+            h.state().session.has_active_tool(),
+            "LINE が進まない・終わらない（動的入力 {on}）"
+        );
+        assert_eq!(
+            h.state().session.cmdline.history().count(),
+            lines_before,
+            "履歴に何も増えない（動的入力 {on}）"
+        );
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            "",
+            "入力欄に文字が入らない（動的入力 {on}）"
+        );
+
+        assert!(
+            h.state().files.is_confirming(),
+            "Enter / Space などでモーダルが勝手に閉じない（動的入力 {on}）"
+        );
+        let osnap = h.state().snap.is_enabled();
+        press(&mut h, egui::Key::F3);
+        press(&mut h, egui::Key::F12);
+        press(&mut h, egui::Key::F8);
+        press(&mut h, egui::Key::F10);
+        assert!(!h.state().drafting.is_on(Mode::Ortho), "F8 は効かない");
+        assert!(!h.state().drafting.is_on(Mode::Polar), "F10 は効かない");
+        assert_eq!(h.state().snap.is_enabled(), osnap, "F3 は効かない");
+        assert_eq!(h.state().session.cmdline.is_dynamic(), on, "F12 は効かない");
+
+        // Esc = キャンセル。モーダルだけが閉じ、図面・未保存・実行中のコマンドは残る。
+        press(&mut h, egui::Key::Escape);
+        assert!(
+            !h.state().files.is_confirming(),
+            "Esc で閉じる（動的入力 {on}）"
+        );
+        assert!(
+            h.state().session.has_active_tool(),
+            "Esc で LINE が中断されない（動的入力 {on}）"
+        );
+        assert!(h.state().doc.is_dirty(), "未保存の変更は残る");
+        assert_eq!(lines(&h).len(), 1, "図面は残る（動的入力 {on}）");
+    }
+}
+
+/// モーダルを閉じたら、コマンドラインにキーが戻る。図面は消えない。
+#[test]
+fn command_line_gets_keys_back_after_the_modal_closes() {
+    use egui_kittest::kittest::Queryable as _;
+
+    for on in [false, true] {
+        let (mut h, _dir) = app_with_unsaved_modal(on, "cancel");
+        let target = h.get_by_label("キャンセル (Esc)").rect().center();
+        click(&mut h, target);
+        assert!(!h.state().files.is_confirming(), "キャンセルで閉じる");
+        assert_eq!(
+            lines(&h).len(),
+            1,
+            "キャンセルでは図面が残る（動的入力 {on}）"
+        );
+        assert!(h.state().doc.is_dirty());
+
+        hover(&mut h, P1);
+        type_text(&mut h, "10,10");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(
+            h.state().session.last_point(),
+            Some(Point2::new(10.0, 10.0)),
+            "打った座標が LINE に入る（動的入力 {on}）"
+        );
+    }
+}
+
+/// 開いたとき「保存する」にフォーカスがあり（Enter = 保存する）、背景のクリックでは閉じない。
+#[test]
+fn modal_focuses_save_and_ignores_backdrop_clicks() {
+    use egui_kittest::kittest::Queryable as _;
+
+    let (mut h, _dir) = app_with_unsaved_modal(true, "focus");
+    assert!(
+        h.get_by_label("保存する (Enter)").is_focused(),
+        "「保存する」にフォーカスがある"
+    );
+    assert!(
+        !h.get_by_label("保存しない").is_focused(),
+        "「保存しない」にはフォーカスを置かない"
+    );
+    click(&mut h, egui::pos2(5.0, 5.0));
+    assert!(
+        h.state().files.is_confirming(),
+        "背景のクリックでは閉じない"
+    );
+}
+
+/// 開いた直後の Enter は「保存する」を押したことになり、保存してから元の操作（NEW）へ進む。
+/// 保存しないほうへは進まない。
+#[test]
+fn enter_in_the_modal_saves_then_continues() {
+    for on in [false, true] {
+        let (mut h, dir) = app_with_unsaved_modal(on, "enter");
+        let path = dir.join(MODAL_FILE);
+        press(&mut h, egui::Key::Enter);
+        assert!(path.exists(), "保存先に書かれた（動的入力 {on}）");
+        assert!(!h.state().files.is_confirming(), "モーダルが閉じる");
+        assert!(lines(&h).is_empty(), "保存したあと NEW が実行された");
+        assert!(!h.state().doc.is_dirty());
+    }
+}
+
+/// Tab / Shift+Tab を 0〜4 回押しても、フォーカスは「保存する」に残り、Enter で必ず保存される。
+///
+/// egui のボタンはフォーカスがあると Enter で押される。フォーカスの枠が「保存しない」へ
+/// 動くと、枠と Enter の結果が食い違い、保存したつもりのない上書きや破棄が起きる。
+#[test]
+fn focus_stays_on_save_and_enter_saves() {
+    use egui_kittest::kittest::Queryable as _;
+
+    for tabs in 0..=4 {
+        for shift in [false, true] {
+            let (mut h, dir) = app_with_unsaved_modal(true, &format!("tab{tabs}{shift}"));
+            let path = dir.join(MODAL_FILE);
+            for _ in 0..tabs {
+                let modifiers = if shift {
+                    egui::Modifiers::SHIFT
+                } else {
+                    egui::Modifiers::NONE
+                };
+                let events = [true, false].map(|pressed| egui::Event::Key {
+                    key: egui::Key::Tab,
+                    physical_key: None,
+                    pressed,
+                    repeat: false,
+                    modifiers,
+                });
+                frame(&mut h, events);
+                settle(&mut h);
+                assert!(h.state().files.is_confirming(), "Tab で閉じない");
+                assert!(
+                    h.get_by_label("保存する (Enter)").is_focused(),
+                    "Tab {tabs} 回（shift {shift}）でもフォーカスは「保存する」に残る"
+                );
+            }
+            press(&mut h, egui::Key::Enter);
+            assert!(
+                path.exists(),
+                "Tab {tabs} 回（shift {shift}）のあとでも保存される"
+            );
+            assert!(!h.state().files.is_confirming());
+            assert!(!h.state().doc.is_dirty(), "保存済み（捨てただけではない）");
+        }
+    }
+}
+
+/// Enter のキーリピート（長押し）では「保存する」を押したことにならない。
+///
+/// `NEW` + Enter を長押しすると、出てきたモーダルへリピートが流れ込む。
+#[test]
+fn enter_key_repeat_does_not_save() {
+    let (mut h, dir) = app_with_unsaved_modal_holding(true, "repeat", true);
+    let path = dir.join(MODAL_FILE);
+    let repeat = egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: true,
+        modifiers: egui::Modifiers::NONE,
+    };
+    frame(&mut h, [repeat]);
+    settle(&mut h);
+    assert!(h.state().files.is_confirming(), "リピートでは閉じない");
+    assert!(!path.exists(), "保存もされない");
+    assert_eq!(lines(&h).len(), 1, "図面は残る");
+}
+
+/// Space では何も起きない。「保存しない」はクリックでしか押せず、押したときだけ捨てる。
+#[test]
+fn space_does_nothing_and_only_a_click_discards() {
+    use egui_kittest::kittest::Queryable as _;
+
+    for tabs in 0..=3 {
+        let (mut h, dir) = app_with_unsaved_modal(true, &format!("space{tabs}"));
+        let path = dir.join(MODAL_FILE);
+        for _ in 0..tabs {
+            press(&mut h, egui::Key::Tab);
+        }
+        press(&mut h, egui::Key::Space);
+        assert!(h.state().files.is_confirming(), "Space では何も起きない");
+        assert_eq!(lines(&h).len(), 1, "図面は残る");
+        assert!(!path.exists(), "保存もされない");
+    }
+
+    let (mut h, dir) = app_with_unsaved_modal(true, "discard");
+    let path = dir.join(MODAL_FILE);
+    let target = h.get_by_label("保存しない").rect().center();
+    click(&mut h, target);
+    assert!(!h.state().files.is_confirming());
+    assert!(lines(&h).is_empty(), "クリックでは捨てる");
+    assert!(!path.exists(), "保存はされない");
+}

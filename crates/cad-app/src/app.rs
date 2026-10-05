@@ -365,16 +365,21 @@ impl CadApp {
 
         // F3 で OSNAP を切り替える。コマンドラインより先に取る必要はないが、
         // TextEdit は F3 を消費しないのでここで拾って問題ない。
-        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F3)) {
+        // モーダル（未保存確認）が出ている間はどちらも扱わない（Issue #24）。
+        let modal = self.files.is_confirming();
+        if !modal && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F3)) {
             self.toggle_osnap();
         }
         // F12 で動的入力を切り替える（AutoCAD と同じキー）。F3 と同じく TextEdit は消費しない。
-        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12)) {
+        if !modal && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12)) {
             self.toggle_dynamic_input();
         }
         // F8 で直交、F10 で極トラッキング（AutoCAD と同じキー）。F3 と同じく TextEdit は消費しない。
-        for mode in drafting::take_key_toggles(ui) {
-            self.toggle_drafting(mode);
+        // モーダルが出ている間は F3 / F12 と同じく扱わない。
+        if !modal {
+            for mode in drafting::take_key_toggles(ui) {
+                self.toggle_drafting(mode);
+            }
         }
 
         // カーソル横の入力欄の基準。キャンバスの外にいる間は最後の位置に留める。
@@ -885,6 +890,8 @@ impl CadApp {
 impl eframe::App for CadApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // 順序に依存する: `handle_file_input` が先でなければ、このフレームで開いた
+        // モーダルを `begin_frame` が知らず、1 フレーム分キーを奪ってしまう（Issue #24）。
         self.handle_file_input(&ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
         self.ribbon_area(ui);
@@ -895,7 +902,9 @@ impl eframe::App for CadApp {
         // 寸法入力の基点。Tab / Esc / Enter の扱いがこれで変わるので、キーを取る前に渡す。
         let dimension_base = self.session.dimension_base();
         self.session.cmdline.set_dimension_base(dimension_base);
-        self.session.cmdline.begin_frame(&ctx, allow_suggestions);
+        self.session
+            .cmdline
+            .begin_frame(&ctx, allow_suggestions, self.files.is_confirming());
         egui::Panel::bottom("cmdline").show(ui, |ui| self.command_area(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         self.layer_area(ui);

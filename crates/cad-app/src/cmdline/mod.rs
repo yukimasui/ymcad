@@ -258,6 +258,8 @@ pub struct CommandLine {
     /// その時点の状態だけを見ると「誰もフォーカスを持っていない」になり、
     /// Esc をコマンドラインが拾って実行中のコマンドを中断してしまう。
     focused_last_frame: Option<egui::Id>,
+    /// このフレームでモーダルが出ているか。[`Self::begin_frame`] で写す。
+    modal_open: bool,
     /// コマンド候補。
     suggestions: Suggestions,
     /// [`Self::begin_frame`] で消費したキーが表す確定操作。
@@ -337,6 +339,7 @@ impl CommandLine {
             composing: false,
             caret_to_end: false,
             focused_last_frame: None,
+            modal_open: false,
             suggestions: Suggestions::default(),
             pending: None,
             dynamic: DynamicInput {
@@ -499,14 +502,19 @@ impl CommandLine {
     ///
     /// - `allow_suggestions` … コマンド候補を出してよいか。
     ///   ツール実行中や選択待ち中は座標やオプションを打っている段階なので `false` を渡す
-    pub fn begin_frame(&mut self, ctx: &egui::Context, allow_suggestions: bool) {
+    /// - `modal_open` … モーダル（未保存確認）が出ているか。出ている間、キーと IME の
+    ///   持ち主はモーダルで、コマンドラインは扱わない（Issue #24）。モーダルのボタンに
+    ///   フォーカスが無いと、フォーカスだけでは「誰も持っていない」に見えるため
+    pub fn begin_frame(&mut self, ctx: &egui::Context, allow_suggestions: bool, modal_open: bool) {
         self.dynamic.frame_enabled = self.dynamic.enabled;
         let now = ctx.input(|i| i.time);
         if let Some(e) = &mut self.recent_error {
             e.shown_at.get_or_insert(now);
         }
         let focused = ctx.memory(|m| m.focused());
-        let owns_keys = owns_keys(egui::Id::new(INPUT_ID), self.focused_last_frame, focused);
+        self.modal_open = modal_open;
+        let owns_keys =
+            !modal_open && owns_keys(egui::Id::new(INPUT_ID), self.focused_last_frame, focused);
         self.focused_last_frame = focused;
 
         // IME のイベントもキーと同じく、入力欄が持ち主のときだけ拾う。パネルの入力欄で
@@ -608,6 +616,10 @@ impl CommandLine {
                     escape: true,
                 })
                 .desired_width(width)
+                // モーダルが出ている間は文字も受けない（Issue #24）。キー（Enter / Esc / Space）は
+                // `begin_frame` で奪わないが、文字は入力欄がフォーカスを持ったままだと入ってしまう。
+                // 描くのはやめない（描かないとフォーカスの扱いが変わる）。
+                .interactive(!self.modal_open)
                 .font(egui::TextStyle::Monospace),
         );
         #[cfg(test)]
@@ -616,7 +628,8 @@ impl CommandLine {
         }
         // キー入力が常にコマンドラインへ流れるよう、他に入力先が無ければ
         // 毎フレーム自分にフォーカスを戻す。
-        if ui.memory(|m| m.focused().is_none()) {
+        // モーダルが出ている間は取り直さない（モーダルのボタンにフォーカスを渡すため。Issue #24）。
+        if !self.modal_open && ui.memory(|m| m.focused().is_none()) {
             response.request_focus();
         }
     }
@@ -741,7 +754,8 @@ impl CommandLine {
                 // 並びが変わると変換が始まったフレームで入力欄が動き、入力欄に付いて出る
                 // IME の候補ウィンドウが最初の 1 打鍵で跳ねる（Area は固定していても）。
                 // 隠すときは同じ並びのまま不透明度 0 にする。
-                if !visible {
+                // モーダルが出ている間も隠す。描くのはやめない（IME とフォーカスの制約）。
+                if !visible || self.modal_open {
                     ui.multiply_opacity(0.0);
                 }
                 // Area の中身の最大幅は前フレームの大きさになっているので、
