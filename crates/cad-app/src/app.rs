@@ -275,6 +275,11 @@ impl CadApp {
             .cmdline
             .show_floating(ctx, &prompt, self.viewport.rect(), tool_active);
         let submission = self.session.cmdline.finish_frame();
+        if submission != Submission::None {
+            // キャンバスはもう描き終えているので、確定の結果（ラバーバンドや新しい図形）は
+            // 次のフレームで描かれる。その次のフレームを待たせずに確実に起こす。
+            ctx.request_repaint();
+        }
         self.apply_submission(submission);
     }
 

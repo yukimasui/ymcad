@@ -518,10 +518,12 @@ impl CommandLine {
             .interactable(false)
             .fade_in(false)
             .show(ctx, |ui| {
+                // **入力欄より前（上・左）に来るものは、見せるときも隠すときも同じ並びで描く。**
+                // 並びが変わると変換が始まったフレームで入力欄が動き、入力欄に付いて出る
+                // IME の候補ウィンドウが最初の 1 打鍵で跳ねる（Area は固定していても）。
+                // 隠すときは同じ並びのまま不透明度 0 にする。
                 if !visible {
                     ui.multiply_opacity(0.0);
-                    self.show_input(ui, DYN_INPUT_WIDTH);
-                    return;
                 }
                 // Area の中身の最大幅は前フレームの大きさになっているので、
                 // 広げないと候補やエラーが前フレームの幅で折り返される。
@@ -538,14 +540,14 @@ impl CommandLine {
                     .inner_margin(egui::Margin::same(6))
                     .show(ui, |ui| {
                         ui.label(
-                            egui::RichText::new(prompt)
-                                .small()
-                                .color(ui.visuals().strong_text_color()),
+                            egui::RichText::new(prompt).color(ui.visuals().strong_text_color()),
                         );
                         ui.horizontal(|ui| {
-                            self.show_composing_badge(ui);
                             self.show_input(ui, DYN_INPUT_WIDTH);
+                            // `[変換中]` は入力欄の後ろに置く。前に置くと入力欄が右へずれる。
+                            self.show_composing_badge(ui);
                         });
+                        // ここから下は入力欄の位置に影響しない。
                         self.show_suggestions(ui);
                         if let (Some(_), Some(e)) = (error_remaining, &self.recent_error) {
                             ui.colored_label(ERROR_COLOR, egui::RichText::new(&e.text).monospace());
