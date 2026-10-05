@@ -592,18 +592,27 @@ impl Immediate {
 
     /// UI のボタンから押されたとき、**実行中のコマンドを中断せずに**動かすか。
     ///
-    /// 真になるのは、図面にも実行中のツールの状態にも触れず、パネルを開閉するだけのもの。
+    /// 真になるのは、図面の図形にも実行中のツールの状態にも触れないもの。
     /// POLYLINE を打っている途中でレイヤパネルを開いても、確定前の図形が消えないように
     /// （AutoCAD の透過コマンドに当たる。ADR-0037 決定 3）。
     ///
-    /// UNDO / REDO は図面を変え、ENDCOMP は編集を終え、ファイル操作は図面を入れ替える
-    /// （あるいは保存の前に確定させたい）ので中断する。`_` を書かずに全部の種類を並べて、
-    /// 種類を足したときにここで決めさせる。
+    /// - パネルを開閉するだけのもの（LAYER / COMPONENTS）
+    /// - 保存（SAVE / SAVEAS）。図形を変えず、`Ctrl+S` は元から実行中のツールに触れない。
+    ///   ボタンだけが中断して選択も外していた（PR #42 の操作レビュー）。確定前の図形
+    ///   （打っている途中のポリラインなど）は図面に入っていないので、保存されないのは `Ctrl+S` と同じ
+    ///
+    /// UNDO / REDO は図面を変え、ENDCOMP は編集を終え、NEW / OPEN / 終了は図面を入れ替える
+    /// （捨てる）ので中断する。`_` を書かずに全部の種類を並べて、種類を足したときにここで決めさせる。
     #[must_use]
     pub fn keeps_running_command(self) -> bool {
         match self {
-            Self::LayerPanel | Self::ComponentPanel => true,
-            Self::Undo | Self::Redo | Self::EndComponentEdit | Self::File(_) => false,
+            Self::LayerPanel
+            | Self::ComponentPanel
+            | Self::File(FileAction::Save | FileAction::SaveAs) => true,
+            Self::Undo
+            | Self::Redo
+            | Self::EndComponentEdit
+            | Self::File(FileAction::New | FileAction::Open | FileAction::Quit) => false,
         }
     }
 }

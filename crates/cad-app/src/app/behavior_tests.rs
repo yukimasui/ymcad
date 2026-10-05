@@ -991,6 +991,96 @@ fn saving_keeps_the_selection_and_the_coordinate_field() {
     assert_eq!(h.state().coord_width, width, "座標の欄の幅は変わらない");
 }
 
+/// 履歴に出た「*取り消し*」（実行中のコマンドの中断）の数。
+fn cancel_count(h: &Harness<'_, CadApp>) -> usize {
+    h.state()
+        .session
+        .cmdline
+        .history()
+        .filter(|l| l.text == "*取り消し*")
+        .count()
+}
+
+/// MOVE の基点待ちでクイックアクセスの保存を押しても、MOVE・選択は残る（`Ctrl+S` とそろえる）。
+#[test]
+fn quick_access_save_keeps_a_move_waiting_for_its_base_point() {
+    let dir = crate::test_util::TempDir::new("save_move");
+    let path = dir.join("drawing.ymc");
+    let mut h = app();
+    let a = egui::pos2(300.0, 300.0);
+    let b = egui::pos2(500.0, 360.0);
+    hover(&mut h, a);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, a);
+    click(&mut h, b);
+    press(&mut h, egui::Key::Escape);
+    let l = lines(&h)[0];
+    let mid = h.state().viewport.model_to_screen(l.a.lerp(l.b, 0.5));
+    click(&mut h, mid);
+    type_text(&mut h, "M");
+    press(&mut h, egui::Key::Enter);
+    assert_eq!(h.state().session.active_command(), Some("MOVE"), "前提");
+    assert!(h.state().session.wants_point(), "前提: 基点待ち");
+    assert_eq!(h.state().session.selection.len(), 1, "前提: 選択あり");
+    h.state_mut().doc.mark_saved(Some(path.clone()));
+    let cancels = cancel_count(&h);
+
+    press_ribbon(&mut h, "SAVE");
+
+    assert!(path.is_file(), "保存された");
+    assert_eq!(
+        h.state().session.active_command(),
+        Some("MOVE"),
+        "MOVE は続く"
+    );
+    assert_eq!(h.state().session.selection.len(), 1, "選択は外れない");
+    assert_eq!(cancel_count(&h), cancels, "中断しない");
+
+    // そのまま基点と目的点を指せば動く。
+    let before = lines(&h)[0];
+    click(&mut h, P1);
+    click(&mut h, P2);
+    assert_ne!(lines(&h)[0], before, "MOVE が最後まで動く");
+}
+
+/// POLYLINE の途中でクイックアクセスの保存を押しても、置いた点は残り、続けて描ける。
+#[test]
+fn quick_access_save_keeps_a_polyline_in_progress() {
+    let dir = crate::test_util::TempDir::new("save_pline");
+    let path = dir.join("drawing.ymc");
+    let mut h = app();
+    hover(&mut h, P1);
+    h.state_mut().doc.mark_saved(Some(path.clone()));
+    type_text(&mut h, "PL");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, egui::pos2(300.0, 300.0));
+    click(&mut h, egui::pos2(500.0, 300.0));
+    let last = h.state().session.last_point().expect("前提: 2 点置いた");
+
+    let cancels = cancel_count(&h);
+    press_ribbon(&mut h, "SAVE");
+
+    assert!(path.is_file(), "保存された");
+    assert_eq!(h.state().session.active_command(), Some("POLYLINE"), "続く");
+    assert_eq!(h.state().session.last_point(), Some(last), "置いた点は残る");
+    assert_eq!(cancel_count(&h), cancels, "中断しない");
+
+    click(&mut h, egui::pos2(500.0, 450.0));
+    press(&mut h, egui::Key::Enter);
+    let polylines: Vec<usize> = h
+        .state()
+        .doc
+        .entities()
+        .iter()
+        .filter_map(|(_, e)| match &e.geom {
+            cad_core::Geometry::Polyline(p) => Some(p.vertices.len()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(polylines, vec![3], "3 点のポリラインが描ける");
+}
+
 /// 図面の入れ替え（Ctrl+N）では、従来どおり選択を外し、座標の欄も最小の幅に戻す。
 #[test]
 fn replacing_the_drawing_clears_the_selection_and_the_coordinate_field() {
