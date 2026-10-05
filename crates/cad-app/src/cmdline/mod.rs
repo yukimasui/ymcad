@@ -58,6 +58,8 @@ const LOCK_MARK: &str = "🔒";
 const LOCK_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
 /// 錠前の文字の大きさ [pt]。
 const LOCK_SIZE: f32 = 16.0;
+/// 動的入力オフで、寸法入力に参加中のツールの Tab を押したときの案内。
+pub const TAB_NEEDS_DYNAMIC: &str = "長さ・角度の固定は動的入力（F12）がオンのときに使えます";
 
 /// 履歴 1 行の種別。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -945,6 +947,15 @@ impl CommandLine {
                 TabOutcome::Moved { consumed: false } | TabOutcome::Ignored => {}
                 TabOutcome::Rejected(e) => self.error(e.message()),
             }
+            return None;
+        }
+        // 動的入力オフでは欄が無いので固定できない。Tab が何もしないと、AutoCAD の感覚で
+        // `100` Tab `90` と打った人の入力が `10090` につながる。入力は変えずに案内する。
+        if !self.dynamic.frame_enabled
+            && self.dim.base.is_some()
+            && i.consume_key(NONE, egui::Key::Tab)
+        {
+            self.info(TAB_NEEDS_DYNAMIC);
             return None;
         }
 

@@ -985,3 +985,49 @@ fn a_click_behind_an_angle_lock_is_refused() {
     assert_eq!(l.len(), 1, "同じ側なら入る");
     assert_point(l[0].b, Point2::new(model(&h, P2).x, base.y), "0° の線上");
 }
+
+use crate::cmdline::TAB_NEEDS_DYNAMIC;
+
+/// 動的入力オフで参加中のツールの Tab は、入力を変えずに案内を 1 回出す。
+///
+/// 欄はオンでしか出ないので、オフで AutoCAD の感覚で `100` Tab `90` と打つと
+/// `10090` の直接距離入力になっていた（PR #25 レビュー）。
+#[test]
+fn tab_with_dynamic_input_off_explains_instead_of_locking() {
+    let (mut h, base) = line_with_first_point(false);
+    let guides = |h: &Harness<'_, CadApp>| {
+        h.state()
+            .session
+            .cmdline
+            .history()
+            .filter(|l| l.text == TAB_NEEDS_DYNAMIC)
+            .count()
+    };
+    type_text(&mut h, "100");
+    press(&mut h, egui::Key::Tab);
+    assert_eq!(h.state().session.cmdline.input(), "100", "入力は変わらない");
+    assert_eq!(guides(&h), 1, "案内が 1 回出る");
+    assert_eq!(
+        h.state().session.cmdline.dimension_locks(),
+        None,
+        "固定しない"
+    );
+
+    // 入力はそのまま使える（長さ 100 の直接距離入力）。
+    let cursor = h.state().cursor_model.expect("カーソルはキャンバスの上");
+    press(&mut h, egui::Key::Enter);
+    let l = lines(&h);
+    assert_eq!(l.len(), 1);
+    assert_point(
+        l[0].b,
+        base + (cursor - base).normalized().expect("前提") * 100.0,
+        "長さ 100",
+    );
+
+    // 参加していない段階（LINE の 1 点目）では案内しない。
+    press(&mut h, egui::Key::Escape);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    press(&mut h, egui::Key::Tab);
+    assert_eq!(guides(&h), 1, "参加していなければ案内しない");
+}
