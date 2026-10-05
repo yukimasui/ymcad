@@ -2674,8 +2674,14 @@ fn no_hints_or_padding_when_the_ribbon_fits() {
 // ---- 未保存確認のモーダル（Issue #24） ----------------------------------------
 
 /// LINE 実行中に線を 1 本引いて（未保存になる）、Ctrl+N で未保存確認のモーダルを出す。
-fn app_with_unsaved_modal(on: bool) -> Harness<'static, CadApp> {
+///
+/// 図面に保存先を与えておく。無いと「保存する」が rfd のファイルダイアログを開き、
+/// テストが返ってこなくなる。戻り値は保存先。
+fn app_with_unsaved_modal(on: bool) -> (Harness<'static, CadApp>, std::path::PathBuf) {
     let mut h = app_with_dynamic(on);
+    let path =
+        std::env::temp_dir().join(format!("ymcad_modal_test_{}_{on}.ymc", std::process::id()));
+    h.state_mut().doc.mark_saved(Some(path.clone()));
     hover(&mut h, P1);
     type_text(&mut h, "L");
     press(&mut h, egui::Key::Enter);
@@ -2694,7 +2700,24 @@ fn app_with_unsaved_modal(on: bool) -> Harness<'static, CadApp> {
     frame(&mut h, [ctrl_n]);
     settle(&mut h);
     assert!(h.state().files.is_confirming(), "前提: モーダルが出ている");
-    h
+    (h, path)
+}
+
+/// 「保存する」のフォーカスを外す（フォーカスが無いときにキーがどこへ行くかを見るため）。
+/// モーダル内の見出しをクリックする。
+fn drop_modal_focus(h: &mut Harness<'_, CadApp>) {
+    use egui_kittest::kittest::Queryable as _;
+
+    let heading = h
+        .get_by_label("保存されていない変更があります")
+        .rect()
+        .center();
+    click(h, heading);
+    assert!(h.state().files.is_confirming(), "前提: まだ開いている");
+    assert!(
+        !h.get_by_label("保存する (Enter)").is_focused(),
+        "前提: フォーカスが外れた"
+    );
 }
 
 /// モーダルが出ている間、コマンドラインは Enter / Space / Esc / 文字キーを扱わない。
@@ -2704,7 +2727,8 @@ fn app_with_unsaved_modal(on: bool) -> Harness<'static, CadApp> {
 #[test]
 fn modal_keeps_enter_space_escape_and_text_from_the_command_line() {
     for on in [false, true] {
-        let mut h = app_with_unsaved_modal(on);
+        let (mut h, _path) = app_with_unsaved_modal(on);
+        drop_modal_focus(&mut h);
         let lines_before = h.state().session.cmdline.history().count();
 
         press(&mut h, egui::Key::Enter);
@@ -2758,7 +2782,7 @@ fn command_line_gets_keys_back_after_the_modal_closes() {
     use egui_kittest::kittest::Queryable as _;
 
     for on in [false, true] {
-        let mut h = app_with_unsaved_modal(on);
+        let (mut h, _path) = app_with_unsaved_modal(on);
         let target = h.get_by_label("キャンセル (Esc)").rect().center();
         click(&mut h, target);
         assert!(!h.state().files.is_confirming(), "キャンセルで閉じる");
@@ -2785,7 +2809,7 @@ fn command_line_gets_keys_back_after_the_modal_closes() {
 fn modal_focuses_save_and_ignores_backdrop_clicks() {
     use egui_kittest::kittest::Queryable as _;
 
-    let mut h = app_with_unsaved_modal(true);
+    let (mut h, _path) = app_with_unsaved_modal(true);
     assert!(
         h.get_by_label("保存する (Enter)").is_focused(),
         "「保存する」にフォーカスがある"
@@ -2799,4 +2823,19 @@ fn modal_focuses_save_and_ignores_backdrop_clicks() {
         h.state().files.is_confirming(),
         "背景のクリックでは閉じない"
     );
+}
+
+/// 開いた直後の Enter は「保存する」を押したことになり、保存してから元の操作（NEW）へ進む。
+/// 保存しないほうへは進まない。
+#[test]
+fn enter_in_the_modal_saves_then_continues() {
+    for on in [false, true] {
+        let (mut h, path) = app_with_unsaved_modal(on);
+        press(&mut h, egui::Key::Enter);
+        assert!(path.exists(), "保存先に書かれた（動的入力 {on}）");
+        let _ = std::fs::remove_file(&path);
+        assert!(!h.state().files.is_confirming(), "モーダルが閉じる");
+        assert!(lines(&h).is_empty(), "保存したあと NEW が実行された");
+        assert!(!h.state().doc.is_dirty());
+    }
 }
