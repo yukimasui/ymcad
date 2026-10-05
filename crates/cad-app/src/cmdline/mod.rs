@@ -202,6 +202,11 @@ pub struct CommandLine {
     last_command: Option<String>,
     /// IME で変換中か。
     composing: bool,
+    /// 次に入力欄を描くとき、キャレットを末尾へ動かす。
+    ///
+    /// Tab 補完はバッファを外から書き換えるので、`TextEdit` のキャレットは
+    /// 補完前の位置（`L` の直後）に残る。そのまま打つと `LZINE` になる。
+    caret_to_end: bool,
     /// コマンド候補。
     suggestions: Suggestions,
     /// [`Self::begin_frame`] で消費したキーが表す確定操作。
@@ -261,6 +266,7 @@ impl CommandLine {
             history: VecDeque::new(),
             last_command: None,
             composing: false,
+            caret_to_end: false,
             suggestions: Suggestions::default(),
             pending: None,
             dynamic: DynamicInput {
@@ -436,9 +442,29 @@ impl CommandLine {
     /// ID を固定しておくと、描く場所（画面下 / カーソル横）を切り替えても
     /// フォーカスとキャレットの位置が引き継がれる。
     fn show_input(&mut self, ui: &mut egui::Ui, width: f32) {
+        let id = egui::Id::new(INPUT_ID);
+        if std::mem::take(&mut self.caret_to_end) {
+            let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+            let end = egui::text::CCursor::new(self.input.chars().count());
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(end)));
+            state.store(ui.ctx(), id);
+        }
         let response = ui.add(
             egui::TextEdit::singleline(&mut self.input)
-                .id(egui::Id::new(INPUT_ID))
+                .id(id)
+                // Tab・矢印・Esc はコマンドラインが自分で扱うキーなので、egui の
+                // フォーカス移動に使わせない（Issue #22）。既定では Tab が
+                // 「次の部品へ移る」として先に処理され、補完の直後にフォーカスが外れて
+                // 続けて打った文字が消えていた。候補が無いときの Tab も、入力欄から
+                // 出ていかないほうがよい（打ち間違いで入力先が変わると気づきにくい）。
+                .event_filter(egui::EventFilter {
+                    tab: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                })
                 .desired_width(width)
                 .font(egui::TextStyle::Monospace),
         );
@@ -664,6 +690,7 @@ impl CommandLine {
                 // Enter で実行される候補をそのまま入力欄へ入れる。
                 if let Some(name) = self.suggestions.completion(&self.input) {
                     self.input = name;
+                    self.caret_to_end = true;
                     self.suggestions.update(&self.input);
                 }
                 return None;

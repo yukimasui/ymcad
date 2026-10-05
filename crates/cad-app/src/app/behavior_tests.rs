@@ -308,3 +308,54 @@ fn composing_freezes_the_box_and_blocks_enter() {
         "カーソルの右下"
     );
 }
+
+// ---- Tab とフォーカス（Issue #22） ------------------------------------------
+
+/// Tab で補完したあとも入力欄にフォーカスが残り、続けて打った文字が入る。
+///
+/// `TextEdit` の既定では egui が Tab を「次の部品へフォーカスを移す」に使うので、
+/// こちらが Tab を処理するより先にフォーカスが外れていた。
+#[test]
+fn tab_completion_keeps_focus_in_the_command_line() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        type_text(&mut h, "L");
+        press(&mut h, egui::Key::Tab);
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            "LINE",
+            "補完（動的入力 {on}）"
+        );
+        type_text(&mut h, "Z");
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            "LINEZ",
+            "補完のあとに打った文字が入る（動的入力 {on}）"
+        );
+    }
+}
+
+/// 候補が出ていないときの Tab でも、入力欄からフォーカスが出ていかない。
+#[test]
+fn tab_without_suggestions_keeps_focus() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        // 候補が出ない入力。
+        type_text(&mut h, "XYZZY");
+        assert!(!h.state().session.cmdline.suggestions_visible(), "前提");
+        press(&mut h, egui::Key::Tab);
+        type_text(&mut h, "1");
+        assert_eq!(h.state().session.cmdline.input(), "XYZZY1", "動的入力 {on}");
+
+        // コマンド実行中（候補を出さない段階）でも同じ。
+        press(&mut h, egui::Key::Escape);
+        type_text(&mut h, "L");
+        press(&mut h, egui::Key::Enter);
+        assert!(h.state().session.has_active_tool(), "前提");
+        press(&mut h, egui::Key::Tab);
+        type_text(&mut h, "1");
+        assert_eq!(h.state().session.cmdline.input(), "1", "動的入力 {on}");
+    }
+}
