@@ -147,6 +147,19 @@ pub trait Tool: std::fmt::Debug {
         None
     }
 
+    /// 寸法入力（長さ・角度での指定と直接距離入力）に参加するなら、その基点。
+    ///
+    /// `Some(base)` を返す間だけ、「次の点は base からの長さ・角度で指定できる」ことを
+    /// 意味する。このとき数値 1 つの入力は **base からカーソル方向へその長さ** の点として
+    /// [`StepInput::Point`] で届き、[`StepInput::Number`] にはならない。
+    ///
+    /// **数値に別の意味があるツールは参加しない**（ROTATE の角度、SCALE の倍率、
+    /// CIRCLE の半径など）。参加しないツールでは数値の解釈は一切変わらない。
+    /// 状態で切り替えてよい（LINE は 2 点目以降だけ参加する）。ADR-0036。
+    fn dimension_base(&self) -> Option<Point2> {
+        None
+    }
+
     /// 開始時に選択を必要とするか（ERASE / MOVE / COPY）。
     fn wants_selection(&self) -> bool {
         false

@@ -368,6 +368,8 @@ impl CadApp {
 
         // 吸着していればそれを実際のカーソル位置として扱う。
         self.cursor_model = self.snapped.map(|s| s.point).or(raw_cursor);
+        // 直接距離入力の向きはこの位置から決める。
+        self.session.set_cursor(self.cursor_model);
 
         let active_drag = self.handle_pointer(&response, ui);
 

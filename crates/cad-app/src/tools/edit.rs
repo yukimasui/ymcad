@@ -70,6 +70,11 @@ impl Tool for MoveTool {
         self.base
     }
 
+    /// 基点を指定した後の目的点は、基点からの長さ・角度で指定できる。
+    fn dimension_base(&self) -> Option<Point2> {
+        self.base
+    }
+
     fn step(&mut self, input: StepInput, ctx: &ToolCtx<'_>) -> StepOutcome {
         match input {
             StepInput::SelectionReady => StepOutcome::Continue,
@@ -123,6 +128,11 @@ impl Tool for CopyTool {
     }
 
     fn last_point(&self) -> Option<Point2> {
+        self.base
+    }
+
+    /// 基点を指定した後の目的点は、基点からの長さ・角度で指定できる。
+    fn dimension_base(&self) -> Option<Point2> {
         self.base
     }
 
@@ -221,6 +231,11 @@ impl Tool for StretchTool {
     }
 
     fn last_point(&self) -> Option<Point2> {
+        self.base
+    }
+
+    /// 基点を指定した後の目的点は、基点からの長さ・角度で指定できる。
+    fn dimension_base(&self) -> Option<Point2> {
         self.base
     }
 

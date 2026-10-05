@@ -59,6 +59,11 @@ impl Tool for LineTool {
         self.last
     }
 
+    /// 2 点目以降は、直前の点からの長さ・角度で指定できる。
+    fn dimension_base(&self) -> Option<Point2> {
+        self.last
+    }
+
     fn step(&mut self, input: StepInput, ctx: &ToolCtx<'_>) -> StepOutcome {
         match input {
             StepInput::Point(p) => {
@@ -382,6 +387,11 @@ impl Tool for PolylineTool {
     }
 
     fn last_point(&self) -> Option<Point2> {
+        self.vertices.last().copied()
+    }
+
+    /// 2 点目以降は、直前の頂点からの長さ・角度で指定できる。
+    fn dimension_base(&self) -> Option<Point2> {
         self.vertices.last().copied()
     }
 
