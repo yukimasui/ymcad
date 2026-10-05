@@ -639,8 +639,11 @@ impl CommandLine {
         text.clone_into(&mut self.input);
     }
 
-    /// コマンドラインの入力欄で変換中か（テスト用）。
-    #[cfg(test)]
+    /// コマンドラインの入力欄で変換中か。
+    ///
+    /// 変換中はバッファに未確定の文字列が入っているので、外から触ってはいけない（ADR-0002）。
+    /// リボンのボタンはこれを見て、変換中なら押されても何もしない。
+    #[must_use]
     pub fn is_composing(&self) -> bool {
         self.composing
     }

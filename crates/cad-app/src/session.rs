@@ -414,13 +414,32 @@ impl Session {
     /// - 履歴に `> LINE` を残し、空 `Enter` での再実行の対象にする（`start` が覚える）
     /// - コマンドラインに打ちかけの文字があれば捨てる。押したコマンドと無関係なので
     ///
+    /// 例外が 2 つある（PR #32 のレビュー）。
+    /// - **変換中（IME）は何もしない。** バッファには未確定の文字列が入っていて、捨てると
+    ///   入力欄が「変換中」のまま空になり、以後の Enter が効かなくなる（ADR-0002）。
+    ///   確定か取り消しを促すエラーだけを出す
+    /// - **パネルを開閉するだけのコマンド（LAYER / COMPONENTS）は実行中のコマンドを中断しない**
+    ///   （[`Immediate::keeps_running_command`]）。実行中のツール・選択・打ちかけの文字は
+    ///   そのままで、再実行の対象も実行中のコマンドのまま変えない
+    ///
     /// 入口の関係:
     /// - コマンドラインで打った名前 … `handle_submission` → `handle_text` → [`Self::start`]
     /// - リボン … ここ → [`Self::start`]（同じ先へ合流する）
     /// - パネルの「配置」 … [`Self::start_tool_directly`]（名前では作れない、対象の定義が
     ///   決まったツールを渡す）。こちらは何も実行していなくても `cancel` する
     pub fn start_command_from_ui(&mut self, name: &str, doc: &mut Document) {
-        if self.tool.is_some() || self.awaiting_selection {
+        if self.cmdline.is_composing() {
+            self.cmdline
+                .error("変換中です。確定するか Esc で取り消してから押してください");
+            return;
+        }
+        let busy = self.tool.is_some() || self.awaiting_selection;
+        if let Some(cmd) = tools::immediate(name).filter(|c| busy && c.keeps_running_command()) {
+            self.cmdline.push_line(LineKind::Input, format!("> {name}"));
+            self.run_immediate(cmd, doc);
+            return;
+        }
+        if busy {
             self.cancel();
         } else {
             self.cmdline.clear_input();
@@ -3817,6 +3836,68 @@ mod ui_start_tests {
 
         s.start_command_from_ui("LAYER", &mut doc);
         assert_eq!(s.take_ui_actions(), vec![UiAction::ToggleLayerPanel]);
+    }
+
+    /// パネルを開閉するだけのコマンド（LAYER / COMPONENTS）は、実行中のコマンドを中断しない。
+    /// 確定前の POLYLINE の点・打ちかけの文字・再実行の対象がそのまま残る。
+    #[test]
+    fn panel_commands_keep_the_running_command() {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        s.start_command_from_ui("POLYLINE", &mut doc);
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "10,0");
+        s.cmdline.set_input_for_test("20,");
+
+        for (name, action) in [
+            ("LAYER", UiAction::ToggleLayerPanel),
+            ("COMPONENTS", UiAction::ToggleComponentPanel),
+        ] {
+            s.start_command_from_ui(name, &mut doc);
+            assert_eq!(s.take_ui_actions(), vec![action], "{name}");
+            assert_eq!(s.active_command(), Some("POLYLINE"), "{name} で中断しない");
+            assert_eq!(s.last_point(), Some(Point2::new(10.0, 0.0)));
+            assert_eq!(s.cmdline.input(), "20,", "打ちかけも残る");
+        }
+        assert_eq!(
+            s.cmdline.last_command(),
+            Some("POLYLINE"),
+            "再実行の対象は変えない"
+        );
+        assert!(!s.cmdline.history().any(|l| l.text == "*取り消し*"));
+
+        s.cmdline.set_input_for_test("");
+        feed(&mut s, &mut doc, "10,10");
+        s.handle_submission(Submission::Empty, &mut doc);
+        assert_eq!(doc.entities().len(), 1, "ポリラインは最後まで描ける");
+    }
+
+    /// ツールとして動くもの（ZOOM）や図面を変える即時コマンド（UNDO）は今までどおり中断する。
+    #[test]
+    fn other_commands_still_interrupt() {
+        for name in ["ZOOM", "UNDO", "SAVE"] {
+            let mut s = Session::new();
+            let mut doc = Document::new();
+            s.start_command_from_ui("LINE", &mut doc);
+            feed(&mut s, &mut doc, "0,0");
+            s.start_command_from_ui(name, &mut doc);
+            assert_ne!(s.active_command(), Some("LINE"), "{name} は中断する");
+            assert!(
+                s.cmdline.history().any(|l| l.text == "*取り消し*"),
+                "{name}"
+            );
+        }
+    }
+
+    /// 中断しないものは「パネルを開閉するだけ」の 2 つだけ。
+    #[test]
+    fn only_panel_toggles_keep_the_running_command() {
+        let keeping: Vec<_> = tools::COMMANDS
+            .iter()
+            .filter(|c| tools::immediate(c.name).is_some_and(Immediate::keeps_running_command))
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(keeping, vec!["COMPONENTS", "LAYER"]);
     }
 
     /// 何も実行していないときに打ちかけの文字があれば捨てる。

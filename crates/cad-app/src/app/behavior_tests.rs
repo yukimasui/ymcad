@@ -1789,3 +1789,59 @@ fn narrow_window_scrolls_the_ribbon_to_the_last_button() {
         Some(&*format!("> {last}"))
     );
 }
+
+/// コマンドラインで変換中にボタンを押しても何もしない。未確定の文字列は残り、
+/// 確定か取り消しを促すエラーが出る。確定した後なら押せる（PR #32 のレビュー）。
+///
+/// 押した時点で入力欄を空にすると、変換中のまま空になって以後の Enter が効かなかった。
+#[test]
+fn ribbon_button_does_nothing_while_composing() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        frame(&mut h, [preedit("える")]);
+        settle(&mut h);
+        assert!(h.state().session.cmdline.is_composing(), "前提: 変換中");
+        let before = h.state().session.cmdline.input().to_owned();
+
+        press_ribbon(&mut h, "LINE");
+        assert!(
+            !h.state().session.has_active_tool(),
+            "始まらない（動的入力 {on}）"
+        );
+        assert!(input_lines(&h).is_empty());
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            before,
+            "未確定の文字列に触らない"
+        );
+        assert!(
+            h.state()
+                .session
+                .cmdline
+                .history()
+                .any(|l| l.kind == LineKind::Error && l.text.contains("変換中")),
+            "確定か取り消しを促す"
+        );
+
+        // 確定して入力を消せば、押せる。
+        frame(
+            &mut h,
+            [egui::Event::Ime(egui::ImeEvent::Commit("える".to_owned()))],
+        );
+        settle(&mut h);
+        press_ribbon(&mut h, "LINE");
+        assert_eq!(
+            h.state().session.active_command(),
+            Some("LINE"),
+            "動的入力 {on}"
+        );
+        type_text(&mut h, "3,4");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(
+            h.state().session.last_point(),
+            Some(Point2::new(3.0, 4.0)),
+            "その後のキーも通る（動的入力 {on}）"
+        );
+    }
+}
