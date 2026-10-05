@@ -365,11 +365,13 @@ impl CadApp {
 
         // F3 で OSNAP を切り替える。コマンドラインより先に取る必要はないが、
         // TextEdit は F3 を消費しないのでここで拾って問題ない。
-        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F3)) {
+        // モーダル（未保存確認）が出ている間はどちらも扱わない（Issue #24）。
+        let modal = self.files.is_confirming();
+        if !modal && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F3)) {
             self.toggle_osnap();
         }
         // F12 で動的入力を切り替える（AutoCAD と同じキー）。F3 と同じく TextEdit は消費しない。
-        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12)) {
+        if !modal && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12)) {
             self.toggle_dynamic_input();
         }
         // F8 で直交、F10 で極トラッキング（AutoCAD と同じキー）。F3 と同じく TextEdit は消費しない。
@@ -885,6 +887,8 @@ impl CadApp {
 impl eframe::App for CadApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // 順序に依存する: `handle_file_input` が先でなければ、このフレームで開いた
+        // モーダルを `begin_frame` が知らず、1 フレーム分キーを奪ってしまう（Issue #24）。
         self.handle_file_input(&ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
         self.ribbon_area(ui);

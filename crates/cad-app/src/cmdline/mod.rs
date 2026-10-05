@@ -628,7 +628,8 @@ impl CommandLine {
         }
         // キー入力が常にコマンドラインへ流れるよう、他に入力先が無ければ
         // 毎フレーム自分にフォーカスを戻す。
-        if ui.memory(|m| m.focused().is_none()) {
+        // モーダルが出ている間は取り直さない（モーダルのボタンにフォーカスを渡すため。Issue #24）。
+        if !self.modal_open && ui.memory(|m| m.focused().is_none()) {
             response.request_focus();
         }
     }
@@ -753,7 +754,8 @@ impl CommandLine {
                 // 並びが変わると変換が始まったフレームで入力欄が動き、入力欄に付いて出る
                 // IME の候補ウィンドウが最初の 1 打鍵で跳ねる（Area は固定していても）。
                 // 隠すときは同じ並びのまま不透明度 0 にする。
-                if !visible {
+                // モーダルが出ている間も隠す。描くのはやめない（IME とフォーカスの制約）。
+                if !visible || self.modal_open {
                     ui.multiply_opacity(0.0);
                 }
                 // Area の中身の最大幅は前フレームの大きさになっているので、

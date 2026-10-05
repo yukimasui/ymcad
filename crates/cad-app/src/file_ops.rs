@@ -116,6 +116,8 @@ pub enum FileOutcome {
 pub struct FileOps {
     /// 未保存確認の対象。
     pending: Option<PendingAction>,
+    /// モーダルを開いた直後で、「保存する」にフォーカスを置く必要があるか。
+    focus_save: bool,
 }
 
 impl FileOps {
@@ -135,6 +137,7 @@ impl FileOps {
     pub fn request(&mut self, action: FileAction, doc: &mut Document) -> FileOutcome {
         if action.discards_document() && doc.is_dirty() {
             self.pending = Some(PendingAction(action));
+            self.focus_save = true;
             return FileOutcome::Nothing;
         }
         Self::execute(action, doc)
@@ -151,6 +154,7 @@ impl FileOps {
         let mut outcome = FileOutcome::Nothing;
         let mut close = false;
 
+        let focus_save = std::mem::take(&mut self.focus_save);
         egui::Modal::new(egui::Id::new("unsaved_changes")).show(ctx, |ui| {
             ui.set_width(420.0);
             ui.heading("保存されていない変更があります");
@@ -164,7 +168,13 @@ impl FileOps {
             ui.add_space(10.0);
 
             ui.horizontal(|ui| {
-                if ui.button("保存する").clicked() {
+                // Enter = 保存する。開いたときにここへフォーカスを置く。「保存しない」には
+                // Enter も 1 文字のキーも割り当てない（変更を失う操作を誤打で起こさない）。
+                let save = ui.button("保存する (Enter)");
+                if focus_save {
+                    save.request_focus();
+                }
+                if save.clicked() {
                     match Self::execute(FileAction::Save, doc) {
                         FileOutcome::Ok(msg) => {
                             // 保存できたときだけ元の操作へ進む。
@@ -187,11 +197,17 @@ impl FileOps {
                     outcome = Self::execute(action, doc);
                     close = true;
                 }
-                if ui.button("キャンセル").clicked() {
+                if ui.button("キャンセル (Esc)").clicked() {
                     close = true;
                 }
             });
         });
+
+        // Esc = キャンセル。`should_close()` は背景のクリックでも真になるが、誤クリックで
+        // 閉じたくないので Esc だけを自分で見る（Issue #24）。
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+            close = true;
+        }
 
         if close {
             self.pending = None;

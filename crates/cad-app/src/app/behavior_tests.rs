@@ -2727,7 +2727,22 @@ fn modal_keeps_enter_space_escape_and_text_from_the_command_line() {
             "入力欄に文字が入らない（動的入力 {on}）"
         );
 
+        assert!(
+            h.state().files.is_confirming(),
+            "Enter / Space などでモーダルが勝手に閉じない（動的入力 {on}）"
+        );
+        let osnap = h.state().snap.is_enabled();
+        press(&mut h, egui::Key::F3);
+        press(&mut h, egui::Key::F12);
+        assert_eq!(h.state().snap.is_enabled(), osnap, "F3 は効かない");
+        assert_eq!(h.state().session.cmdline.is_dynamic(), on, "F12 は効かない");
+
+        // Esc = キャンセル。モーダルだけが閉じ、図面・未保存・実行中のコマンドは残る。
         press(&mut h, egui::Key::Escape);
+        assert!(
+            !h.state().files.is_confirming(),
+            "Esc で閉じる（動的入力 {on}）"
+        );
         assert!(
             h.state().session.has_active_tool(),
             "Esc で LINE が中断されない（動的入力 {on}）"
@@ -2744,7 +2759,7 @@ fn command_line_gets_keys_back_after_the_modal_closes() {
 
     for on in [false, true] {
         let mut h = app_with_unsaved_modal(on);
-        let target = h.get_by_label("キャンセル").rect().center();
+        let target = h.get_by_label("キャンセル (Esc)").rect().center();
         click(&mut h, target);
         assert!(!h.state().files.is_confirming(), "キャンセルで閉じる");
         assert_eq!(
@@ -2763,4 +2778,25 @@ fn command_line_gets_keys_back_after_the_modal_closes() {
             "打った座標が LINE に入る（動的入力 {on}）"
         );
     }
+}
+
+/// 開いたとき「保存する」にフォーカスがあり（Enter = 保存する）、背景のクリックでは閉じない。
+#[test]
+fn modal_focuses_save_and_ignores_backdrop_clicks() {
+    use egui_kittest::kittest::Queryable as _;
+
+    let mut h = app_with_unsaved_modal(true);
+    assert!(
+        h.get_by_label("保存する (Enter)").is_focused(),
+        "「保存する」にフォーカスがある"
+    );
+    assert!(
+        !h.get_by_label("保存しない").is_focused(),
+        "「保存しない」にはフォーカスを置かない"
+    );
+    click(&mut h, egui::pos2(5.0, 5.0));
+    assert!(
+        h.state().files.is_confirming(),
+        "背景のクリックでは閉じない"
+    );
 }
