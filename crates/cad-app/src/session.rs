@@ -348,7 +348,15 @@ impl Session {
             // 直接距離入力。寸法入力に参加しているツールで数値 1 つだけなら、
             // 基点からカーソル方向へその長さの点にする。動的入力のオン/オフに関係なく効く。
             // 参加していないツール（ROTATE の角度など）では数値の意味を変えない。
-            if let (Some(base), Some(length)) = (self.dimension_base(), coord::parse_number(text)) {
+            //
+            // 「数値 1 つ」の判定は欄の表示と同じ `dimension::classify` を使う。
+            // `coord::parse_number` は `1e3` も 1000 と読むが、欄は `1e3` を数値以外として
+            // 通常の入力欄に戻すので、表示と結果が食い違う。
+            let number = match dimension::classify(text) {
+                dimension::BufferKind::Number(n) => Some(n),
+                _ => None,
+            };
+            if let (Some(base), Some(length)) = (self.dimension_base(), number) {
                 match dimension::direct_distance(base, self.cursor, length) {
                     Ok(p) => self.feed_tool(StepInput::Point(p), doc),
                     Err(e) => self.cmdline.error(e.message()),
@@ -3477,6 +3485,43 @@ mod dimension_tests {
                 last_error(&s)
             );
         }
+    }
+
+    /// 指数表記（`1e3`）は直接距離入力にしない。欄の表示（数値以外として通常の入力欄に
+    /// 戻る）と同じ分類を使い、以前どおり「座標を指定してください」で止める。
+    /// `parse_number` は 1000 と読めるので、それを使うと表示と結果が食い違う。
+    #[test]
+    fn exponent_notation_is_not_a_direct_distance() {
+        for text in ["1e3", "1E3", "１ｅ３"] {
+            let (mut s, mut doc) = line_from_origin();
+            s.set_cursor(Some(p(0.0, 30.0)));
+            feed(&mut s, &mut doc, text);
+            assert!(lines(&doc).is_empty(), "{text}: 線は引かれない");
+            assert!(
+                last_error(&s).is_some_and(|e| e.contains("座標を指定")),
+                "{text}: {:?}",
+                last_error(&s)
+            );
+        }
+    }
+
+    /// 参加しないツールの数値の読み方は変えない（CIRCLE の半径は指数表記も読める）。
+    #[test]
+    fn non_participating_tools_still_read_exponents() {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        feed(&mut s, &mut doc, "C");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "1e1");
+        let radius = doc
+            .entities()
+            .iter()
+            .find_map(|(_, e)| match &e.geom {
+                Geometry::Circle(c) => Some(c.radius),
+                _ => None,
+            })
+            .expect("円ができる");
+        assert!(eq_len(radius, 10.0), "半径 {radius}");
     }
 
     /// 座標の書式とオプションは従来どおり。何も付けなければ絶対座標。
