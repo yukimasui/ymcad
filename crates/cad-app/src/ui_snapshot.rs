@@ -1,9 +1,14 @@
 //! UI の見た目を画面に出さずに PNG へ撮る。
 //!
-//! GPU（lavapipe 等のソフトウェア Vulkan でも可）が要るので `#[ignore]`。実行:
+//! PNG にする（`Harness::render()`）には **wgpu のアダプタが要る**ので `#[ignore]`。
+//! 実 GPU でなくても、lavapipe 等のソフトウェア Vulkan があれば撮れる。実行:
 //! `cargo test -p cad-app -- --ignored ui_snapshot`
 //! 出力先は `target/ui-snapshots/`（リポジトリ管理外）。画像の比較はせず撮るだけ。
 //! 撮った画像は人（またはエージェント）が開いて見た目を確かめる。
+//!
+//! **振る舞いの検査はここに置かない。** `egui_kittest` は `.wgpu()` を付けず
+//! `render()` を呼ばなければ GPU なしで動くので、確定の回数やクリックの素通しなどは
+//! `app/behavior_tests.rs` で通常のテストとして固定している。
 //!
 //! `Harness::run()` は再描画の要求が止まるまで回すので、カーソルの点滅などで
 //! 終わらないことがある。**`run_steps(n)` を使う。**
