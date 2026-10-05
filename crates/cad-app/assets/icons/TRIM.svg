@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ymcad リボンのアイコン（TRIM）。作法は同じフォルダの README.md を参照。
+     白一色で描き、表示側で文字色・選択色に着色する。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+     fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M8.16 0.96 L8.16 9.12"/>
+  <path d="M0.96 4.32 L8.16 4.32"/>
+  <path d="M8.16 4.32 L23.04 4.32" stroke-opacity="0.7" stroke-dasharray="2 1.5" stroke-linecap="butt"/>
+  <circle cx="12.48" cy="20.64" r="2.16"/>
+  <circle cx="20.16" cy="20.64" r="2.16"/>
+  <path d="M13.68 18.72 L20.4 10.08"/>
+  <path d="M18.96 18.72 L12.24 10.08"/>
+</svg>

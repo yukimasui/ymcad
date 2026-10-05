@@ -1500,3 +1500,669 @@ fn direct_distance_follows_ortho_with_dynamic_input_off() {
     assert_eq!(l.len(), 1);
     assert_point(l[0].b, Point2::new(base.x, base.y - 50.0), "下へ垂直に 50");
 }
+
+// ---- リボン（Issue #26） ----------------------------------------------------
+//
+// ボタンは `Ribbon::probe` が記録した矩形の中央をクリックして押す（本物のポインタの経路）。
+// 強調やタブの中身も、描いた結果として記録された状態で検査する。
+
+/// 直前のフレームに描いたリボンのボタン。
+fn ribbon_buttons(h: &Harness<'_, CadApp>) -> Vec<crate::ribbon::DrawnButton> {
+    h.state().ribbon.probe().buttons.clone()
+}
+
+/// 今のタブに見えているボタンの名前（タブの行の右端のクイックアクセスを除く）。
+fn ribbon_names(h: &Harness<'_, CadApp>) -> Vec<&'static str> {
+    ribbon_buttons(h)
+        .iter()
+        .filter(|b| !b.quick)
+        .map(|b| b.name)
+        .collect()
+}
+
+/// クイックアクセスに見えているボタンの名前（画面の左から順）。
+fn quick_names(h: &Harness<'_, CadApp>) -> Vec<&'static str> {
+    let mut quick: Vec<_> = ribbon_buttons(h).into_iter().filter(|b| b.quick).collect();
+    quick.sort_by(|a, b| a.rect.left().total_cmp(&b.rect.left()));
+    quick.iter().map(|b| b.name).collect()
+}
+
+/// リボンのボタンを押す。そのボタンが今のタブに無ければ panic。
+fn press_ribbon(h: &mut Harness<'_, CadApp>, name: &str) {
+    let button = ribbon_buttons(h)
+        .into_iter()
+        .find(|b| b.name == name)
+        .unwrap_or_else(|| panic!("{name} のボタンが見えていない"));
+    let rect = button.rect;
+    let viewport = h
+        .state()
+        .ribbon
+        .probe()
+        .viewport
+        .expect("リボンが描かれている");
+    assert!(
+        button.quick || viewport.contains(rect.center()),
+        "{name} はスクロールの外にあって押せない: {rect:?} / {viewport:?}"
+    );
+    let hints = h.state().ribbon.probe().hints;
+    assert!(
+        button.quick || !hints.iter().flatten().any(|b| b.contains(rect.center())),
+        "{name} は「‹」「›」の帯の下にあって押せない"
+    );
+    click(h, rect.center());
+}
+
+/// タブを切り替える。
+fn press_tab(h: &mut Harness<'_, CadApp>, title: &str) {
+    let rect = h
+        .state()
+        .ribbon
+        .probe()
+        .tabs
+        .iter()
+        .find(|(t, _, _)| *t == title)
+        .unwrap_or_else(|| panic!("{title} のタブが無い"))
+        .1;
+    click(h, rect.center());
+}
+
+/// 実行中のコマンドの印が付いているタブ。
+fn marked_tabs(h: &Harness<'_, CadApp>) -> Vec<&'static str> {
+    h.state()
+        .ribbon
+        .probe()
+        .tabs
+        .iter()
+        .filter(|(_, _, mark)| *mark)
+        .map(|(t, _, _)| *t)
+        .collect()
+}
+
+/// 強調されているボタンの名前。
+fn highlighted(h: &Harness<'_, CadApp>) -> Vec<&'static str> {
+    ribbon_buttons(h)
+        .iter()
+        .filter(|b| b.highlighted)
+        .map(|b| b.name)
+        .collect()
+}
+
+/// LINE を押すと名前を打ったのと同じく始まり、そのまま打った座標が始点に入る
+/// （ボタンがキーボードのフォーカスを奪わない）。動的入力のオン・オフどちらでも。
+#[test]
+fn ribbon_button_starts_the_command_and_keeps_the_keyboard() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        press_ribbon(&mut h, "LINE");
+
+        assert_eq!(input_lines(&h), vec!["> LINE"], "動的入力 {on}");
+        assert_eq!(h.state().session.active_command(), Some("LINE"));
+        assert_eq!(h.state().session.prompt(), "線分の始点を指定:");
+        assert_eq!(
+            h.state().session.cmdline.frame_is_dynamic(),
+            on,
+            "プロンプトの出る場所（カーソル横 / 画面下）"
+        );
+
+        type_text(&mut h, "10,10");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(
+            h.state().session.last_point(),
+            Some(Point2::new(10.0, 10.0)),
+            "続けて打った座標が LINE の始点に入る（動的入力 {on}）"
+        );
+    }
+}
+
+/// LINE の実行中に CIRCLE を押すと、LINE を中断して CIRCLE が始まる。
+#[test]
+fn ribbon_button_interrupts_the_running_command() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        press_ribbon(&mut h, "LINE");
+        click(&mut h, P1);
+        assert!(
+            h.state().session.last_point().is_some(),
+            "前提: 始点が入った"
+        );
+
+        press_ribbon(&mut h, "CIRCLE");
+        assert_eq!(
+            h.state().session.active_command(),
+            Some("CIRCLE"),
+            "動的入力 {on}"
+        );
+        assert_eq!(h.state().session.last_point(), None, "LINE は捨てられた");
+        assert_eq!(input_lines(&h), vec!["> LINE", "> CIRCLE"]);
+        assert!(
+            h.state()
+                .session
+                .cmdline
+                .history()
+                .any(|l| l.text == "*取り消し*"),
+            "中断が履歴に残る"
+        );
+        assert!(lines(&h).is_empty(), "線は引かれていない");
+    }
+}
+
+/// UNDO を押すと 1 つ戻る（即時実行のコマンド）。
+#[test]
+fn ribbon_undo_undoes_one_step() {
+    let mut h = app();
+    hover(&mut h, P1);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, P1);
+    click(&mut h, P2);
+    press(&mut h, egui::Key::Enter);
+    assert_eq!(lines(&h).len(), 1, "前提: 線が 1 本");
+
+    press_ribbon(&mut h, "UNDO");
+    assert!(lines(&h).is_empty(), "UNDO で消える");
+    assert_eq!(input_lines(&h).last().map(String::as_str), Some("> UNDO"));
+}
+
+/// LAYER（ホームにある）を押すとレイヤパネルが開き、もう一度押すと閉じる（UI 要求を出すコマンド）。
+#[test]
+fn ribbon_layer_toggles_the_layer_panel() {
+    let mut h = app();
+    assert!(!h.state().layer_panel.is_open(), "前提");
+    press_ribbon(&mut h, "LAYER");
+    assert!(h.state().layer_panel.is_open());
+    press_ribbon(&mut h, "LAYER");
+    assert!(!h.state().layer_panel.is_open());
+    assert_eq!(input_lines(&h), vec!["> LAYER", "> LAYER"]);
+}
+
+/// 起動時はホーム。タブを切り替えると見えるボタンが変わる。
+#[test]
+fn ribbon_tabs_switch_the_visible_buttons() {
+    let mut h = app();
+    assert_eq!(h.state().ribbon.tab_title(), "ホーム", "起動時はホーム");
+    let home = ribbon_names(&h);
+    assert!(home.contains(&"LINE") && home.contains(&"TRIM"), "{home:?}");
+    assert!(!home.contains(&"INSERT"), "{home:?}");
+
+    press_tab(&mut h, "コンポーネント");
+    let comp = ribbon_names(&h);
+    assert!(
+        comp.contains(&"INSERT") && comp.contains(&"PSET"),
+        "{comp:?}"
+    );
+    assert!(!comp.contains(&"LINE"), "{comp:?}");
+
+    press_tab(&mut h, "表示・ファイル");
+    let view = ribbon_names(&h);
+    assert!(
+        view.contains(&"ZOOM") && view.contains(&"SAVEAS"),
+        "{view:?}"
+    );
+    assert!(!view.contains(&"QUIT"), "QUIT は出さない");
+
+    press_tab(&mut h, "ホーム");
+    assert_eq!(ribbon_names(&h), home);
+}
+
+/// 実行中のコマンドのボタンだけが強調され、終われば消える。
+/// 打って始めたコマンドでも同じ（強調はリボンの状態ではなく実行中のツールから決まる）。
+#[test]
+fn ribbon_highlights_only_the_running_command() {
+    let mut h = app();
+    hover(&mut h, P1);
+    assert!(highlighted(&h).is_empty(), "何もしていなければ強調なし");
+
+    press_ribbon(&mut h, "LINE");
+    assert_eq!(highlighted(&h), vec!["LINE"]);
+
+    press(&mut h, egui::Key::Escape);
+    assert!(highlighted(&h).is_empty(), "中断したら消える");
+
+    type_text(&mut h, "C");
+    press(&mut h, egui::Key::Enter);
+    assert_eq!(highlighted(&h), vec!["CIRCLE"], "打って始めても強調する");
+}
+
+/// 押した後の空 Enter で同じコマンドが再実行される。動的入力のオン・オフどちらでも。
+#[test]
+fn empty_enter_repeats_the_command_pressed_on_the_ribbon() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        press_ribbon(&mut h, "CIRCLE");
+        press(&mut h, egui::Key::Escape);
+        assert!(!h.state().session.has_active_tool(), "前提: 中断した");
+
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(
+            h.state().session.active_command(),
+            Some("CIRCLE"),
+            "動的入力 {on}"
+        );
+        assert_eq!(input_lines(&h), vec!["> CIRCLE", "> CIRCLE"]);
+    }
+}
+
+/// パネルの入力欄を編集中にボタンを押しても、その後のキーはコマンドラインへ届く。
+#[test]
+fn ribbon_button_returns_the_keyboard_from_a_panel_field() {
+    let mut h = app();
+    focus_layer_name_field(&mut h);
+    press_ribbon(&mut h, "LINE");
+    type_text(&mut h, "5,5");
+    press(&mut h, egui::Key::Enter);
+    assert_eq!(h.state().session.last_point(), Some(Point2::new(5.0, 5.0)));
+    assert_eq!(layer_name_field_value(&h), "", "パネルの欄には入っていない");
+}
+
+/// リボンの高さは抑えてある（目安 80px 以下）。
+#[test]
+fn ribbon_is_compact() {
+    let h = app();
+    let rect = h.state().ribbon.probe().rect.expect("リボンが描かれている");
+    assert!(rect.height() <= 80.0, "リボンの高さ {}", rect.height());
+}
+
+/// 幅 800px では全部は見えないが、ホイールで横にスクロールすれば最後のボタンまで届く。
+#[test]
+fn narrow_window_scrolls_the_ribbon_to_the_last_button() {
+    let mut h = app();
+    h.set_size(egui::vec2(800.0, 600.0));
+    settle(&mut h);
+    let last = *crate::ribbon::layout::TABS[0]
+        .groups
+        .last()
+        .and_then(|g| g.commands.last())
+        .expect("ホームの最後のボタン");
+    let viewport = h.state().ribbon.probe().viewport.expect("リボン");
+    let rect_of = |h: &Harness<'_, CadApp>| {
+        ribbon_buttons(h)
+            .iter()
+            .find(|b| b.name == last)
+            .expect("ボタンは描かれている（見えていなくても）")
+            .rect
+    };
+    assert!(
+        !viewport.contains(rect_of(&h).center()),
+        "前提: 800px では {last} は見えていない"
+    );
+
+    // リボンの上で縦にホイールを回す（横スクロールしかない領域では横に動く）。
+    let over = egui::pos2(400.0, viewport.center().y);
+    hover(&mut h, over);
+    for _ in 0..10 {
+        frame(
+            &mut h,
+            [egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -200.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+    h.run_steps(30);
+    let viewport = h.state().ribbon.probe().viewport.expect("リボン");
+    assert!(
+        viewport.contains(rect_of(&h).center()),
+        "スクロール後は {last} が見える: {:?} / {viewport:?}",
+        rect_of(&h)
+    );
+    press_ribbon(&mut h, last);
+    assert_eq!(
+        input_lines(&h).last().map(String::as_str),
+        Some(&*format!("> {last}"))
+    );
+}
+
+/// コマンドラインで変換中にボタンを押しても何もしない。未確定の文字列は残り、
+/// 確定か取り消しを促すエラーが出る。確定した後なら押せる（PR #32 のレビュー）。
+///
+/// 押した時点で入力欄を空にすると、変換中のまま空になって以後の Enter が効かなかった。
+#[test]
+fn ribbon_button_does_nothing_while_composing() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        frame(&mut h, [preedit("える")]);
+        settle(&mut h);
+        assert!(h.state().session.cmdline.is_composing(), "前提: 変換中");
+        let before = h.state().session.cmdline.input().to_owned();
+
+        press_ribbon(&mut h, "LINE");
+        assert!(
+            !h.state().session.has_active_tool(),
+            "始まらない（動的入力 {on}）"
+        );
+        assert!(input_lines(&h).is_empty());
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            before,
+            "未確定の文字列に触らない"
+        );
+        assert!(
+            h.state()
+                .session
+                .cmdline
+                .history()
+                .any(|l| l.kind == LineKind::Error && l.text.contains("変換中")),
+            "確定か取り消しを促す"
+        );
+
+        // 確定して入力を消せば、押せる。
+        frame(
+            &mut h,
+            [egui::Event::Ime(egui::ImeEvent::Commit("える".to_owned()))],
+        );
+        settle(&mut h);
+        press_ribbon(&mut h, "LINE");
+        assert_eq!(
+            h.state().session.active_command(),
+            Some("LINE"),
+            "動的入力 {on}"
+        );
+        type_text(&mut h, "3,4");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(
+            h.state().session.last_point(),
+            Some(Point2::new(3.0, 4.0)),
+            "その後のキーも通る（動的入力 {on}）"
+        );
+    }
+}
+
+/// UNDO / REDO / SAVE はタブの行の右端に、どのタブを開いていても出ていて押せる。
+#[test]
+fn quick_access_is_available_on_every_tab() {
+    let mut h = app();
+    hover(&mut h, P1);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, P1);
+    click(&mut h, P2);
+    press(&mut h, egui::Key::Enter);
+    assert_eq!(lines(&h).len(), 1, "前提: 線が 1 本");
+
+    for tab in ["ホーム", "コンポーネント", "表示・ファイル"] {
+        press_tab(&mut h, tab);
+        assert_eq!(
+            quick_names(&h),
+            vec!["UNDO", "REDO", "SAVE"],
+            "{tab}（左から順）"
+        );
+        assert!(
+            !ribbon_names(&h).contains(&"UNDO"),
+            "{tab}: タブの中には置かない"
+        );
+    }
+    // タブの直後（区切り線の右）に並ぶ。右端だと視線の外になっていた。
+    let last_tab = h.state().ribbon.probe().tabs.last().expect("タブ").1;
+    let first_quick = ribbon_buttons(&h)
+        .into_iter()
+        .filter(|b| b.quick)
+        .map(|b| b.rect.left())
+        .fold(f32::INFINITY, f32::min);
+    let gap = first_quick - last_tab.right();
+    assert!(
+        (0.0..=24.0).contains(&gap),
+        "最後のタブのすぐ右に置く: 間 {gap}px"
+    );
+    // ホーム以外のタブから UNDO / REDO。
+    press_ribbon(&mut h, "UNDO");
+    assert!(lines(&h).is_empty(), "UNDO");
+    press_ribbon(&mut h, "REDO");
+    assert_eq!(lines(&h).len(), 1, "REDO");
+}
+
+/// 実行中のコマンドが別のタブにあるときだけ、そのタブの見出しに印が付く。
+#[test]
+fn tab_with_the_running_command_is_marked() {
+    let mut h = app();
+    hover(&mut h, P1);
+    assert!(marked_tabs(&h).is_empty(), "何もしていなければ印なし");
+
+    press_ribbon(&mut h, "LINE");
+    assert!(
+        marked_tabs(&h).is_empty(),
+        "開いているタブには付けない（ボタンが強調される）"
+    );
+
+    press_tab(&mut h, "コンポーネント");
+    assert_eq!(
+        marked_tabs(&h),
+        vec!["ホーム"],
+        "別のタブを開くとホームに印"
+    );
+    assert_eq!(
+        h.state().session.active_command(),
+        Some("LINE"),
+        "タブの切り替えは中断しない"
+    );
+
+    press(&mut h, egui::Key::Escape);
+    assert!(marked_tabs(&h).is_empty(), "終われば消える");
+}
+
+/// POLYLINE の途中で LAYER を押してもポリラインは消えず、パネルが開いて続きを打てる。
+#[test]
+fn ribbon_layer_keeps_the_running_polyline() {
+    let mut h = app();
+    hover(&mut h, P1);
+    press_ribbon(&mut h, "POLYLINE");
+    click(&mut h, P1);
+    click(&mut h, P2);
+    press_ribbon(&mut h, "LAYER");
+    assert!(h.state().layer_panel.is_open(), "パネルが開く");
+    assert_eq!(
+        h.state().session.active_command(),
+        Some("POLYLINE"),
+        "中断しない"
+    );
+    assert_eq!(highlighted(&h), vec!["POLYLINE"]);
+
+    type_text(&mut h, "0,0");
+    press(&mut h, egui::Key::Enter);
+    press(&mut h, egui::Key::Enter);
+    assert_eq!(
+        h.state().doc.entities().len(),
+        1,
+        "3 点のポリラインが確定する"
+    );
+}
+
+/// 幅が足りないときだけ、送れる側の端に印が出る。
+#[test]
+fn overflow_hints_follow_the_scroll_position() {
+    let mut h = app();
+    assert_eq!(
+        h.state().ribbon.probe().overflow,
+        (false, false),
+        "1280px では収まる"
+    );
+
+    h.set_size(egui::vec2(800.0, 600.0));
+    settle(&mut h);
+    assert_eq!(
+        h.state().ribbon.probe().overflow,
+        (false, true),
+        "右へ送れる"
+    );
+
+    let viewport = h.state().ribbon.probe().viewport.expect("リボン");
+    hover(&mut h, egui::pos2(400.0, viewport.center().y));
+    for _ in 0..10 {
+        frame(
+            &mut h,
+            [egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -200.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+    h.run_steps(30);
+    assert_eq!(
+        h.state().ribbon.probe().overflow,
+        (true, false),
+        "右端まで送った"
+    );
+}
+
+/// 幅 800px で「›」の帯を押すと、下に隠れたボタンは押されず、表示範囲が右へ動く。
+/// 右端まで送ると「‹」が出て、押すと左へ戻る（PR #32 の操作レビュー）。
+#[test]
+fn overflow_hints_scroll_instead_of_pressing_the_button_below() {
+    let mut h = app();
+    h.set_size(egui::vec2(800.0, 600.0));
+    settle(&mut h);
+    let probe = h.state().ribbon.probe().clone();
+    let right = probe.hints[1].expect("前提: 「›」が出ている");
+    assert!(
+        probe.hints[0].is_some() && probe.overflow == (false, true),
+        "前提: 「‹」の帯も置かれているが、左へは送れない"
+    );
+    // 帯の中で、下にボタンが隠れている点を押す（帯の中央はグループの隙間のことがある）。
+    let hidden = ribbon_buttons(&h)
+        .into_iter()
+        .find(|b| !b.quick && b.rect.intersects(right))
+        .expect("前提: 「›」の帯の下にボタンが隠れている");
+    let at = egui::pos2(
+        hidden
+            .rect
+            .center()
+            .x
+            .clamp(right.left() + 1.0, right.right() - 1.0),
+        hidden.rect.center().y,
+    );
+    assert!(hidden.rect.contains(at) && right.contains(at), "前提");
+    let before = probe.offset;
+
+    click(&mut h, at);
+    settle(&mut h);
+    assert!(input_lines(&h).is_empty(), "下のボタンは押されない");
+    assert!(!h.state().session.has_active_tool());
+    assert!(!h.state().layer_panel.is_open());
+    let after = h.state().ribbon.probe().offset;
+    assert!(after > before, "右へ送られる: {before} → {after}");
+
+    let left = h.state().ribbon.probe().hints[0].expect("「‹」の帯");
+    assert!(h.state().ribbon.probe().overflow.0, "送ったので左へ送れる");
+    click(&mut h, left.center());
+    settle(&mut h);
+    assert!(
+        input_lines(&h).is_empty(),
+        "「‹」でも下のボタンは押されない"
+    );
+    let back = h.state().ribbon.probe().offset;
+    assert!(back < after, "左へ戻る: {after} → {back}");
+}
+
+/// はみ出している間は「‹」「›」の帯を左右両方に常に置き、端まで送った後に続けて押しても
+/// 下のボタンへ押し抜けない（PR #32 の 3 回目の操作レビュー）。幅 600 / 700 / 800px。
+///
+/// 送れる側だけに帯を置いていたときは、端に着くとその側の帯が消えて同じ位置に端のボタンが
+/// 現れ、「›」の連打で LAYER が開閉し、「‹」で実行中の POLYLINE が中断されていた。
+#[test]
+fn repeated_presses_on_the_hints_never_reach_the_buttons_below() {
+    for width in [600.0, 700.0, 800.0] {
+        let mut h = app();
+        h.set_size(egui::vec2(width, 600.0));
+        settle(&mut h);
+        hover(&mut h, P1);
+        type_text(&mut h, "PL");
+        press(&mut h, egui::Key::Enter);
+        click(&mut h, egui::pos2(300.0, 300.0));
+        click(&mut h, egui::pos2(400.0, 350.0));
+        let point = h.state().session.last_point();
+        assert!(point.is_some(), "前提: POLYLINE に 2 点（{width}px）");
+        let history = input_lines(&h);
+
+        // 人がするのと同じく、山形の見えていた位置を同じ場所で押し続ける（帯があるかどうかを
+        // 毎回確かめてから押すと、帯が消えて下のボタンに当たる不具合を再現できない）。
+        let viewport = h.state().ribbon.probe().viewport.expect("リボン");
+        let spots = [
+            egui::pos2(viewport.left() + 7.0, viewport.center().y),
+            egui::pos2(viewport.right() - 7.0, viewport.center().y),
+        ];
+        for (side, label) in [(1, "›"), (0, "‹")] {
+            for n in 0..4 {
+                click(&mut h, spots[side]);
+                settle(&mut h);
+                assert!(
+                    h.state().ribbon.probe().hints[side].is_some(),
+                    "{width}px: 「{label}」の帯が消えた（{} 回目）",
+                    n + 1
+                );
+                assert_eq!(
+                    h.state().session.active_command(),
+                    Some("POLYLINE"),
+                    "{width}px: 「{label}」{} 回目でコマンドが変わった",
+                    n + 1
+                );
+                assert_eq!(
+                    h.state().session.last_point(),
+                    point,
+                    "{width}px: 点が変わった"
+                );
+                assert_eq!(input_lines(&h), history, "{width}px: 履歴が増えた");
+                assert!(
+                    !h.state().layer_panel.is_open(),
+                    "{width}px: レイヤパネルが開いた"
+                );
+            }
+        }
+        // 4 回ずつ押せば端まで行って戻っている。
+        assert_eq!(
+            h.state().ribbon.probe().overflow,
+            (false, true),
+            "{width}px: 左端に戻った"
+        );
+    }
+}
+
+/// 端まで送ると、端のボタンは帯の下に隠れず押せる（両端に帯の幅の余白を足している）。
+#[test]
+fn edge_buttons_are_clear_of_the_hints_at_both_ends() {
+    let mut h = app();
+    h.set_size(egui::vec2(700.0, 600.0));
+    settle(&mut h);
+    let first = *crate::ribbon::layout::TABS[0].groups[0]
+        .commands
+        .first()
+        .expect("最初のボタン");
+    let last = *crate::ribbon::layout::TABS[0]
+        .groups
+        .last()
+        .and_then(|g| g.commands.last())
+        .expect("最後のボタン");
+    let clear = |h: &Harness<'_, CadApp>, name: &str| {
+        let rect = ribbon_buttons(h)
+            .into_iter()
+            .find(|b| b.name == name)
+            .expect("ボタン")
+            .rect;
+        let probe = h.state().ribbon.probe().clone();
+        probe.viewport.expect("リボン").contains_rect(rect)
+            && !probe.hints.iter().flatten().any(|b| b.intersects(rect))
+    };
+    assert!(clear(&h, first), "左端では {first} が帯にかからない");
+    for _ in 0..4 {
+        let band = h.state().ribbon.probe().hints[1].expect("「›」");
+        click(&mut h, band.center());
+        settle(&mut h);
+    }
+    assert_eq!(
+        h.state().ribbon.probe().overflow,
+        (true, false),
+        "右端まで送った"
+    );
+    assert!(clear(&h, last), "右端では {last} が帯にかからない");
+    press_ribbon(&mut h, last);
+    assert_eq!(
+        input_lines(&h).last().map(String::as_str),
+        Some(&*format!("> {last}"))
+    );
+}

@@ -347,13 +347,13 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "TRIM",
         aliases: &["TR"],
-        summary: "切り取り（他の全図形が境界）",
+        summary: "線分を切り取る（他の全図形が境界）",
         kind: CommandKind::Tool(|| Box::new(edit::TrimTool)),
     },
     CommandSpec {
         name: "EXTEND",
         aliases: &["EX"],
-        summary: "伸ばす（他の全図形が境界）",
+        summary: "線分を伸ばす（他の全図形が境界）",
         kind: CommandKind::Tool(|| Box::new(edit::ExtendTool)),
     },
     CommandSpec {
@@ -473,7 +473,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "OPEN",
         aliases: &[],
-        summary: "DXF を開く",
+        summary: "図面を開く（.ymc / .dxf）",
         kind: CommandKind::Immediate(Immediate::File(FileAction::Open)),
     },
     CommandSpec {
@@ -587,6 +587,23 @@ impl Immediate {
             Self::ComponentPanel => "COMPONENTS",
             Self::EndComponentEdit => "ENDCOMP",
             Self::File(a) => a.command_name(),
+        }
+    }
+
+    /// UI のボタンから押されたとき、**実行中のコマンドを中断せずに**動かすか。
+    ///
+    /// 真になるのは、図面にも実行中のツールの状態にも触れず、パネルを開閉するだけのもの。
+    /// POLYLINE を打っている途中でレイヤパネルを開いても、確定前の図形が消えないように
+    /// （AutoCAD の透過コマンドに当たる。ADR-0037 決定 3）。
+    ///
+    /// UNDO / REDO は図面を変え、ENDCOMP は編集を終え、ファイル操作は図面を入れ替える
+    /// （あるいは保存の前に確定させたい）ので中断する。`_` を書かずに全部の種類を並べて、
+    /// 種類を足したときにここで決めさせる。
+    #[must_use]
+    pub fn keeps_running_command(self) -> bool {
+        match self {
+            Self::LayerPanel | Self::ComponentPanel => true,
+            Self::Undo | Self::Redo | Self::EndComponentEdit | Self::File(_) => false,
         }
     }
 }

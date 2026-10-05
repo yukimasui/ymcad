@@ -404,10 +404,63 @@ impl Session {
         ))
     }
 
+    /// UI のボタン（リボン）からコマンドを名前で始める。**コマンド名を打つのと同じ扱い**。
+    ///
+    /// - 実行中のコマンド（選択待ちを含む）があれば、`Esc` と同じく中断してから始める
+    ///   （AutoCAD と同じ）。文字列として `handle_text` へ流すと、実行中のツールに
+    ///   「オプション」と解釈されるので、テキストの経路には流さない
+    /// - 何も実行していなければ選択は残す。選んでから MOVE を押す使い方
+    ///   （名詞 → 動詞）を、名前を打ったときと同じく効かせるため
+    /// - 履歴に `> LINE` を残し、空 `Enter` での再実行の対象にする（`start` が覚える）
+    /// - コマンドラインに打ちかけの文字があれば捨てる。押したコマンドと無関係なので
+    ///
+    /// 例外が 2 つある（PR #32 のレビュー）。
+    /// - **変換中（IME）は何もしない。** バッファには未確定の文字列が入っていて、捨てると
+    ///   入力欄が「変換中」のまま空になり、以後の Enter が効かなくなる（ADR-0002）。
+    ///   確定か取り消しを促すエラーだけを出す
+    /// - **パネルを開閉するだけのコマンド（LAYER / COMPONENTS）は実行中のコマンドを中断しない**
+    ///   （[`Immediate::keeps_running_command`]）。実行中のツール・選択・打ちかけの文字は
+    ///   そのままで、再実行の対象も実行中のコマンドのまま変えない
+    ///
+    /// 入口の関係:
+    /// - コマンドラインで打った名前 … `handle_submission` → `handle_text` → [`Self::start`]
+    /// - リボン … ここ → [`Self::start`]（同じ先へ合流する）
+    /// - パネルの「配置」 … [`Self::start_tool_directly`]（名前では作れない、対象の定義が
+    ///   決まったツールを渡す）。こちらは何も実行していなくても `cancel` する
+    pub fn start_command_from_ui(&mut self, name: &str, doc: &mut Document) {
+        if self.cmdline.is_composing() {
+            self.cmdline
+                .error("変換中です。確定するか Esc で取り消してから押してください");
+            return;
+        }
+        let busy = self.tool.is_some() || self.awaiting_selection;
+        if let Some(cmd) = tools::immediate(name).filter(|c| busy && c.keeps_running_command()) {
+            self.cmdline.push_line(LineKind::Input, format!("> {name}"));
+            self.run_immediate(cmd, doc);
+            return;
+        }
+        if busy {
+            self.cancel();
+        } else {
+            self.cmdline.clear_input();
+        }
+        self.cmdline.push_line(LineKind::Input, format!("> {name}"));
+        self.start(name, doc);
+    }
+
+    /// 実行中のコマンドの名前（選択待ちを含む）。何も実行していなければ `None`。
+    ///
+    /// リボンが実行中のボタンを強調するのに使う。ツールの [`Tool::name`] はコマンド表の
+    /// 正式名と一致している（`ribbon` のテストで検査している）。
+    #[must_use]
+    pub fn active_command(&self) -> Option<&'static str> {
+        self.tool.as_ref().map(|t| t.name())
+    }
+
     /// できあがったツールをそのまま起動する。
     ///
     /// パネルのボタンから、名前を打たせずにコマンドを始めるために使う。
-    /// コマンドラインから起動したときと同じ経路（`start_tool`）を通す。
+    /// コマンドラインから起動したときと同じ経路（`begin_tool`）を通す。
     pub fn start_tool_directly(&mut self, tool: Box<dyn Tool>, doc: &mut Document) {
         self.cancel();
         self.begin_tool(tool, doc);
@@ -3679,5 +3732,182 @@ mod dimension_tests {
         feed(&mut s, &mut doc, "100");
         assert!(doc.entities().is_empty(), "RECTANGLE は数値を点にしない");
         assert!(last_error(&s).is_some_and(|e| e.contains("点を指定")));
+    }
+}
+
+#[cfg(test)]
+mod ui_start_tests {
+    //! リボンなど UI のボタンからコマンドを始める入口（`start_command_from_ui`）。
+    //! 「コマンド名を打つのと同じ扱い」になっていることを固定する（ADR-0037）。
+
+    use super::*;
+
+    fn feed(s: &mut Session, doc: &mut Document, text: &str) {
+        s.handle_submission(Submission::Text(text.to_owned()), doc);
+    }
+
+    fn inputs(s: &Session) -> Vec<String> {
+        s.cmdline
+            .history()
+            .filter(|l| l.kind == LineKind::Input)
+            .map(|l| l.text.clone())
+            .collect()
+    }
+
+    /// 押すと履歴に `> LINE` が残り、ツールが始まり、続けて打った座標が始点に入る。
+    #[test]
+    fn starts_the_tool_and_records_the_name() {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        s.start_command_from_ui("LINE", &mut doc);
+        assert_eq!(inputs(&s), vec!["> LINE"]);
+        assert_eq!(s.active_command(), Some("LINE"));
+
+        feed(&mut s, &mut doc, "10,10");
+        assert_eq!(s.last_point(), Some(Point2::new(10.0, 10.0)));
+    }
+
+    /// 実行中に別のコマンドを押すと、実行中のものを中断してから始める。
+    /// 名前を文字列としてツールへ流していないこと（流すと CIRCLE が LINE のオプション扱いになる）。
+    #[test]
+    fn interrupts_the_running_command() {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        s.start_command_from_ui("LINE", &mut doc);
+        feed(&mut s, &mut doc, "0,0");
+        s.start_command_from_ui("CIRCLE", &mut doc);
+
+        assert_eq!(s.active_command(), Some("CIRCLE"));
+        assert_eq!(s.last_point(), None, "LINE の始点は捨てられている");
+        assert!(
+            s.cmdline.history().any(|l| l.text == "*取り消し*"),
+            "中断したことが履歴に残る"
+        );
+        assert!(
+            !s.cmdline.history().any(|l| l.kind == LineKind::Error),
+            "オプションとして解釈されたエラーが無い"
+        );
+        assert_eq!(inputs(&s), vec!["> LINE", "> 0,0", "> CIRCLE"]);
+    }
+
+    /// 何も実行していなければ選択は残る（選んでから MOVE を押す使い方）。
+    #[test]
+    fn keeps_the_selection_when_idle() {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "10,0");
+        s.handle_submission(Submission::Empty, &mut doc);
+        let id = doc.entities().ids().next().expect("線分がある");
+        s.selection.insert(id);
+
+        s.start_command_from_ui("MOVE", &mut doc);
+        assert_eq!(s.active_command(), Some("MOVE"));
+        assert!(s.wants_point(), "選択済みなので基点の入力へ進んでいる");
+        assert_eq!(s.selection.len(), 1);
+    }
+
+    /// 押した後の空 Enter で同じコマンドが再実行される。
+    #[test]
+    fn empty_enter_repeats_the_pressed_command() {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        s.start_command_from_ui("CIRCLE", &mut doc);
+        s.cancel();
+        s.handle_submission(Submission::Empty, &mut doc);
+        assert_eq!(s.active_command(), Some("CIRCLE"));
+    }
+
+    /// 即時実行のコマンドも同じ入口で動き、再実行の対象になる。
+    #[test]
+    fn immediate_commands_run_and_are_remembered() {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "10,0");
+        s.handle_submission(Submission::Empty, &mut doc);
+        assert_eq!(doc.entities().len(), 1);
+
+        s.start_command_from_ui("UNDO", &mut doc);
+        assert_eq!(doc.entities().len(), 0);
+        assert_eq!(s.cmdline.last_command(), Some("UNDO"));
+
+        s.start_command_from_ui("LAYER", &mut doc);
+        assert_eq!(s.take_ui_actions(), vec![UiAction::ToggleLayerPanel]);
+    }
+
+    /// パネルを開閉するだけのコマンド（LAYER / COMPONENTS）は、実行中のコマンドを中断しない。
+    /// 確定前の POLYLINE の点・打ちかけの文字・再実行の対象がそのまま残る。
+    #[test]
+    fn panel_commands_keep_the_running_command() {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        s.start_command_from_ui("POLYLINE", &mut doc);
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "10,0");
+        s.cmdline.set_input_for_test("20,");
+
+        for (name, action) in [
+            ("LAYER", UiAction::ToggleLayerPanel),
+            ("COMPONENTS", UiAction::ToggleComponentPanel),
+        ] {
+            s.start_command_from_ui(name, &mut doc);
+            assert_eq!(s.take_ui_actions(), vec![action], "{name}");
+            assert_eq!(s.active_command(), Some("POLYLINE"), "{name} で中断しない");
+            assert_eq!(s.last_point(), Some(Point2::new(10.0, 0.0)));
+            assert_eq!(s.cmdline.input(), "20,", "打ちかけも残る");
+        }
+        assert_eq!(
+            s.cmdline.last_command(),
+            Some("POLYLINE"),
+            "再実行の対象は変えない"
+        );
+        assert!(!s.cmdline.history().any(|l| l.text == "*取り消し*"));
+
+        s.cmdline.set_input_for_test("");
+        feed(&mut s, &mut doc, "10,10");
+        s.handle_submission(Submission::Empty, &mut doc);
+        assert_eq!(doc.entities().len(), 1, "ポリラインは最後まで描ける");
+    }
+
+    /// ツールとして動くもの（ZOOM）や図面を変える即時コマンド（UNDO）は今までどおり中断する。
+    #[test]
+    fn other_commands_still_interrupt() {
+        for name in ["ZOOM", "UNDO", "SAVE"] {
+            let mut s = Session::new();
+            let mut doc = Document::new();
+            s.start_command_from_ui("LINE", &mut doc);
+            feed(&mut s, &mut doc, "0,0");
+            s.start_command_from_ui(name, &mut doc);
+            assert_ne!(s.active_command(), Some("LINE"), "{name} は中断する");
+            assert!(
+                s.cmdline.history().any(|l| l.text == "*取り消し*"),
+                "{name}"
+            );
+        }
+    }
+
+    /// 中断しないものは「パネルを開閉するだけ」の 2 つだけ。
+    #[test]
+    fn only_panel_toggles_keep_the_running_command() {
+        let keeping: Vec<_> = tools::COMMANDS
+            .iter()
+            .filter(|c| tools::immediate(c.name).is_some_and(Immediate::keeps_running_command))
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(keeping, vec!["COMPONENTS", "LAYER"]);
+    }
+
+    /// 何も実行していないときに打ちかけの文字があれば捨てる。
+    #[test]
+    fn discards_half_typed_input() {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        s.cmdline.set_input_for_test("LI");
+        s.start_command_from_ui("CIRCLE", &mut doc);
+        assert_eq!(s.cmdline.input(), "");
+        assert_eq!(s.active_command(), Some("CIRCLE"));
     }
 }

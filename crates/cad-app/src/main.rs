@@ -17,6 +17,7 @@ mod jp_font;
 mod layer_panel;
 mod render;
 mod resolved;
+mod ribbon;
 mod selection;
 mod session;
 mod snap;
