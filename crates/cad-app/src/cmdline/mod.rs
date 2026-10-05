@@ -15,6 +15,9 @@
 //! （変換中は winit がキー入力イベントを送らないため、自然にそうなる）。
 
 pub mod coord;
+// 段階 B の配線（セッション・欄の UI）が入るまでは、本体から使われない関数がある。
+#[allow(dead_code)]
+pub mod dimension;
 pub mod dynamic;
 
 use std::collections::VecDeque;
