@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ymcad リボンのアイコン（GROUP）。作法は同じフォルダの README.md を参照。
+     白一色で描き、表示側で文字色・選択色に着色する。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+     fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <circle cx="8.16" cy="9.12" r="3.6"/>
+  <polygon points="11.04,18.72 19.2,18.72 15.12,11.04"/>
+  <polygon points="1.44,1.92 22.56,1.92 22.56,22.08 1.44,22.08" stroke-dasharray="2 1.5" stroke-linecap="butt"/>
+  <polygon points="0,0.48 2.88,0.48 2.88,3.36 0,3.36" fill="#ffffff" stroke="none"/>
+  <polygon points="21.12,0.48 24,0.48 24,3.36 21.12,3.36" fill="#ffffff" stroke="none"/>
+  <polygon points="21.12,20.64 24,20.64 24,23.52 21.12,23.52" fill="#ffffff" stroke="none"/>
+  <polygon points="0,20.64 2.88,20.64 2.88,23.52 0,23.52" fill="#ffffff" stroke="none"/>
+</svg>

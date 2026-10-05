@@ -13,6 +13,7 @@ use crate::input::{self, ViewAction};
 use crate::layer_panel::LayerPanel;
 use crate::render;
 use crate::resolved::ResolvedInstances;
+use crate::ribbon::Ribbon;
 use crate::selection::WindowMode;
 use crate::session::{Session, UiAction};
 use crate::snap::SnapState;
@@ -106,6 +107,8 @@ pub struct CadApp {
     layer_panel: LayerPanel,
     /// コンポーネントのパネル。
     component_panel: ComponentPanel,
+    /// リボン（画面上端のタブつきアイコンバー）。
+    ribbon: Ribbon,
     /// ファイル操作と未保存確認。
     files: FileOps,
     /// 終了してよいと判断した状態。
@@ -137,6 +140,7 @@ impl CadApp {
             resolved: ResolvedInstances::new(),
             layer_panel: LayerPanel::new(),
             component_panel: ComponentPanel::new(),
+            ribbon: Ribbon::new(),
             files: FileOps::new(),
             quitting: false,
             snapped: None,
@@ -362,6 +366,13 @@ impl CadApp {
             return;
         }
         self.session.handle_submission(submission, &mut self.doc);
+        self.drain_session_actions();
+    }
+
+    /// コマンドが出したビュー操作と UI 要求（パネルの開閉・ファイル操作）を処理する。
+    ///
+    /// コマンドラインからでもリボンからでも、始まったコマンドの後始末は同じ。
+    fn drain_session_actions(&mut self) {
         for action in self.session.take_view_actions() {
             self.apply_view_action(action);
         }
@@ -699,11 +710,29 @@ impl CadApp {
     }
 }
 
+impl CadApp {
+    /// 画面上端のリボンを描き、押されたコマンドを始める。
+    ///
+    /// **コマンド名を打つのと同じ扱い**（`Session::start_command_from_ui`）。
+    /// コマンドラインのキー処理（`begin_frame`）より前に呼ぶ。押した結果（実行中の
+    /// ツールや候補を出すか）を、同じフレームのコマンドラインの扱いに反映させるため。
+    fn ribbon_area(&mut self, ui: &mut egui::Ui) {
+        egui::Panel::top("ribbon").show(ui, |ui| {
+            let active = self.session.active_command();
+            if let Some(name) = self.ribbon.show(ui, active) {
+                self.session.start_command_from_ui(name, &mut self.doc);
+                self.drain_session_actions();
+            }
+        });
+    }
+}
+
 impl eframe::App for CadApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.handle_file_input(&ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
+        self.ribbon_area(ui);
 
         // ツール実行中と選択待ち中は候補を出さない。座標やオプションを打つ段階なので、
         // コマンド名の候補が出ると邪魔になる。

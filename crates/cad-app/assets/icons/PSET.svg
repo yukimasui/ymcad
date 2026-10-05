@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ymcad リボンのアイコン（PSET）。作法は同じフォルダの README.md を参照。
+     白一色で描き、表示側で文字色・選択色に着色する。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+     fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M1.44 12 L22.56 12" stroke-opacity="0.45"/>
+  <path d="M1.44 12 L14.4 12" stroke-width="3"/>
+  <path d="M1.44 16.8 L1.44 19.2" stroke-opacity="0.45"/>
+  <path d="M6.72 16.8 L6.72 19.2" stroke-opacity="0.45"/>
+  <path d="M12 16.8 L12 19.2" stroke-opacity="0.45"/>
+  <path d="M17.28 16.8 L17.28 19.2" stroke-opacity="0.45"/>
+  <path d="M22.56 16.8 L22.56 19.2" stroke-opacity="0.45"/>
+  <circle cx="14.4" cy="12" r="3.12" fill="#ffffff" stroke="none"/>
+</svg>

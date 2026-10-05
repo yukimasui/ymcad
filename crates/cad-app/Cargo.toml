@@ -12,6 +12,8 @@ cad-core.workspace = true
 eframe.workspace = true
 egui.workspace = true
 rfd.workspace = true
+# リボンのアイコン（SVG）を表示するため（ADR-0037）。cad-app だけの依存で、cad-core には入れない。
+egui_extras = { version = "0.36.2", default-features = false, features = ["svg"] }
 
 [lints.clippy]
 # f64 → f32 の縮小変換は viewport.rs の変換関数だけに許す。

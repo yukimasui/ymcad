@@ -633,6 +633,12 @@ impl CommandLine {
         &self.input
     }
 
+    /// 入力欄に打ちかけの文字を入れる（テスト用）。
+    #[cfg(test)]
+    pub fn set_input_for_test(&mut self, text: &str) {
+        text.clone_into(&mut self.input);
+    }
+
     /// コマンドラインの入力欄で変換中か（テスト用）。
     #[cfg(test)]
     pub fn is_composing(&self) -> bool {

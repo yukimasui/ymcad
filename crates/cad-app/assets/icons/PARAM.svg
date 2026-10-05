@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- ymcad リボンのアイコン（PARAM）。作法は同じフォルダの README.md を参照。
+     白一色で描き、表示側で文字色・選択色に着色する。 -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
+     fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M2.4 1.92 L2.4 14.88" stroke-opacity="0.45"/>
+  <path d="M21.6 1.92 L21.6 14.88" stroke-opacity="0.45"/>
+  <path d="M12 5.76 L5.76 5.76"/>
+  <polygon points="2.4,5.76 7.68,2.88 7.68,8.64" fill="#ffffff" stroke="none"/>
+  <path d="M12 5.76 L18.24 5.76"/>
+  <polygon points="21.6,5.76 16.32,8.64 16.32,2.88" fill="#ffffff" stroke="none"/>
+  <path d="M9.12 13.44 L14.88 20.64"/>
+  <path d="M14.88 13.44 L9.12 20.64"/>
+</svg>
