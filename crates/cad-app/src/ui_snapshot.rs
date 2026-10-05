@@ -136,3 +136,95 @@ fn ui_snapshot_dyn_composing() {
     h.run_steps(STEPS);
     shot(&mut h, "dyn_g_composing");
 }
+
+// ---- 寸法入力（Issue #20 段階 B） -------------------------------------------
+
+fn press(harness: &mut Harness<'_, CadApp>, key: egui::Key) {
+    harness.key_press(key);
+    harness.run_steps(STEPS);
+}
+
+fn click(harness: &mut Harness<'_, CadApp>, pos: egui::Pos2) {
+    harness.hover_at(pos);
+    harness.run_steps(1);
+    harness.event(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.event(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    harness.run_steps(STEPS);
+}
+
+/// 2 点目の位置。1 点目（キャンバス中央）の右上。
+const SECOND: egui::Pos2 = egui::pos2(820.0, 250.0);
+
+/// LINE の 1 点目をキャンバス中央に置き、カーソルを右上へ動かした状態。
+fn line_second_point() -> Harness<'static, CadApp> {
+    let mut h = harness();
+    hover(&mut h, CANVAS_CENTER);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, CANVAS_CENTER);
+    hover(&mut h, SECOND);
+    h
+}
+
+/// LINE の 2 点目 → 長さ・角度の 2 欄にライブ値が薄く出る。
+/// 続けて長さを打つ → 長さの欄に入る。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_dim_line_fields() {
+    let mut h = line_second_point();
+    shot(&mut h, "dim_a_line_live_values");
+
+    type_text(&mut h, "100");
+    shot(&mut h, "dim_b_length_typed");
+}
+
+/// 長さを固定（錠前）して角度を入力中 → ラバーバンドは長さ 100 に固定される。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_dim_length_locked() {
+    let mut h = line_second_point();
+    type_text(&mut h, "100");
+    press(&mut h, egui::Key::Tab);
+    type_text(&mut h, "30");
+    shot(&mut h, "dim_c_length_locked_angle_typing");
+}
+
+/// MOVE の 2 点目（目的点）でも 2 欄が出る。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_dim_move() {
+    let mut h = harness();
+    hover(&mut h, CANVAS_CENTER);
+    // 矩形を描き、MOVE でその角をクリックして選ぶ。
+    let corner = egui::pos2(560.0, 300.0);
+    type_text(&mut h, "REC");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, corner);
+    click(&mut h, egui::pos2(700.0, 400.0));
+    type_text(&mut h, "M");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, corner);
+    press(&mut h, egui::Key::Enter); // 選択を確定
+    click(&mut h, CANVAS_CENTER); // 基点
+    hover(&mut h, SECOND);
+    shot(&mut h, "dim_d_move_second_point");
+}
+
+/// 数値以外（`@`）を打つ → 欄の表示をやめ、通常の入力欄に戻る。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_dim_back_to_plain_input() {
+    let mut h = line_second_point();
+    type_text(&mut h, "@50,20");
+    shot(&mut h, "dim_e_non_number_plain_input");
+}

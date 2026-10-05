@@ -446,6 +446,27 @@ fn tab_without_suggestions_keeps_focus() {
     }
 }
 
+/// `↓` で候補を選んで Enter すると、選んだ候補が実行される。
+///
+/// 入力欄が `↑` `↓` を自分で受け取る（`event_filter` の `vertical_arrows`）ので、
+/// それを外すと egui がフォーカス移動に使い、動的入力オンでは `↓` で入力欄から
+/// フォーカスが外れて Enter が届かなくなる（`vertical_arrows: false` で落ちることを確認済み。
+/// オフ側はこの変更では落ちないが、同じ操作を両方で固定しておく）。
+#[test]
+fn arrow_keys_pick_a_suggestion_in_both_modes() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        type_text(&mut h, "L");
+        assert!(h.state().session.cmdline.suggestions_visible(), "前提");
+        press(&mut h, egui::Key::ArrowDown);
+        press(&mut h, egui::Key::ArrowDown);
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(input_lines(&h), vec!["> LAYER"], "動的入力 {on}");
+        assert!(h.state().layer_panel.is_open(), "動的入力 {on}");
+    }
+}
+
 // ---- パネルの入力欄（Issue #22） --------------------------------------------
 
 /// レイヤパネルを開き、「新規」の入力欄をクリックしてフォーカスを移す。
@@ -536,5 +557,431 @@ fn panel_text_field_keeps_enter_space_and_escape() {
             lines_before,
             "履歴に何も増えない（動的入力 {on}）"
         );
+
+        // パネルの編集を終えたら、キー入力はコマンドラインへ戻っている。
+        type_text(&mut h, "10,10");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(
+            h.state().session.last_point(),
+            Some(cad_core::geom::Point2::new(10.0, 10.0)),
+            "打った座標が LINE の始点に入る（動的入力 {on}）"
+        );
     }
+}
+
+/// LINE 実行中にパネルの入力欄で日本語を変換しても、コマンドラインは変換中にならない。
+///
+/// IME のイベントはフォーカスの持ち主へ届くもので、コマンドラインのものとは限らない。
+/// 持ち主を見ずに拾うと、カーソル横に `[変換中]` が出て位置が固定され、
+/// キーの扱いや候補の更新も止まっていた（実機の不具合報告）。
+#[test]
+fn ime_in_a_panel_field_does_not_make_the_command_line_compose() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        type_text(&mut h, "L");
+        press(&mut h, egui::Key::Enter);
+        assert!(h.state().session.has_active_tool(), "前提: LINE 実行中");
+
+        focus_layer_name_field(&mut h);
+        hover(&mut h, P1);
+        frame(&mut h, [preedit("にほん")]);
+        settle(&mut h);
+        assert!(
+            !h.state().session.cmdline.is_composing(),
+            "パネルの変換でコマンドラインが変換中にならない（動的入力 {on}）"
+        );
+        if on {
+            // カーソル横は固定されず、マウスに付いていく。
+            let before = input_rect(&h);
+            hover(&mut h, P2);
+            assert_ne!(input_rect(&h), before, "マウスに追従する");
+        }
+
+        frame(
+            &mut h,
+            [egui::Event::Ime(egui::ImeEvent::Commit("日本".to_owned()))],
+        );
+        settle(&mut h);
+        assert_eq!(
+            layer_name_field_value(&h),
+            "日本",
+            "パネルの欄に入る（動的入力 {on}）"
+        );
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            "",
+            "コマンドラインには入らない"
+        );
+
+        // キャンバスへ戻って点を打つと LINE に入る。
+        click(&mut h, P1);
+        type_text(&mut h, "@10,0");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(
+            lines(&h).len(),
+            1,
+            "クリックした始点から打った座標まで線が引かれる（動的入力 {on}）"
+        );
+    }
+}
+
+/// コマンドラインで変換中のままパネルへフォーカスを移しても、変換中が残らない。
+///
+/// 変換の確定・取り消しはパネル側へ届くので、残るとキーを奪わない・候補を
+/// 作り直さない・カーソル横が固定されたままになる。
+#[test]
+fn moving_focus_to_a_panel_ends_the_command_line_composition() {
+    let mut h = app_with_dynamic(true);
+    hover(&mut h, P1);
+    frame(&mut h, [preedit("に")]);
+    settle(&mut h);
+    assert!(h.state().session.cmdline.is_composing(), "前提: 変換中");
+
+    focus_layer_name_field(&mut h);
+    assert!(
+        !h.state().session.cmdline.is_composing(),
+        "フォーカスが移ったら変換中ではない"
+    );
+}
+
+// ---- ステータスバー -----------------------------------------------------------
+
+/// ステータスバーの `DYN` に乗せると指のカーソルになる（文字選択の I ビームにならない）。
+///
+/// ラベルは既定で文字を選べるので、クリックで切り替える部品なのに I ビームが出ていた
+/// （ユーザーの実機確認）。
+#[test]
+fn hovering_dyn_in_the_status_bar_shows_a_pointing_hand() {
+    use egui_kittest::kittest::Queryable as _;
+
+    let mut h = app_with_dynamic(true);
+    let target = h.get_by_label("DYN").rect().center();
+    // カーソルの形は毎フレーム決め直されるので、落ち着いた後の最後のフレームの出力を見る。
+    hover(&mut h, target);
+    assert_eq!(
+        h.output().platform_output.cursor_icon,
+        egui::CursorIcon::PointingHand
+    );
+
+    // 選択を切ってもクリックで切り替わる。
+    click(&mut h, target);
+    assert!(
+        !h.state().session.cmdline.is_dynamic(),
+        "クリックでオフになる"
+    );
+}
+
+// ---- 寸法入力（Issue #20 段階 B） -------------------------------------------
+
+use crate::cmdline::dimension::{DimValues, Field};
+use cad_core::geom::tolerance::eq_len;
+use cad_core::geom::{Line, Point2};
+
+fn model(h: &Harness<'_, CadApp>, pos: egui::Pos2) -> Point2 {
+    h.state().viewport.screen_to_model(pos)
+}
+
+fn lines(h: &Harness<'_, CadApp>) -> Vec<Line> {
+    h.state()
+        .doc
+        .entities()
+        .iter()
+        .filter_map(|(_, e)| match &e.geom {
+            cad_core::Geometry::Line(l) => Some(*l),
+            _ => None,
+        })
+        .collect()
+}
+
+fn assert_point(actual: Point2, expected: Point2, what: &str) {
+    assert!(
+        eq_len(actual.x, expected.x) && eq_len(actual.y, expected.y),
+        "{what}: {actual:?} != {expected:?}"
+    );
+}
+
+/// LINE を始めて P1 に 1 点目を置き、カーソルを P2 へ動かした状態。基点（モデル座標）を返す。
+fn line_with_first_point(on: bool) -> (Harness<'static, CadApp>, Point2) {
+    let mut h = app_with_dynamic(on);
+    hover(&mut h, P1);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, P1);
+    hover(&mut h, P2);
+    let base = model(&h, P1);
+    assert_eq!(h.state().session.dimension_base(), Some(base), "前提: 基点");
+    (h, base)
+}
+
+/// `100` → Tab → `90` → Enter で、基点の真上に長さ 100 の線が引かれる。
+/// 点が入ったら固定は外れ、長さの欄へ戻る。
+#[test]
+fn length_tab_angle_enter_draws_the_given_segment() {
+    let (mut h, base) = line_with_first_point(true);
+    type_text(&mut h, "100");
+    assert_eq!(h.state().session.cmdline.dimension_field(), Field::Length);
+    press(&mut h, egui::Key::Tab);
+    assert_eq!(
+        h.state().session.cmdline.dimension_field(),
+        Field::Angle,
+        "Tab で角度の欄へ"
+    );
+    assert_eq!(
+        h.state().session.cmdline.input(),
+        "",
+        "固定した値は欄へ移る"
+    );
+    assert_eq!(
+        h.state().session.cmdline.dimension_locks(),
+        Some(DimValues {
+            length: Some(100.0),
+            angle_deg: None
+        })
+    );
+    type_text(&mut h, "90");
+    assert_eq!(h.state().session.cmdline.input(), "90", "Tab の後も打てる");
+    press(&mut h, egui::Key::Enter);
+
+    let l = lines(&h);
+    assert_eq!(l.len(), 1, "線分が 1 本");
+    assert_point(l[0].a, base, "始点");
+    assert_point(
+        l[0].b,
+        Point2::new(base.x, base.y + 100.0),
+        "終点は真上 100",
+    );
+    assert!(h.state().session.has_active_tool(), "LINE は続く");
+    assert_eq!(
+        h.state().session.cmdline.dimension_locks(),
+        None,
+        "次の点へ進んだら固定は外れる"
+    );
+    assert_eq!(h.state().session.cmdline.dimension_field(), Field::Length);
+}
+
+/// 長さだけ固定すると、ラバーバンドの先もクリックした点も、カーソルの向きに固定の長さ。
+#[test]
+fn a_length_lock_applies_to_the_rubber_band_and_the_click() {
+    let (mut h, base) = line_with_first_point(true);
+    type_text(&mut h, "100");
+    press(&mut h, egui::Key::Tab);
+    hover(&mut h, P2);
+
+    let toward = model(&h, P2) - base;
+    let expected = base + toward.normalized().expect("前提: P1 と P2 は離れている") * 100.0;
+    let cursor = h.state().cursor_model.expect("カーソルはキャンバスの上");
+    assert_point(cursor, expected, "ラバーバンドの先");
+
+    click(&mut h, P2);
+    let l = lines(&h);
+    assert_eq!(l.len(), 1);
+    assert_point(l[0].b, expected, "クリックで入った点");
+}
+
+/// 角度を固定すると、クリックした点はその角度の半直線へ射影される。
+#[test]
+fn an_angle_lock_projects_the_click_onto_the_ray() {
+    let (mut h, base) = line_with_first_point(true);
+    press(&mut h, egui::Key::Tab); // 空の Tab は固定せずに角度の欄へ
+    assert_eq!(h.state().session.cmdline.dimension_field(), Field::Angle);
+    assert_eq!(h.state().session.cmdline.dimension_locks(), None);
+    type_text(&mut h, "0");
+    press(&mut h, egui::Key::Tab);
+    hover(&mut h, P2);
+    let cursor = h.state().cursor_model.expect("カーソルはキャンバスの上");
+    assert_point(
+        cursor,
+        Point2::new(model(&h, P2).x, base.y),
+        "ラバーバンドは水平",
+    );
+
+    click(&mut h, P2);
+    let l = lines(&h);
+    assert_eq!(l.len(), 1);
+    assert_point(l[0].b, Point2::new(model(&h, P2).x, base.y), "0° の線上");
+}
+
+/// 固定していても、座標を打てば座標として入る（欄の表示をやめて従来どおり）。
+#[test]
+fn coordinates_override_the_fields() {
+    let (mut h, base) = line_with_first_point(true);
+    type_text(&mut h, "100");
+    press(&mut h, egui::Key::Tab);
+    type_text(&mut h, "@0,50");
+    assert_eq!(
+        h.state().session.cmdline.dimension_locks(),
+        None,
+        "数値以外を打っている間は固定を効かせない"
+    );
+    press(&mut h, egui::Key::Enter);
+    let l = lines(&h);
+    assert_eq!(l.len(), 1);
+    assert_point(l[0].b, Point2::new(base.x, base.y + 50.0), "相対座標");
+}
+
+/// Esc の 1 回目は固定と入力の解除、2 回目で中断。
+#[test]
+fn escape_releases_the_locks_before_cancelling() {
+    let (mut h, _) = line_with_first_point(true);
+    type_text(&mut h, "100");
+    press(&mut h, egui::Key::Tab);
+    type_text(&mut h, "3");
+    assert!(
+        h.state().session.cmdline.dimension_locks().is_some(),
+        "前提"
+    );
+
+    press(&mut h, egui::Key::Escape);
+    assert_eq!(h.state().session.cmdline.dimension_locks(), None, "解除");
+    assert_eq!(h.state().session.cmdline.input(), "", "入力も消える");
+    assert_eq!(h.state().session.cmdline.dimension_field(), Field::Length);
+    assert!(h.state().session.has_active_tool(), "まだ中断しない");
+
+    press(&mut h, egui::Key::Escape);
+    assert!(!h.state().session.has_active_tool(), "2 回目で中断");
+    assert!(lines(&h).is_empty());
+}
+
+/// 動的入力オフでも直接距離入力が効く（欄は出ない）。オンで Tab を使わずに
+/// 長さだけ打って Enter しても同じ結果になる。
+#[test]
+fn direct_distance_works_in_both_modes() {
+    for on in [false, true] {
+        let (mut h, base) = line_with_first_point(on);
+        type_text(&mut h, "100");
+        // 向きは確定した時点のカーソルから決まる。画面下の履歴が伸びると作図領域が
+        // 縮んで P2 のモデル座標が変わるので、確定前に取っておく。
+        let cursor = h.state().cursor_model.expect("カーソルはキャンバスの上");
+        press(&mut h, egui::Key::Enter);
+        let toward = cursor - base;
+        let expected = base + toward.normalized().expect("前提") * 100.0;
+        let l = lines(&h);
+        assert_eq!(l.len(), 1, "動的入力 {on}");
+        assert_point(l[0].b, expected, &format!("動的入力 {on}"));
+    }
+}
+
+/// 候補が出ているときの Tab は補完、寸法入力中の Tab は欄の巡回。
+#[test]
+fn tab_completes_suggestions_but_cycles_dimension_fields() {
+    let mut h = app_with_dynamic(true);
+    hover(&mut h, P1);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Tab);
+    assert_eq!(h.state().session.cmdline.input(), "LINE", "補完");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, P1);
+    hover(&mut h, P2);
+
+    type_text(&mut h, "100");
+    press(&mut h, egui::Key::Tab);
+    assert_eq!(h.state().session.cmdline.input(), "", "補完ではなく固定");
+    assert_eq!(h.state().session.cmdline.dimension_field(), Field::Angle);
+    press(&mut h, egui::Key::Tab);
+    assert_eq!(
+        h.state().session.cmdline.dimension_field(),
+        Field::Length,
+        "巡回"
+    );
+    type_text(&mut h, "7");
+    assert_eq!(h.state().session.cmdline.input(), "7", "フォーカスは残る");
+}
+
+/// 角度の欄で変換が始まっても、入力欄が 1px も動かない。
+///
+/// 変換中はバッファを分類できない（ADR-0002）。分類をやめて通常の見た目に戻すと、
+/// 入力欄が角度の欄から左端へ跳び、候補ウィンドウも跳ねる。
+#[test]
+fn input_does_not_move_when_composition_starts_in_a_dimension_field() {
+    let (mut h, _) = line_with_first_point(true);
+    press(&mut h, egui::Key::Tab);
+    let before = input_rect(&h);
+
+    frame(&mut h, [preedit("に")]);
+    assert_eq!(input_rect(&h), before, "変換開始のフレーム");
+    settle(&mut h);
+    assert_eq!(input_rect(&h), before, "変換中");
+}
+
+/// COPY は基点が変わらないまま次の目的点へ進む。点が入ったら固定は外れる
+/// （基点の変化だけを見ていると、前の複写で固定した長さが次の複写に残る）。
+#[test]
+fn copy_releases_the_locks_after_each_copy() {
+    let mut h = app_with_dynamic(true);
+    hover(&mut h, P1);
+    for text in ["L", "0,0", "10,0"] {
+        type_text(&mut h, text);
+        press(&mut h, egui::Key::Enter);
+    }
+    press(&mut h, egui::Key::Enter); // LINE を終える
+    let id = h.state().doc.entities().ids().next().expect("前提: 線分");
+    h.state_mut().session.selection.insert(id);
+
+    type_text(&mut h, "CO");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, P1);
+    assert!(h.state().session.dimension_base().is_some(), "前提: 基点");
+    type_text(&mut h, "100");
+    press(&mut h, egui::Key::Tab);
+    click(&mut h, P2);
+    assert_eq!(lines(&h).len(), 2, "1 つ複写された");
+    assert!(h.state().session.has_active_tool(), "COPY は続く");
+    assert_eq!(
+        h.state().session.cmdline.dimension_locks(),
+        None,
+        "複写したら固定は外れる"
+    );
+}
+
+/// 角度だけ固定してその反対側をクリックすると、点は入らずエラーが出る
+/// （Enter と同じ扱い）。ラバーバンドは基点に縮む。同じ側なら入る。
+#[test]
+fn a_click_behind_an_angle_lock_is_refused() {
+    let (mut h, base) = line_with_first_point(true);
+    press(&mut h, egui::Key::Tab);
+    type_text(&mut h, "0");
+    press(&mut h, egui::Key::Tab); // 0°（右向き）に固定
+
+    // 基点の左側（反対側）。
+    let behind = egui::pos2(P1.x - 150.0, P1.y + 40.0);
+    hover(&mut h, behind);
+    assert_eq!(
+        h.state().cursor_model,
+        Some(base),
+        "ラバーバンドは基点に縮む"
+    );
+    let errors_before = h
+        .state()
+        .session
+        .cmdline
+        .history()
+        .filter(|l| l.kind == LineKind::Error)
+        .count();
+    click(&mut h, behind);
+    assert!(lines(&h).is_empty(), "点は入らない");
+    assert!(h.state().session.has_active_tool(), "LINE は続く");
+    let errors: Vec<String> = h
+        .state()
+        .session
+        .cmdline
+        .history()
+        .filter(|l| l.kind == LineKind::Error)
+        .map(|l| l.text.clone())
+        .collect();
+    assert_eq!(errors.len(), errors_before + 1, "エラー行が 1 つ出る");
+    assert!(
+        errors.last().is_some_and(|e| e.contains("反対側")),
+        "{errors:?}"
+    );
+    assert!(
+        h.state().session.cmdline.dimension_locks().is_some(),
+        "固定は残る（打ち直さずに同じ側でクリックできる）"
+    );
+
+    // 同じ側（右）なら入る。
+    click(&mut h, P2);
+    let l = lines(&h);
+    assert_eq!(l.len(), 1, "同じ側なら入る");
+    assert_point(l[0].b, Point2::new(model(&h, P2).x, base.y), "0° の線上");
 }

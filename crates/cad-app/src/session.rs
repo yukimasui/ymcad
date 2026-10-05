@@ -8,7 +8,7 @@ use cad_core::command::ExitDefinitionEdit;
 use cad_core::geom::{Aabb, Point2};
 use cad_core::{Document, Geometry};
 
-use crate::cmdline::{coord, CommandLine, LineKind, Submission};
+use crate::cmdline::{coord, dimension, CommandLine, LineKind, Submission};
 use crate::editing::EditSession;
 use crate::input::ViewAction;
 use crate::selection::{self, Selection, WindowMode};
@@ -53,6 +53,11 @@ pub struct Session {
     ui_actions: Vec<UiAction>,
     /// コマンド間で覚える設定（FILLET の半径など）。
     settings: ToolSettings,
+    /// キャンバス上のカーソル位置（モデル座標、スナップ後・寸法の固定をかける前）。
+    ///
+    /// 直接距離入力と寸法入力の `Enter` で、向きや欠けた値をカーソルから決めるのに使う。
+    /// カーソルが作図領域の外にあるときは `None`。
+    cursor: Option<Point2>,
 }
 
 impl Default for Session {
@@ -77,6 +82,7 @@ impl Session {
             view_actions: Vec::new(),
             ui_actions: Vec::new(),
             settings: ToolSettings::default(),
+            cursor: None,
         }
     }
 
@@ -188,6 +194,48 @@ impl Session {
         self.tool.as_ref().and_then(|t| t.last_point())
     }
 
+    /// 寸法入力（長さ・角度、直接距離入力）の基点。実行中のツールが参加していて
+    /// 点を待っているときだけ `Some`（[`Tool::dimension_base`]）。
+    #[must_use]
+    pub fn dimension_base(&self) -> Option<Point2> {
+        if self.awaiting_selection {
+            return None;
+        }
+        self.tool.as_ref().and_then(|t| t.dimension_base())
+    }
+
+    /// キャンバス上のカーソル位置（スナップ後・寸法の固定をかける前）を伝える。
+    /// 作図領域の外なら `None`。毎フレーム呼ぶ。
+    pub fn set_cursor(&mut self, cursor: Option<Point2>) {
+        self.cursor = cursor;
+    }
+
+    /// 寸法入力で固定した値（錠前）で、クリックした点を拘束する。
+    ///
+    /// ラバーバンド（[`Self::rubber_band`]）と同じ `dimension::constrain` を通すので、
+    /// 見えている線の先とクリックで入る点が一致する。
+    /// 参加していない・欄が出ていない・固定が無いときはそのまま返す。
+    ///
+    /// # Errors
+    ///
+    /// 固定値からは点が決まらないとき（角度だけ固定してカーソルが反対側にある等）。
+    /// 呼び出し側は点を入れずにエラーを出す（`Enter` と同じ扱い）。
+    pub fn constrain(&self, p: Point2) -> Result<Point2, dimension::DimError> {
+        match (self.dimension_base(), self.cmdline.dimension_locks()) {
+            (Some(base), Some(locks)) => dimension::constrain(base, p, locks),
+            _ => Ok(p),
+        }
+    }
+
+    /// ラバーバンドの先。点が決まらないときは基点に縮める（[`dimension::rubber_band`]）。
+    #[must_use]
+    pub fn rubber_band(&self, p: Point2) -> Point2 {
+        match (self.dimension_base(), self.cmdline.dimension_locks()) {
+            (Some(base), Some(locks)) => dimension::rubber_band(base, p, locks),
+            _ => p,
+        }
+    }
+
     fn ctx<'a>(&'a self, doc: &'a Document) -> ToolCtx<'a> {
         ToolCtx {
             doc,
@@ -223,6 +271,26 @@ impl Session {
                 self.cmdline.push_line(LineKind::Input, format!("> {text}"));
                 self.handle_text(&text, doc);
             }
+            Submission::Dimension(values) => {
+                self.cmdline.push_line(
+                    LineKind::Input,
+                    format!("> {}", dimension::describe(values)),
+                );
+                self.handle_dimension(values, doc);
+            }
+        }
+    }
+
+    /// 寸法入力の欄で確定された値を点にしてツールへ送る。
+    fn handle_dimension(&mut self, values: dimension::DimValues, doc: &mut Document) {
+        let Some(base) = self.dimension_base() else {
+            // 確定までの間にツールが終わった（同じフレームのクリックなど）。
+            self.cmdline.error("いまは長さ・角度で点を指定できません");
+            return;
+        };
+        match dimension::resolve(base, self.cursor, values) {
+            Ok(p) => self.feed_tool(StepInput::Point(p), doc),
+            Err(e) => self.cmdline.error(e.message()),
         }
     }
 
@@ -236,6 +304,7 @@ impl Session {
         self.selection.clear();
         self.crossing_rects.clear();
         self.cmdline.clear_input();
+        self.cmdline.reset_dimension();
     }
 
     /// 空のまま確定された場合。
@@ -274,6 +343,16 @@ impl Session {
             // `データー` の長音が `-` に直されて壊れる。
             if self.wants_raw_text() {
                 self.feed_tool(StepInput::Word(text.to_owned()), doc);
+                return;
+            }
+            // 直接距離入力。寸法入力に参加しているツールで数値 1 つだけなら、
+            // 基点からカーソル方向へその長さの点にする。動的入力のオン/オフに関係なく効く。
+            // 参加していないツール（ROTATE の角度など）では数値の意味を変えない。
+            if let (Some(base), Some(length)) = (self.dimension_base(), coord::parse_number(text)) {
+                match dimension::direct_distance(base, self.cursor, length) {
+                    Ok(p) => self.feed_tool(StepInput::Point(p), doc),
+                    Err(e) => self.cmdline.error(e.message()),
+                }
                 return;
             }
             match Self::interpret(text, self.last_point()) {
@@ -391,6 +470,9 @@ impl Session {
         let Some(mut tool) = self.tool.take() else {
             return;
         };
+        // 点を受け取ったら寸法入力の固定を外す（次の点へ進んだ）。
+        // 断られたら外さない（同じ固定のまま打ち直せるように）。
+        let is_point = matches!(input, StepInput::Point(_));
 
         let outcome = {
             let ctx = ToolCtx {
@@ -405,6 +487,9 @@ impl Session {
         };
 
         let name = tool.name();
+        if is_point && !matches!(outcome, StepOutcome::Reject(_)) {
+            self.cmdline.reset_dimension();
+        }
         match outcome {
             StepOutcome::Continue => self.tool = Some(tool),
             StepOutcome::Reject(msg) => {
@@ -3271,5 +3356,273 @@ mod flow_tests {
         feed(&mut s, &mut doc, "BI");
         click(&mut s, &mut doc, 5.0, 0.0);
         assert!(s.cmdline.history().any(|l| l.text.contains("EDITCOMP")));
+    }
+}
+
+#[cfg(test)]
+mod dimension_tests {
+    //! 寸法入力への参加と直接距離入力（Issue #20 段階 B、ADR-0036）。
+    //!
+    //! 参加しているツール（LINE / PLINE の 2 点目以降、MOVE / COPY / STRETCH の目的点）
+    //! でだけ数値 1 つが「カーソル方向の長さ」になり、それ以外では数値の意味が変わらないこと。
+
+    use super::*;
+    use cad_core::geom::tolerance::eq_len;
+
+    fn feed(s: &mut Session, doc: &mut Document, text: &str) {
+        s.handle_submission(Submission::Text(text.to_owned()), doc);
+    }
+
+    fn p(x: f64, y: f64) -> Point2 {
+        Point2::new(x, y)
+    }
+
+    fn assert_point(actual: Point2, expected: Point2) {
+        assert!(
+            eq_len(actual.x, expected.x) && eq_len(actual.y, expected.y),
+            "{actual:?} != {expected:?}"
+        );
+    }
+
+    fn lines(doc: &Document) -> Vec<cad_core::geom::Line> {
+        doc.entities()
+            .iter()
+            .filter_map(|(_, e)| match &e.geom {
+                Geometry::Line(l) => Some(*l),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn last_error(s: &Session) -> Option<String> {
+        s.cmdline
+            .history()
+            .filter(|l| l.kind == LineKind::Error)
+            .last()
+            .map(|l| l.text.clone())
+    }
+
+    /// LINE を始めて 1 点目を (0,0) に置いた状態。
+    fn line_from_origin() -> (Session, Document) {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "0,0");
+        (s, doc)
+    }
+
+    #[test]
+    fn only_the_declared_tools_participate() {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        feed(&mut s, &mut doc, "L");
+        assert_eq!(s.dimension_base(), None, "LINE の 1 点目は基点が無い");
+        feed(&mut s, &mut doc, "3,4");
+        assert_eq!(s.dimension_base(), Some(p(3.0, 4.0)));
+
+        for (cmd, first) in [("PL", "1,1"), ("C", "1,1"), ("A", "1,1"), ("REC", "1,1")] {
+            s.cancel();
+            feed(&mut s, &mut doc, cmd);
+            feed(&mut s, &mut doc, first);
+            let expected = (cmd == "PL").then(|| p(1.0, 1.0));
+            assert_eq!(s.dimension_base(), expected, "{cmd}");
+        }
+    }
+
+    #[test]
+    fn a_number_in_line_is_a_length_toward_the_cursor() {
+        let (mut s, mut doc) = line_from_origin();
+        s.set_cursor(Some(p(0.0, 30.0)));
+        feed(&mut s, &mut doc, "100");
+        let l = lines(&doc);
+        assert_eq!(l.len(), 1, "線分ができる: {:?}", last_error(&s));
+        assert_point(l[0].a, p(0.0, 0.0));
+        assert_point(l[0].b, p(0.0, 100.0));
+
+        // 次の点は新しい基点から。カーソルの距離は関係なく向きだけを使う。
+        s.set_cursor(Some(p(-3.0, 104.0)));
+        feed(&mut s, &mut doc, "１０"); // 全角
+        let l = lines(&doc);
+        assert_eq!(l.len(), 2);
+        assert_point(l[1].a, p(0.0, 100.0));
+        assert_point(l[1].b, p(-6.0, 108.0));
+    }
+
+    #[test]
+    fn direct_distance_without_a_direction_is_an_error() {
+        for cursor in [None, Some(p(0.0, 0.0))] {
+            let (mut s, mut doc) = line_from_origin();
+            s.set_cursor(cursor);
+            feed(&mut s, &mut doc, "100");
+            assert!(lines(&doc).is_empty(), "カーソル {cursor:?}");
+            assert!(s.has_active_tool(), "コマンドは続く");
+            assert!(
+                last_error(&s).is_some_and(|e| e.contains("向きが決まりません")),
+                "{:?}",
+                last_error(&s)
+            );
+        }
+    }
+
+    #[test]
+    fn zero_and_negative_lengths_are_rejected() {
+        for text in ["0", "-5", "0.0"] {
+            let (mut s, mut doc) = line_from_origin();
+            s.set_cursor(Some(p(10.0, 0.0)));
+            feed(&mut s, &mut doc, text);
+            assert!(lines(&doc).is_empty(), "{text}");
+            assert!(
+                last_error(&s).is_some_and(|e| e.contains("長さ")),
+                "{text}: {:?}",
+                last_error(&s)
+            );
+        }
+    }
+
+    /// 座標の書式とオプションは従来どおり。何も付けなければ絶対座標。
+    #[test]
+    fn coordinates_and_options_keep_their_meaning() {
+        let (mut s, mut doc) = line_from_origin();
+        s.set_cursor(Some(p(0.0, 30.0)));
+        feed(&mut s, &mut doc, "100,50");
+        feed(&mut s, &mut doc, "@10,0");
+        feed(&mut s, &mut doc, "@10<90");
+        feed(&mut s, &mut doc, "C");
+        let l = lines(&doc);
+        assert_eq!(l.len(), 4, "{:?}", last_error(&s));
+        assert_point(l[0].b, p(100.0, 50.0));
+        assert_point(l[1].b, p(110.0, 50.0));
+        assert_point(l[2].b, p(110.0, 60.0));
+        assert_point(l[3].b, p(0.0, 0.0));
+        assert!(!s.has_active_tool(), "C で閉じて終わる");
+    }
+
+    #[test]
+    fn polyline_takes_a_length_after_the_first_point() {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        feed(&mut s, &mut doc, "PL");
+        feed(&mut s, &mut doc, "0,0");
+        s.set_cursor(Some(p(5.0, 0.0)));
+        feed(&mut s, &mut doc, "20");
+        assert_eq!(s.last_point(), Some(p(20.0, 0.0)));
+    }
+
+    /// 図形を 1 つ作って選択した状態。
+    fn selected_line() -> (Session, Document, cad_core::EntityId) {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        feed(&mut s, &mut doc, "L");
+        feed(&mut s, &mut doc, "10,0");
+        feed(&mut s, &mut doc, "20,0");
+        s.handle_submission(Submission::Empty, &mut doc);
+        let id = doc.entities().ids().next().expect("あるはず");
+        s.selection.insert(id);
+        (s, doc, id)
+    }
+
+    fn line_of(doc: &Document, id: cad_core::EntityId) -> cad_core::geom::Line {
+        match &doc.entities().get(id).expect("あるはず").geom {
+            Geometry::Line(l) => *l,
+            other => panic!("線分のはず: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn move_copy_and_stretch_take_a_length_for_the_second_point() {
+        for cmd in ["M", "CO", "S"] {
+            let (mut s, mut doc, id) = selected_line();
+            feed(&mut s, &mut doc, cmd);
+            assert_eq!(s.dimension_base(), None, "{cmd}: 基点の前は参加しない");
+            feed(&mut s, &mut doc, "0,0");
+            assert_eq!(s.dimension_base(), Some(p(0.0, 0.0)), "{cmd}");
+            s.set_cursor(Some(p(0.0, 3.0)));
+            feed(&mut s, &mut doc, "5");
+            let moved = doc
+                .entities()
+                .iter()
+                .filter_map(|(_, e)| match &e.geom {
+                    Geometry::Line(l) => Some(*l),
+                    _ => None,
+                })
+                .any(|l| eq_len(l.a.y, 5.0) && eq_len(l.b.y, 5.0));
+            assert!(moved, "{cmd}: 真上に 5 ずれた線がある {:?}", last_error(&s));
+            if cmd == "CO" {
+                assert_point(line_of(&doc, id).a, p(10.0, 0.0));
+            }
+        }
+    }
+
+    /// ROTATE の数値は角度のまま（カーソル方向の長さにならない）。
+    #[test]
+    fn rotate_keeps_numbers_as_angles() {
+        let (mut s, mut doc, id) = selected_line();
+        feed(&mut s, &mut doc, "RO");
+        feed(&mut s, &mut doc, "0,0");
+        assert_eq!(s.dimension_base(), None, "ROTATE は参加しない");
+        s.set_cursor(Some(p(100.0, 0.0)));
+        feed(&mut s, &mut doc, "90");
+        let l = line_of(&doc, id);
+        assert_point(l.a, p(0.0, 10.0));
+        assert_point(l.b, p(0.0, 20.0));
+    }
+
+    /// SCALE の数値は倍率のまま。
+    #[test]
+    fn scale_keeps_numbers_as_factors() {
+        let (mut s, mut doc, id) = selected_line();
+        feed(&mut s, &mut doc, "SC");
+        feed(&mut s, &mut doc, "0,0");
+        assert_eq!(s.dimension_base(), None, "SCALE は参加しない");
+        s.set_cursor(Some(p(0.0, 100.0)));
+        feed(&mut s, &mut doc, "2");
+        let l = line_of(&doc, id);
+        assert_point(l.a, p(20.0, 0.0));
+        assert_point(l.b, p(40.0, 0.0));
+    }
+
+    /// CIRCLE の数値は半径のまま。
+    #[test]
+    fn circle_keeps_numbers_as_radii() {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        feed(&mut s, &mut doc, "C");
+        feed(&mut s, &mut doc, "5,5");
+        s.set_cursor(Some(p(100.0, 5.0)));
+        feed(&mut s, &mut doc, "3");
+        let circle = doc
+            .entities()
+            .iter()
+            .find_map(|(_, e)| match &e.geom {
+                Geometry::Circle(c) => Some(*c),
+                _ => None,
+            })
+            .expect("円ができる");
+        assert!(eq_len(circle.radius, 3.0), "半径 {}", circle.radius);
+        assert_point(circle.center, p(5.0, 5.0));
+    }
+
+    /// 参加していないツールでは数値は従来どおり Number として届く
+    /// （LINE の 1 点目は従来どおり「座標を指定してください」）。
+    #[test]
+    fn non_participating_steps_see_numbers_as_before() {
+        let mut s = Session::new();
+        let mut doc = Document::new();
+        feed(&mut s, &mut doc, "L");
+        s.set_cursor(Some(p(10.0, 10.0)));
+        feed(&mut s, &mut doc, "100");
+        assert_eq!(s.last_point(), None, "点は入らない");
+        assert!(
+            last_error(&s).is_some_and(|e| e.contains("座標を指定")),
+            "{:?}",
+            last_error(&s)
+        );
+
+        s.cancel();
+        feed(&mut s, &mut doc, "REC");
+        feed(&mut s, &mut doc, "0,0");
+        feed(&mut s, &mut doc, "100");
+        assert!(doc.entities().is_empty(), "RECTANGLE は数値を点にしない");
+        assert!(last_error(&s).is_some_and(|e| e.contains("点を指定")));
     }
 }

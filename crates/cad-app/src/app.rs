@@ -221,8 +221,15 @@ impl CadApp {
                     .monospace()
                     .color(ui.visuals().weak_text_color())
             };
+            // ラベルは既定で文字を選べるので、そのままだとホバーで I ビームになる。
+            // クリックで切り替える部品なので、選択を切って指のカーソルにする。
             let dyn_label = ui
-                .add(egui::Label::new(dyn_text).sense(egui::Sense::click()))
+                .add(
+                    egui::Label::new(dyn_text)
+                        .selectable(false)
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text("動的入力（カーソル横の入力欄）の ON/OFF  F12");
             if dyn_label.clicked() {
                 self.toggle_dynamic_input();
@@ -271,9 +278,18 @@ impl CadApp {
         // キャンバスでのクリックでツールが進んでいるかもしれないので、ここで取り直す。
         let prompt = self.session.prompt();
         let tool_active = self.session.has_active_tool();
-        self.session
-            .cmdline
-            .show_floating(ctx, &prompt, self.viewport.rect(), tool_active);
+        // 寸法入力の欄のライブ値。固定をかけた後のカーソル（＝ラバーバンドの先）から測る。
+        let dimension = self.session.dimension_base().map(|base| {
+            self.cursor_model
+                .map(|c| crate::cmdline::dimension::live(base, c))
+        });
+        self.session.cmdline.show_floating(
+            ctx,
+            &prompt,
+            self.viewport.rect(),
+            tool_active,
+            dimension,
+        );
         let submission = self.session.cmdline.finish_frame();
         if submission != Submission::None {
             // キャンバスはもう描き終えているので、確定の結果（ラバーバンドや新しい図形）は
@@ -367,7 +383,12 @@ impl CadApp {
         };
 
         // 吸着していればそれを実際のカーソル位置として扱う。
-        self.cursor_model = self.snapped.map(|s| s.point).or(raw_cursor);
+        let cursor = self.snapped.map(|s| s.point).or(raw_cursor);
+        // 直接距離入力と寸法入力の向きはこの位置（固定をかける前）から決める。
+        self.session.set_cursor(cursor);
+        // 寸法入力で固定した値（錠前）をかける。ラバーバンドはこの位置で描き、
+        // クリックも同じ計算（`Session::constrain`）を通す（`place_point`）。
+        self.cursor_model = cursor.map(|c| self.session.rubber_band(c));
 
         let active_drag = self.handle_pointer(&response, ui);
 
@@ -509,8 +530,15 @@ impl CadApp {
         let model = self
             .snapped
             .map_or_else(|| self.viewport.screen_to_model(pos), |s| s.point);
-        self.session
-            .handle_click(model, shift, pick_tolerance, &mut self.doc);
+        // 寸法入力で固定した値（錠前）をかける。ラバーバンド（`canvas`）と同じ計算を通すので、
+        // 見えている線の先とクリックで入る点が一致する。固定値から点が決まらない位置
+        // （角度だけ固定してその反対側など）では、`Enter` と同じく点を入れずにエラーにする。
+        match self.session.constrain(model) {
+            Ok(model) => self
+                .session
+                .handle_click(model, shift, pick_tolerance, &mut self.doc),
+            Err(e) => self.session.cmdline.error(e.message()),
+        }
         self.snap.release();
     }
 }
@@ -628,6 +656,9 @@ impl eframe::App for CadApp {
         // ツール実行中と選択待ち中は候補を出さない。座標やオプションを打つ段階なので、
         // コマンド名の候補が出ると邪魔になる。
         let allow_suggestions = !self.session.has_active_tool();
+        // 寸法入力の基点。Tab / Esc / Enter の扱いがこれで変わるので、キーを取る前に渡す。
+        let dimension_base = self.session.dimension_base();
+        self.session.cmdline.set_dimension_base(dimension_base);
         self.session.cmdline.begin_frame(&ctx, allow_suggestions);
         egui::Panel::bottom("cmdline").show(ui, |ui| self.command_area(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
