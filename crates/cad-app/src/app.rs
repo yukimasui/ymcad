@@ -197,18 +197,31 @@ impl CadApp {
             ui.separator();
             ui.monospace(format!("選択 {}", self.session.selection.len()));
             ui.separator();
-            if self.snap.is_enabled() {
+            let osnap_text = if self.snap.is_enabled() {
                 // 吸着中はその種別を出す。マーカーの形と合わせて確認できるように。
                 let label = self.snap.held().map_or_else(
                     || "OSNAP".to_owned(),
                     |c| format!("OSNAP:{}", c.kind.label()),
                 );
-                ui.colored_label(
-                    egui::Color32::from_rgb(0xc6, 0xff, 0x00),
-                    egui::RichText::new(label).monospace(),
-                );
+                egui::RichText::new(label)
+                    .monospace()
+                    .color(egui::Color32::from_rgb(0xc6, 0xff, 0x00))
             } else {
-                ui.weak(egui::RichText::new("osnap").monospace());
+                egui::RichText::new("osnap")
+                    .monospace()
+                    .color(ui.visuals().weak_text_color())
+            };
+            // DYN と同じく、クリックで切り替える部品として見せる（選択を切って指のカーソル）。
+            let osnap_label = ui
+                .add(
+                    egui::Label::new(osnap_text)
+                        .selectable(false)
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text("オブジェクトスナップの ON/OFF  F3");
+            if osnap_label.clicked() {
+                self.toggle_osnap();
             }
             ui.separator();
             // 動的入力。OSNAP と同じ見せ方にし、クリックでも切り替えられるようにする。
@@ -299,6 +312,15 @@ impl CadApp {
         self.apply_submission(submission);
     }
 
+    /// オブジェクトスナップを切り替え、履歴に残す。
+    fn toggle_osnap(&mut self) {
+        self.snap.toggle();
+        let state = if self.snap.is_enabled() { "ON" } else { "OFF" };
+        self.session
+            .cmdline
+            .info(format!("オブジェクトスナップ: {state}"));
+    }
+
     /// 動的入力を切り替え、履歴に残す。
     fn toggle_dynamic_input(&mut self) {
         let state = if self.session.cmdline.toggle_dynamic() {
@@ -349,11 +371,7 @@ impl CadApp {
         // F3 で OSNAP を切り替える。コマンドラインより先に取る必要はないが、
         // TextEdit は F3 を消費しないのでここで拾って問題ない。
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F3)) {
-            self.snap.toggle();
-            let state = if self.snap.is_enabled() { "ON" } else { "OFF" };
-            self.session
-                .cmdline
-                .info(format!("オブジェクトスナップ: {state}"));
+            self.toggle_osnap();
         }
         // F12 で動的入力を切り替える（AutoCAD と同じキー）。F3 と同じく TextEdit は消費しない。
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12)) {

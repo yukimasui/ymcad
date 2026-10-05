@@ -52,12 +52,12 @@ const DYN_SIZE_ESTIMATE: Size = Size { w: 260.0, h: 40.0 };
 const DYN_BACKGROUND_OPACITY: f32 = 0.8;
 /// 寸法入力の欄 1 つの幅 [px]。
 const DIM_FIELD_WIDTH: f32 = 110.0;
-/// 固定した欄の目印。
-const LOCK_MARK: &str = "🔒";
-/// 固定した欄の目印と枠の色。数字の「0」と見分けられるよう、大きさと色を変える。
+/// 固定した欄の目印（錠前）と枠の色。
 const LOCK_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
-/// 錠前の文字の大きさ [pt]。
+/// 錠前を描く正方形の一辺 [px]。形は 16 単位の格子で定義し、この大きさへ拡大縮小する。
 const LOCK_SIZE: f32 = 16.0;
+/// 動的入力オフで、寸法入力に参加中のツールの Tab を押したときの案内。
+pub const TAB_NEEDS_DYNAMIC: &str = "長さ・角度の固定は動的入力（F12）がオンのときに使えます";
 
 /// 履歴 1 行の種別。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -819,14 +819,7 @@ impl CommandLine {
             } else {
                 show_value_field(ui, &shown, locked.is_some());
             }
-            ui.add_visible(
-                locked.is_some(),
-                egui::Label::new(
-                    egui::RichText::new(LOCK_MARK)
-                        .size(LOCK_SIZE)
-                        .color(LOCK_COLOR),
-                ),
-            );
+            lock_icon(ui, locked.is_some());
         }
     }
 
@@ -945,6 +938,15 @@ impl CommandLine {
                 TabOutcome::Moved { consumed: false } | TabOutcome::Ignored => {}
                 TabOutcome::Rejected(e) => self.error(e.message()),
             }
+            return None;
+        }
+        // 動的入力オフでは欄が無いので固定できない。Tab が何もしないと、AutoCAD の感覚で
+        // `100` Tab `90` と打った人の入力が `10090` につながる。入力は変えずに案内する。
+        if !self.dynamic.frame_enabled
+            && self.dim.base.is_some()
+            && i.consume_key(NONE, egui::Key::Tab)
+        {
+            self.info(TAB_NEEDS_DYNAMIC);
             return None;
         }
 
@@ -1066,6 +1068,49 @@ fn show_value_field(ui: &mut egui::Ui, text: &str, locked: bool) {
             ui.set_width(DIM_FIELD_WIDTH);
             ui.label(egui::RichText::new(text).monospace().color(color));
         });
+}
+
+/// 固定した欄の目印として、塗りの錠前を描く。
+///
+/// 絵文字の 🔒 は同梱フォントだと小さな丸にしか見えず、数字の 0 と紛らわしかった。
+/// ユーザーが SVG の案から選んだ形（案 B: つる + 塗りの本体 + 抜いた鍵穴）を、
+/// 16 単位の格子のまま描画命令で再現する。
+///
+/// 固定していないときも同じ大きさを確保する。目印の有無で欄の並びが変わると、
+/// 入力欄が横にずれて日本語の変換候補が跳ねるため（ADR-0034）。
+fn lock_icon(ui: &mut egui::Ui, visible: bool) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(LOCK_SIZE, LOCK_SIZE), egui::Sense::hover());
+    if !visible || !ui.is_rect_visible(rect) {
+        return;
+    }
+    let unit = LOCK_SIZE / 16.0;
+    let at = |x: f32, y: f32| rect.min + egui::vec2(x * unit, y * unit);
+    let painter = ui.painter();
+
+    // つる: (5, 7.5) から上へ、中心 (8, 5)・半径 3 の上半円を回って (11, 7.5) へ下りる。
+    let steps = 12_usize;
+    let step = std::f32::consts::PI / 12.0;
+    let mut shackle = vec![at(5.0, 7.5)];
+    shackle.extend(
+        std::iter::successors(Some(std::f32::consts::PI), |a| Some(a - step))
+            .take(steps + 1)
+            .map(|a| at(8.0 + 3.0 * a.cos(), 5.0 - 3.0 * a.sin())),
+    );
+    shackle.push(at(11.0, 7.5));
+    painter.add(egui::Shape::line(
+        shackle,
+        egui::Stroke::new(1.8 * unit, LOCK_COLOR),
+    ));
+
+    // 本体と、背景色で抜いた鍵穴。
+    let body = egui::Rect::from_min_max(at(2.5, 7.0), at(13.5, 15.0));
+    painter.rect_filled(body, 1.6 * unit, LOCK_COLOR);
+    let hole = ui.visuals().window_fill();
+    painter.circle_filled(at(8.0, 10.3), 1.1 * unit, hole);
+    painter.line_segment(
+        [at(8.0, 10.8), at(8.0, 12.8)],
+        egui::Stroke::new(1.3 * unit, hole),
+    );
 }
 
 #[cfg(test)]
