@@ -332,6 +332,12 @@ impl Tool for RectangleTool {
         self.first
     }
 
+    /// 対角の点は向きではなく位置で決まる。直交にすると面積 0 の矩形になって
+    /// 必ず断られるので、直交・極トラッキングから外す（ADR-0038）。
+    fn tracking_base(&self) -> Option<Point2> {
+        None
+    }
+
     fn step(&mut self, input: StepInput, ctx: &ToolCtx<'_>) -> StepOutcome {
         match input {
             StepInput::Point(p) => {

@@ -533,6 +533,16 @@ impl Tool for MirrorTool {
         self.first
     }
 
+    /// 軸が決まった後は Y / N の返事を待つだけで点を指さないので、直交・極トラッキングを
+    /// 外す（補助線が出ると点を指せと言われているように見える。ADR-0038）。
+    fn tracking_base(&self) -> Option<Point2> {
+        if self.axis.is_some() {
+            None
+        } else {
+            self.first
+        }
+    }
+
     fn step(&mut self, input: StepInput, ctx: &ToolCtx<'_>) -> StepOutcome {
         // 軸が決まった後は Y / N の返事だけを受ける。
         if let Some(axis) = self.axis {
