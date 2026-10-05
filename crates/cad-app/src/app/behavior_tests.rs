@@ -2166,3 +2166,31 @@ fn edge_buttons_are_clear_of_the_hints_at_both_ends() {
         Some(&*format!("> {last}"))
     );
 }
+
+/// はみ出していない幅（1280px のホーム）では、帯も両端の余白も出さない。
+///
+/// 余白は「はみ出している間だけ」足す（端まで送ったとき端のボタンを帯から出すため）。
+/// 常に足すように壊しても他のテストは通ってしまい、収まる幅で並びが 28px 右へずれても
+/// 気づけなかった（PR #32 のコード再レビュー）。
+#[test]
+fn no_hints_or_padding_when_the_ribbon_fits() {
+    let h = app();
+    let probe = h.state().ribbon.probe().clone();
+    assert_eq!(probe.overflow, (false, false), "前提: 1280px では収まる");
+    assert!(
+        probe.hints.iter().all(Option::is_none),
+        "帯は両方とも無い: {:?}",
+        probe.hints
+    );
+    let viewport = probe.viewport.expect("リボン");
+    let line = ribbon_buttons(&h)
+        .into_iter()
+        .find(|b| b.name == "LINE")
+        .expect("LINE のボタン")
+        .rect;
+    let gap = line.left() - viewport.left();
+    assert!(
+        (0.0..28.0).contains(&gap),
+        "LINE は表示範囲の左端から帯の幅（28px）未満にある（余白が無い）: {gap}px"
+    );
+}
