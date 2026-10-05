@@ -620,13 +620,15 @@ const POLAR_GUIDE_COLOR: egui::Color32 = egui::Color32::from_rgb(0x4f, 0xc3, 0xf
 
 /// 極トラッキングで吸い付いているときの補助線（基準点からの点線）と角度の表示を描く。
 ///
-/// 補助線は基準点から吸い付いた角度の向きへ、キャンバスの端まで伸ばす。
+/// 補助線は吸い付いた点から、その角度の向きへキャンバスの端まで伸ばす。
 /// 角度は吸い付いた点（カーソルの近く）の右上に出す。右下はカーソル横の入力欄
 /// （ADR-0034）なので避ける。
 pub fn draw_polar_guide(painter: &egui::Painter, vp: &Viewport, hit: &PolarHit) {
     let from = vp.model_to_screen(hit.base);
     let at = vp.model_to_screen(hit.point);
-    if let Some((a, b)) = clip_ray(from, at - from, vp.rect()) {
+    // 吸い付いた点より先だけに引く。基準点から引くとラバーバンド（確定する区間）の上に
+    // 点が乗って縞模様に見え、「ここまで引く」と「この向きに延びる」が見分けにくい（PR #35）。
+    if let Some((a, b)) = clip_ray(at, at - from, vp.rect()) {
         painter.extend(egui::Shape::dotted_line(
             &[a, b],
             POLAR_GUIDE_COLOR,

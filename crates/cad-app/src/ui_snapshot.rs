@@ -259,11 +259,11 @@ fn ui_snapshot_ortho_line() {
     shot(&mut h, "ortho_a_line_horizontal");
 }
 
-/// F10 → 40° 付近を指す → 45° に吸い付き、補助線（点線）と `45°` が出る。
+/// F10 → 43° を指す → 45° に吸い付き、吸い付いた点の先に補助線（点線）と `45°` が出る。
 #[test]
 #[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
 fn ui_snapshot_polar_snapped() {
-    let mut h = line_tracking(&[egui::Key::F10], 40.0, 100.0);
+    let mut h = line_tracking(&[egui::Key::F10], 43.0, 100.0);
     shot(&mut h, "polar_b_snapped_45");
 }
 

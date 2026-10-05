@@ -35,6 +35,13 @@ pub const POLAR_STEP_DEG: f64 = 15.0;
 /// 狙った位置から指が離れたように感じる。
 pub const POLAR_SNAP_PX: f32 = 10.0;
 
+/// 極トラッキングが吸い付く角度の差の上限 [度]。[`POLAR_SNAP_PX`] と両方を満たすときだけ吸い付く。
+///
+/// 画面上の距離だけで決めると、基準点の近く（15° 刻み・10px なら約 76px 以内）では
+/// どの向きを指しても吸い付き、補助線と角度の表示が 15° ごとにくるくる変わる。
+/// 短い線を自由な角度で引けなくなるので、角度の差にも上限を設ける（PR #35 のレビュー、ADR-0038）。
+pub const POLAR_MAX_DIFF_DEG: f64 = 3.0;
+
 /// 作図補助の種類。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -149,7 +156,13 @@ impl Drafting {
             };
         }
         if self.polar {
-            if let Some(hit) = polar(base, input.cursor, POLAR_STEP_DEG, input.polar_tolerance) {
+            if let Some(hit) = polar(
+                base,
+                input.cursor,
+                POLAR_STEP_DEG,
+                POLAR_MAX_DIFF_DEG,
+                input.polar_tolerance,
+            ) {
                 return Tracked {
                     point: hit.point,
                     polar: Some(hit),
@@ -231,18 +244,29 @@ pub fn normalize_deg(angle_deg: f64) -> f64 {
 }
 
 /// 極トラッキング。カーソルの向きに最も近い `step_deg` の倍数の半直線を選び、
-/// カーソルからその半直線までの距離が `tolerance` 以内なら、カーソルを半直線へ正射影した点を返す。
+/// 角度の差が `max_diff_deg` 以内で、かつカーソルからその半直線までの距離が `tolerance` 以内なら、
+/// カーソルを半直線へ正射影した点を返す。
 ///
-/// 遠ければ `None`（カーソルのまま）。カーソルが基準点と同じで向きが無いときも `None`。
+/// どちらかを外れれば `None`（カーソルのまま）。カーソルが基準点と同じで向きが無いときも `None`。
 /// 刻みは 0 より大きく 180 未満を想定する（最も近い倍数との差が 90° 未満になり、
 /// 射影が基準点の反対側へ出ない）。
 #[must_use]
-pub fn polar(base: Point2, cursor: Point2, step_deg: f64, tolerance: f64) -> Option<PolarHit> {
+pub fn polar(
+    base: Point2,
+    cursor: Point2,
+    step_deg: f64,
+    max_diff_deg: f64,
+    tolerance: f64,
+) -> Option<PolarHit> {
     let d = cursor - base;
     let dir = d.normalized()?;
     let angle = dir.angle().to_degrees();
     let snapped = (angle / step_deg).round() * step_deg;
-    let diff = (angle - snapped).to_radians();
+    let diff_deg = angle - snapped;
+    if diff_deg.abs() > max_diff_deg {
+        return None;
+    }
+    let diff = diff_deg.to_radians();
     let len = d.len();
     // 半直線までの距離と、半直線に沿った長さ。
     let off = len * diff.sin().abs();
@@ -408,7 +432,7 @@ mod tests {
     fn polar_snaps_to_the_nearest_multiple_within_the_tolerance() {
         // 100 離れた 44° の点は 45° の半直線から 100·sin1° ≈ 1.75 の距離。
         let c = at_deg(BASE, 44.0, 100.0);
-        let hit = polar(BASE, c, 15.0, 2.0).expect("吸い付く");
+        let hit = polar(BASE, c, 15.0, 3.0, 2.0).expect("吸い付く");
         assert_eq!(hit.angle_deg, 45.0);
         assert_eq!(hit.base, BASE);
         assert_point(
@@ -418,20 +442,54 @@ mod tests {
         assert_eq!(hit.label(), "45°");
     }
 
-    /// 閾値の内外。距離がちょうど閾値なら吸い付き、わずかに超えたら吸い付かない。
+    /// 距離の閾値の内外。わずかに内側なら吸い付き、わずかに外側なら吸い付かない。
     #[test]
     fn polar_respects_the_tolerance_boundary() {
-        let c = at_deg(BASE, 40.0, 100.0); // 45° から 5°。半直線までの距離 ≈ 8.716
-        let off = 100.0 * 5.0_f64.to_radians().sin();
+        let c = at_deg(BASE, 44.0, 100.0); // 45° から 1°。半直線までの距離 ≈ 1.745
+        let off = 100.0 * 1.0_f64.to_radians().sin();
         assert!(
-            polar(BASE, c, 15.0, off * 1.001).is_some(),
+            polar(BASE, c, 15.0, 3.0, off * 1.001).is_some(),
             "閾値のすぐ内側"
         );
         assert!(
-            polar(BASE, c, 15.0, off * 0.999).is_none(),
+            polar(BASE, c, 15.0, 3.0, off * 0.999).is_none(),
             "閾値のすぐ外側"
         );
-        assert!(polar(BASE, c, 15.0, 1.0).is_none(), "遠いとカーソルのまま");
+        assert!(
+            polar(BASE, c, 15.0, 3.0, 1.0).is_none(),
+            "遠いとカーソルのまま"
+        );
+    }
+
+    /// 角度の差の上限（±3°）の内外。距離の閾値が十分大きくても、差が大きければ吸い付かない。
+    #[test]
+    fn polar_respects_the_angle_limit() {
+        for (deg, snaps) in [
+            (42.1, true),
+            (41.9, false),
+            (47.9, true),
+            (48.1, false),
+            (-2.9, true),
+            (-3.1, false),
+        ] {
+            let c = at_deg(BASE, deg, 100.0);
+            assert_eq!(polar(BASE, c, 15.0, 3.0, 1.0e3).is_some(), snaps, "{deg}°");
+        }
+    }
+
+    /// 基準点のすぐ近くでは、画面上の距離はどの向きでも閾値の内側になる。
+    /// それでも角度の差が上限を超えていれば吸い付かない（補助線がくるくる変わらない）。
+    #[test]
+    fn polar_near_the_base_needs_the_angle_to_be_close() {
+        for deg in [5.0, 22.0, 37.0, 52.0, 100.0] {
+            let c = at_deg(BASE, deg, 1.0);
+            assert_eq!(polar(BASE, c, 15.0, 3.0, 10.0), None, "{deg}°");
+        }
+        let c = at_deg(BASE, 46.0, 1.0);
+        assert!(
+            polar(BASE, c, 15.0, 3.0, 10.0).is_some(),
+            "差が小さければ近くでも吸い付く"
+        );
     }
 
     /// 刻みのちょうど中間（7.5° ずれ）でも閾値が大きければどちらかに決まり、点は半直線上。
@@ -439,7 +497,7 @@ mod tests {
     fn polar_point_lies_on_the_ray() {
         for deg in [3.0, 17.0, 88.0, 101.0, 179.0, 200.0, 271.0, 359.0] {
             let c = at_deg(BASE, deg, 50.0);
-            let hit = polar(BASE, c, 15.0, 100.0).expect("閾値が大きいので必ず吸い付く");
+            let hit = polar(BASE, c, 15.0, 7.5, 100.0).expect("閾値が大きいので必ず吸い付く");
             let v = hit.point - BASE;
             let ray = cad_core::geom::Vec2::from_angle(hit.angle_deg.to_radians());
             assert!(eq_len(v.cross(ray), 0.0), "{deg}°: 半直線上");
@@ -456,7 +514,7 @@ mod tests {
     #[test]
     fn polar_negative_angles_are_normalized() {
         let c = at_deg(BASE, -44.0, 100.0);
-        let hit = polar(BASE, c, 15.0, 5.0).expect("吸い付く");
+        let hit = polar(BASE, c, 15.0, 3.0, 5.0).expect("吸い付く");
         assert_eq!(hit.angle_deg, 315.0);
         assert_eq!(hit.label(), "315°");
     }
@@ -466,7 +524,7 @@ mod tests {
     fn polar_near_360_wraps_to_zero() {
         for deg in [359.0, 1.0, -0.5] {
             let c = at_deg(BASE, deg, 100.0);
-            let hit = polar(BASE, c, 15.0, 5.0).expect("吸い付く");
+            let hit = polar(BASE, c, 15.0, 3.0, 5.0).expect("吸い付く");
             assert_eq!(hit.angle_deg, 0.0, "{deg}°");
             assert_eq!(hit.label(), "0°", "{deg}°");
             // 0° はちょうど水平（寸法入力の `point_at` と同じく 90° の倍数はちょうど）。
@@ -477,7 +535,7 @@ mod tests {
     /// カーソルが基準点と同じなら向きが無いので吸い付かない。
     #[test]
     fn polar_at_the_base_does_nothing() {
-        assert_eq!(polar(BASE, BASE, 15.0, 100.0), None);
+        assert_eq!(polar(BASE, BASE, 15.0, 3.0, 100.0), None);
     }
 
     #[test]
@@ -507,7 +565,7 @@ mod tests {
     /// 両方オンなら直交が勝ち、極の補助線（`polar`）は出さない。
     #[test]
     fn ortho_wins_over_polar() {
-        let c = at_deg(BASE, 40.0, 100.0);
+        let c = at_deg(BASE, 43.0, 100.0);
         let t = with(true, true).track(input(c));
         assert_eq!(t.point, ortho(BASE, c));
         assert_eq!(t.polar, None);
@@ -523,7 +581,7 @@ mod tests {
     /// スナップに吸着しているとき・角度を固定しているときは拘束しない。
     #[test]
     fn snap_and_angle_lock_win_over_ortho_and_polar() {
-        let c = at_deg(BASE, 40.0, 100.0);
+        let c = at_deg(BASE, 43.0, 100.0);
         for d in [with(true, false), with(false, true), with(true, true)] {
             let snapped = TrackInput {
                 snapped: true,
@@ -555,7 +613,7 @@ mod tests {
     /// 基準点が無ければ（LINE の 1 点目など）拘束しない。
     #[test]
     fn nothing_happens_without_a_base() {
-        let c = at_deg(BASE, 40.0, 100.0);
+        let c = at_deg(BASE, 43.0, 100.0);
         let t = with(true, true).track(TrackInput {
             base: None,
             ..input(c)

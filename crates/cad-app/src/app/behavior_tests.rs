@@ -1128,14 +1128,15 @@ fn f8_makes_the_rubber_band_and_the_click_horizontal_or_vertical() {
     assert_eq!(l[1].b.x, base.x, "ちょうど垂直");
 }
 
-/// F10 → 40° 付近を指すと 45° に吸い付き、クリックでも 45° の線になる。遠ければカーソルのまま。
+/// F10 → 43° を指すと 45° に吸い付き、クリックでも 45° の線になる。
+/// 半直線から遠い・角度の差が ±3° を超えるときはカーソルのまま。
 #[test]
-fn f10_snaps_a_click_near_40_degrees_to_45() {
+fn f10_snaps_a_click_near_45_degrees_to_45() {
     let (mut h, base) = line_from_p1_with(&[egui::Key::F10]);
     assert!(h.state().drafting.is_on(Mode::Polar), "F10 でオン");
 
-    // 100px 先なら 45° の半直線まで 100·sin5° ≈ 8.7px（吸い付く距離 10px 以内）。
-    let pos = screen_at(&h, base, 40.0, 100.0);
+    // 100px 先の 43° は 45° の半直線まで 100·sin2° ≈ 3.5px（10px 以内・差 2° は ±3° 以内）。
+    let pos = screen_at(&h, base, 43.0, 100.0);
     hover(&mut h, pos);
     let rubber = cursor(&h);
     let toward = rubber - base;
@@ -1150,11 +1151,19 @@ fn f10_snaps_a_click_near_40_degrees_to_45() {
     let d = l[0].b - l[0].a;
     assert!(eq_len(d.x, d.y) && d.x > 0.0, "45° の線: {d:?}");
 
-    // 400px 先の 220°（225° から 5°）は半直線から ≈ 35px 離れているので吸い付かない。
+    // 400px 先の 223°（225° から 2°）は角度の差は小さいが、半直線から ≈ 14px 離れている。
     let base = l[0].b;
-    let pos = screen_at(&h, base, 220.0, 400.0);
+    let pos = screen_at(&h, base, 223.0, 400.0);
     hover(&mut h, pos);
     assert_point(cursor(&h), model(&h, pos), "遠ければカーソルのまま");
+    // 30px 先の 40°（45° から 5°）は半直線まで ≈ 2.6px だが、角度の差が ±3° を超える。
+    let pos = screen_at(&h, base, 40.0, 30.0);
+    hover(&mut h, pos);
+    assert_point(
+        cursor(&h),
+        model(&h, pos),
+        "基準点の近くでも角度が離れていれば吸い付かない",
+    );
 }
 
 /// 両方オンなら直交が優先される（40° でも 45° ではなく水平）。
