@@ -1111,7 +1111,7 @@ fn new_with_unsaved_changes_saves_through_the_confirmation_then_replaces() {
     assert!(h.state().files.is_confirming(), "未保存の確認が出る");
     assert!(!path.exists(), "まだ保存していない");
 
-    let button = h.get_by_label("保存する").rect().center();
+    let button = h.get_by_label_contains("保存する").rect().center();
     click(&mut h, button);
 
     assert!(!h.state().files.is_confirming(), "確認は閉じる");
