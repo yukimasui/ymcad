@@ -507,8 +507,11 @@ pub fn draw_selection_rect(painter: &egui::Painter, rect: egui::Rect, mode: Wind
 const SNAP_MARKER_PX: f32 = 9.0;
 /// マーカーの線幅 [px]。
 const SNAP_MARKER_STROKE_PX: f32 = 1.6;
-/// マーカーの色。AutoCAD に倣って黄緑。
-const SNAP_MARKER_COLOR: egui::Color32 = egui::Color32::from_rgb(0xc6, 0xff, 0x00);
+/// 「効いている」ことを示す色（黄緑）。スナップマーカーと、ステータスバーの
+/// `OSNAP` / `ORTHO` / `POLAR` / `DYN` の ON 表示で共有する。AutoCAD に倣った色。
+pub const ON_COLOR: egui::Color32 = egui::Color32::from_rgb(0xc6, 0xff, 0x00);
+/// マーカーの色。
+const SNAP_MARKER_COLOR: egui::Color32 = ON_COLOR;
 
 /// スナップマーカーとツールチップを描く。
 ///

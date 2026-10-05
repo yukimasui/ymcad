@@ -209,7 +209,7 @@ impl CadApp {
                 );
                 egui::RichText::new(label)
                     .monospace()
-                    .color(egui::Color32::from_rgb(0xc6, 0xff, 0x00))
+                    .color(render::ON_COLOR)
             } else {
                 egui::RichText::new("osnap")
                     .monospace()
@@ -235,7 +235,7 @@ impl CadApp {
             let dyn_text = if self.session.cmdline.is_dynamic() {
                 egui::RichText::new("DYN")
                     .monospace()
-                    .color(egui::Color32::from_rgb(0xc6, 0xff, 0x00))
+                    .color(render::ON_COLOR)
             } else {
                 egui::RichText::new("dyn")
                     .monospace()

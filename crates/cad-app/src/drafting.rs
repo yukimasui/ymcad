@@ -22,6 +22,7 @@
 use cad_core::geom::Point2;
 
 use crate::cmdline::dimension;
+use crate::render::ON_COLOR;
 use crate::session::Session;
 use crate::viewport::Viewport;
 
@@ -322,8 +323,6 @@ pub fn take_key_toggles(ui: &egui::Ui) -> Vec<Mode> {
         .collect()
 }
 
-/// オンの色（`OSNAP` / `DYN` と同じ）。
-const ON_COLOR: egui::Color32 = egui::Color32::from_rgb(0xc6, 0xff, 0x00);
 /// オンだが直交に負けて効いていない極の色。オンとオフの中間に見せる。
 const OVERRIDDEN_COLOR: egui::Color32 = egui::Color32::from_rgb(0x8a, 0x9a, 0x5b);
 
