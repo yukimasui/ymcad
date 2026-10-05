@@ -158,7 +158,23 @@ impl FileOps {
         // Enter / Space はボタンを描く前に奪う。egui のボタンはフォーカスがあると Enter / Space で
         // 押されるので、Tab を 1 回押した後の Enter が「保存しない」になり、図面が捨てられる。
         // Enter は必ず「保存する」、Space は何もしない。「保存しない」はクリックでしか押せない。
-        let enter = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        // キーリピートは「押した」ことにしない（`NEW` + Enter の長押しが、出てきた
+        // モーダルの「保存する」を押してしまう）。消費はするので「保存しない」にも届かない。
+        let enter = ctx.input_mut(|i| {
+            let pressed = i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Key {
+                        key: egui::Key::Enter,
+                        pressed: true,
+                        repeat: false,
+                        ..
+                    }
+                )
+            });
+            i.consume_key(egui::Modifiers::NONE, egui::Key::Enter);
+            pressed
+        });
         ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space));
         egui::Modal::new(egui::Id::new("unsaved_changes"))
             // 裏のコマンドラインの文字が目に入りにくいよう、既定（alpha 100）より少し暗くする。
@@ -181,6 +197,23 @@ impl FileOps {
                     let save = ui.button("保存する (Enter)");
                     if focus_save {
                         save.request_focus();
+                    }
+                    // フォーカスの枠を「保存する」から動かさない。Enter は常に「保存する」なので、
+                    // 枠が「保存しない」へ動くと、枠と Enter の結果が食い違う。Tab は egui が
+                    // フレームの最初に処理するため、消費では間に合わない。TextEdit と同じ
+                    // フォーカスロックのフィルタで、Tab・矢印を egui のフォーカス移動に使わせない。
+                    if save.has_focus() {
+                        ui.memory_mut(|m| {
+                            m.set_focus_lock_filter(
+                                save.id,
+                                egui::EventFilter {
+                                    tab: true,
+                                    horizontal_arrows: true,
+                                    vertical_arrows: true,
+                                    escape: false,
+                                },
+                            );
+                        });
                     }
                     if save.clicked() || enter {
                         match Self::execute(FileAction::Save, doc) {
