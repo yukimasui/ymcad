@@ -958,6 +958,11 @@ impl Tool for CornerTool {
         self.editing.is_none()
     }
 
+    /// 1 本目に拾った線分（ADR-0039）。
+    fn held_entities(&self) -> Vec<cad_core::EntityId> {
+        self.first.map(|(id, _)| id).into_iter().collect()
+    }
+
     fn step(&mut self, input: StepInput, ctx: &ToolCtx<'_>) -> StepOutcome {
         // ---- 値の入力待ち ----
         if let Some(pending) = self.editing {

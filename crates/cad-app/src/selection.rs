@@ -71,6 +71,22 @@ impl Selection {
     pub fn retain_existing(&mut self, doc: &Document) {
         self.ids.retain(|id| doc.entities().contains(*id));
     }
+
+    /// 編集できなくなったエンティティ（削除・ロック・非表示のレイヤ）を選択から外す。
+    /// 選ぶときと同じ判定（`is_entity_editable`）を使う。
+    ///
+    /// パネルの操作など、実行中のコマンドの外で図面が変わった後に呼ぶ（ADR-0039）。
+    pub fn retain_editable(&mut self, doc: &Document) {
+        self.ids.retain(|id| is_editable(doc, *id));
+    }
+}
+
+/// エンティティがあり、編集できるレイヤ（表示中でロックされていない）にあるか。
+#[must_use]
+pub fn is_editable(doc: &Document, id: EntityId) -> bool {
+    doc.entities()
+        .get(id)
+        .is_some_and(|e| doc.layers().is_entity_editable(e))
 }
 
 /// 窓選択の種類。
@@ -285,6 +301,30 @@ mod tests {
         d.undo().unwrap(); // 追加を取り消す
         s.retain_existing(&d);
         assert!(s.is_empty(), "消えた要素は選択から外れること");
+    }
+
+    /// ロック・非表示のレイヤの要素は、選ぶときと同じく選択から外れる（ADR-0039）。
+    #[test]
+    fn retain_editable_drops_locked_and_hidden_entities() {
+        use cad_core::command::SetLayerProperties;
+        for lock in [true, false] {
+            let mut d = doc_with(vec![line(0.0, 0.0, 1.0, 0.0)]);
+            let id = d.entities().ids().next().unwrap();
+            let mut s = Selection::new();
+            s.insert(id);
+            s.retain_editable(&d);
+            assert_eq!(s.len(), 1, "編集できるうちは残る");
+
+            let cmd = if lock {
+                SetLayerProperties::new(LayerId::ZERO).locked(true)
+            } else {
+                SetLayerProperties::new(LayerId::ZERO).visible(false)
+            };
+            d.apply(Box::new(cmd)).unwrap();
+            s.retain_editable(&d);
+            assert!(s.is_empty(), "ロック {lock}: 外れる");
+            assert!(!is_editable(&d, id));
+        }
     }
 
     #[test]

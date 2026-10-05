@@ -183,9 +183,48 @@ impl Session {
     ///
     /// 図面を変更する経路は `Document::apply` ただ 1 つなので、
     /// レイヤパネルからの操作もここを通す。
+    ///
+    /// 適用の後に、選択と実行中のツールの前提を確かめる（[`Self::revalidate`]、ADR-0039）。
+    /// パネルの開閉は実行中のコマンドを中断しない（ADR-0037）ので、コマンドの途中で
+    /// レイヤの削除・ロック・非表示が起きうる。
     pub fn apply_external(&mut self, cmd: Box<dyn cad_core::Command>, doc: &mut Document) {
         let name = cmd.name();
+        // `apply` は消えた図形を選択から外すので、外れた数は適用の前から数える。
+        let selected_before = self.selection.len();
         self.apply(cmd, name, doc);
+        self.revalidate(doc, selected_before);
+    }
+
+    /// 実行中のコマンドの外で図面が変わった後に、選択と実行中のツールの前提を確かめる
+    /// 唯一の場所（ADR-0039）。各ツールには散らさない。
+    ///
+    /// - 選択から、削除・ロック・非表示になった図形を外す（選ぶときと同じ判定）
+    /// - ツールが覚えている図形（[`Tool::held_entities`]）がどれか編集できなくなっていたら、
+    ///   ツールを中断する。消えた ID を `Command` に渡さず、ロックされた図形を変えない
+    /// - 選択を対象にするツール（MOVE など）の対象がすべて外れたら中断する。
+    ///   一部だけ外れたら、残りで続けて外れた数を案内する
+    fn revalidate(&mut self, doc: &Document, selected_before: usize) {
+        self.selection.retain_editable(doc);
+        let dropped = selected_before.saturating_sub(self.selection.len());
+        let Some(tool) = &self.tool else {
+            return;
+        };
+        let name = tool.name();
+        let held_lost = tool
+            .held_entities()
+            .into_iter()
+            .any(|id| !selection::is_editable(doc, id));
+        let uses_selection = tool.wants_selection() && !self.awaiting_selection;
+        if held_lost || (uses_selection && dropped > 0 && self.selection.is_empty()) {
+            self.cancel();
+            self.cmdline.error(format!(
+                "{name}: 対象の図形が削除・ロック・非表示になったため中断しました"
+            ));
+        } else if uses_selection && dropped > 0 {
+            self.cmdline.info(format!(
+                "{name}: 削除・ロック・非表示になった {dropped} 個を対象から外しました"
+            ));
+        }
     }
 
     /// 相対座標入力と垂線スナップの基準となる、直前に確定した点。

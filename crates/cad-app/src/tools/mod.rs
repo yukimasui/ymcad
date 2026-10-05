@@ -170,6 +170,15 @@ pub trait Tool: std::fmt::Debug {
         self.dimension_base().or_else(|| self.last_point())
     }
 
+    /// ツールが次の手のために覚えている図形（FILLET の 1 本目など）。
+    ///
+    /// パネルの操作など、実行中のコマンドの外で図面が変わった後に `Session` が確かめ、
+    /// どれかが削除・ロック・非表示になっていたらツールを中断する（ADR-0039）。
+    /// 覚えたまま進むと、消えた ID を `Command` に渡したり、ロックされた図形を変えたりする。
+    fn held_entities(&self) -> Vec<EntityId> {
+        Vec::new()
+    }
+
     /// 開始時に選択を必要とするか（ERASE / MOVE / COPY）。
     fn wants_selection(&self) -> bool {
         false

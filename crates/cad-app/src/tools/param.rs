@@ -793,6 +793,14 @@ impl Tool for ParamSetTool {
         "PSET"
     }
 
+    /// 指したインスタンス（ADR-0039）。
+    fn held_entities(&self) -> Vec<EntityId> {
+        match &self.state {
+            PsetState::Pick => Vec::new(),
+            PsetState::Name { target, .. } | PsetState::Value { target, .. } => vec![*target],
+        }
+    }
+
     fn prompt(&self) -> String {
         match &self.state {
             PsetState::Pick => "パラメータを変えるインスタンスをクリック:".to_owned(),
