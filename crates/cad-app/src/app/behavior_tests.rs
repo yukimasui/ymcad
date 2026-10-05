@@ -645,6 +645,33 @@ fn moving_focus_to_a_panel_ends_the_command_line_composition() {
     );
 }
 
+// ---- ステータスバー -----------------------------------------------------------
+
+/// ステータスバーの `DYN` に乗せると指のカーソルになる（文字選択の I ビームにならない）。
+///
+/// ラベルは既定で文字を選べるので、クリックで切り替える部品なのに I ビームが出ていた
+/// （ユーザーの実機確認）。
+#[test]
+fn hovering_dyn_in_the_status_bar_shows_a_pointing_hand() {
+    use egui_kittest::kittest::Queryable as _;
+
+    let mut h = app_with_dynamic(true);
+    let target = h.get_by_label("DYN").rect().center();
+    // カーソルの形は毎フレーム決め直されるので、落ち着いた後の最後のフレームの出力を見る。
+    hover(&mut h, target);
+    assert_eq!(
+        h.output().platform_output.cursor_icon,
+        egui::CursorIcon::PointingHand
+    );
+
+    // 選択を切ってもクリックで切り替わる。
+    click(&mut h, target);
+    assert!(
+        !h.state().session.cmdline.is_dynamic(),
+        "クリックでオフになる"
+    );
+}
+
 // ---- 寸法入力（Issue #20 段階 B） -------------------------------------------
 
 use crate::cmdline::dimension::{DimValues, Field};

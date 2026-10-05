@@ -221,8 +221,15 @@ impl CadApp {
                     .monospace()
                     .color(ui.visuals().weak_text_color())
             };
+            // ラベルは既定で文字を選べるので、そのままだとホバーで I ビームになる。
+            // クリックで切り替える部品なので、選択を切って指のカーソルにする。
             let dyn_label = ui
-                .add(egui::Label::new(dyn_text).sense(egui::Sense::click()))
+                .add(
+                    egui::Label::new(dyn_text)
+                        .selectable(false)
+                        .sense(egui::Sense::click()),
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text("動的入力（カーソル横の入力欄）の ON/OFF  F12");
             if dyn_label.clicked() {
                 self.toggle_dynamic_input();
