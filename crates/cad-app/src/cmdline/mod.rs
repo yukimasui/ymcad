@@ -63,6 +63,21 @@ pub struct HistoryLine {
     pub text: String,
 }
 
+/// コマンドラインがこのフレームのキー（Enter / Space / Esc / Tab / ↑↓）を扱ってよいか。
+///
+/// フォーカスが入力欄にあるか、どこにも無いときだけ扱う。それ以外
+/// （レイヤ名・コンポーネント名などパネルの入力欄）を編集している間に扱うと、
+/// レイヤ名の Space や Enter で実行中のコマンドが進み（空 Enter なら直前の
+/// コマンドが再実行され）、Esc でコマンドが中断される。
+///
+/// 前のフレームのフォーカスも見る。パネルの入力欄で押した Esc は egui が
+/// フレームの最初にフォーカスを外すので、このフレームの状態だけだと
+/// 「どこにも無い」に見えるため。
+fn owns_keys(input: egui::Id, last_frame: Option<egui::Id>, now: Option<egui::Id>) -> bool {
+    let ours = |f: Option<egui::Id>| f.is_none_or(|id| id == input);
+    ours(last_frame) && ours(now)
+}
+
 /// このフレームでユーザーが行った確定操作。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Submission {
@@ -207,6 +222,12 @@ pub struct CommandLine {
     /// Tab 補完はバッファを外から書き換えるので、`TextEdit` のキャレットは
     /// 補完前の位置（`L` の直後）に残る。そのまま打つと `LZINE` になる。
     caret_to_end: bool,
+    /// 前のフレームの [`Self::begin_frame`] の時点でフォーカスを持っていた部品。
+    ///
+    /// パネルの入力欄で Esc を押すと、egui はフレームの最初にフォーカスを外す。
+    /// その時点の状態だけを見ると「誰もフォーカスを持っていない」になり、
+    /// Esc をコマンドラインが拾って実行中のコマンドを中断してしまう。
+    focused_last_frame: Option<egui::Id>,
     /// コマンド候補。
     suggestions: Suggestions,
     /// [`Self::begin_frame`] で消費したキーが表す確定操作。
@@ -267,6 +288,7 @@ impl CommandLine {
             last_command: None,
             composing: false,
             caret_to_end: false,
+            focused_last_frame: None,
             suggestions: Suggestions::default(),
             pending: None,
             dynamic: DynamicInput {
@@ -388,9 +410,14 @@ impl CommandLine {
         self.track_ime(ctx);
         self.refresh_suggestions(allow_suggestions);
 
+        let focused = ctx.memory(|m| m.focused());
+        let owns_keys = owns_keys(egui::Id::new(INPUT_ID), self.focused_last_frame, focused);
+        self.focused_last_frame = focused;
+
         // 変換中はキーを一切奪わない。IME に確定させるのが先。
         // 候補の操作キーもこのブロックの中にあるので、変換中は自動的に無効になる。
-        let pending = if self.composing {
+        // パネルの入力欄を編集している間も奪わない（Issue #22）。
+        let pending = if self.composing || !owns_keys {
             None
         } else {
             ctx.input_mut(|i| self.consume_keys(i))
@@ -923,6 +950,26 @@ mod tests {
         s.selected = Some(1);
         s.update("L");
         assert_eq!(s.selected, None);
+    }
+
+    /// フォーカスが入力欄か無いときだけキーを扱い、パネルの入力欄が
+    /// フォーカスを持っている（持っていた）間は扱わないこと。
+    #[test]
+    fn keys_belong_to_the_command_line_only_when_no_one_else_has_focus() {
+        let input = egui::Id::new(INPUT_ID);
+        let panel = egui::Id::new("panel");
+        assert!(owns_keys(input, None, None), "起動直後");
+        assert!(owns_keys(input, Some(input), Some(input)), "入力欄にある");
+        assert!(owns_keys(input, Some(input), None), "入力欄から外れた直後");
+        assert!(!owns_keys(input, None, Some(panel)), "パネルに移った");
+        assert!(
+            !owns_keys(input, Some(panel), Some(panel)),
+            "パネルを編集中"
+        );
+        assert!(
+            !owns_keys(input, Some(panel), None),
+            "パネルで Esc（egui がフレームの最初にフォーカスを外す）"
+        );
     }
 
     /// `Esc` で閉じた候補は、入力が同じ間は作り直しても出ないこと。

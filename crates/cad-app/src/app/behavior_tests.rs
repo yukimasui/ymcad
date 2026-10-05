@@ -359,3 +359,96 @@ fn tab_without_suggestions_keeps_focus() {
         assert_eq!(h.state().session.cmdline.input(), "1", "動的入力 {on}");
     }
 }
+
+// ---- パネルの入力欄（Issue #22） --------------------------------------------
+
+/// レイヤパネルを開き、「新規」の入力欄をクリックしてフォーカスを移す。
+fn focus_layer_name_field(h: &mut Harness<'_, CadApp>) {
+    use egui_kittest::kittest::Queryable as _;
+
+    if !h.state().layer_panel.is_open() {
+        h.state_mut().layer_panel.toggle();
+        settle(h);
+    }
+    let cmdline = input_rect(h);
+    let target = h
+        .query_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.rect() != cmdline)
+        .expect("レイヤパネルの入力欄があるはず")
+        .rect();
+    let button = |pressed| egui::Event::PointerButton {
+        pos: target.center(),
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    frame(
+        h,
+        [egui::Event::PointerMoved(target.center()), button(true)],
+    );
+    frame(h, [button(false)]);
+    settle(h);
+}
+
+/// レイヤパネルの入力欄の中身。
+fn layer_name_field_value(h: &Harness<'_, CadApp>) -> String {
+    use egui_kittest::kittest::Queryable as _;
+
+    let cmdline = input_rect(h);
+    h.query_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.rect() != cmdline)
+        .and_then(|n| n.value())
+        .unwrap_or_default()
+}
+
+/// パネルの入力欄を編集している間、Enter / Space / Esc をコマンドラインが奪わない。
+///
+/// 奪うと、レイヤ名の Space や Enter でコマンドが進み（空 Enter なら直前のコマンドを
+/// 再実行し）、Esc で実行中のコマンドが中断される。
+#[test]
+fn panel_text_field_keeps_enter_space_and_escape() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        type_text(&mut h, "L");
+        press(&mut h, egui::Key::Enter);
+        assert!(h.state().session.has_active_tool(), "前提: LINE 実行中");
+        let lines_before = h.state().session.cmdline.history().count();
+
+        focus_layer_name_field(&mut h);
+        type_text(&mut h, "A");
+        let mut space = Vec::from(key(egui::Key::Space));
+        space.insert(1, egui::Event::Text(" ".to_owned()));
+        frame(&mut h, space);
+        settle(&mut h);
+        type_text(&mut h, "B");
+        assert_eq!(layer_name_field_value(&h), "A B", "動的入力 {on}");
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            "",
+            "コマンドラインには入らない"
+        );
+
+        // Esc はパネルの入力欄のフォーカスを外すだけ。egui がフレームの最初に
+        // フォーカスを外すので、このフレームだけを見ると誰も持っていないように見える。
+        press(&mut h, egui::Key::Escape);
+        assert!(
+            h.state().session.has_active_tool(),
+            "Space / Esc で LINE が進んだり中断されたりしない（動的入力 {on}）"
+        );
+
+        // Enter はパネルの入力欄の確定。編集を終えるとフォーカスはコマンドラインへ戻る
+        // （以降のキーはコマンドラインのもの）。
+        focus_layer_name_field(&mut h);
+        press(&mut h, egui::Key::Enter);
+        assert!(
+            h.state().session.has_active_tool(),
+            "Enter で LINE が終わらない（動的入力 {on}）"
+        );
+        assert_eq!(
+            h.state().session.cmdline.history().count(),
+            lines_before,
+            "履歴に何も増えない（動的入力 {on}）"
+        );
+    }
+}
