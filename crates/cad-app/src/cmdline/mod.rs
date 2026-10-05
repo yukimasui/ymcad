@@ -15,8 +15,12 @@
 //! （変換中は winit がキー入力イベントを送らないため、自然にそうなる）。
 
 pub mod coord;
+pub mod dynamic;
 
 use std::collections::VecDeque;
+use std::time::Duration;
+
+use self::dynamic::{Activity, Bounds, Point, Size};
 
 use crate::tools::{self, CommandSpec};
 
@@ -24,6 +28,22 @@ use crate::tools::{self, CommandSpec};
 const HISTORY_LIMIT: usize = 200;
 /// 画面に見せる履歴の行数。
 const HISTORY_VISIBLE_ROWS: f32 = 10.0;
+/// 入力欄の `TextEdit` の ID。
+const INPUT_ID: &str = "ymcad_cmdline_input";
+/// `[変換中]` の色。
+const COMPOSING_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
+/// エラーの色。
+const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0x70, 0x43);
+/// カーソル横の `Area` の ID。
+const DYN_AREA_ID: &str = "ymcad_dyn_input";
+/// カーソル横の入力欄の幅 [px]。
+const DYN_INPUT_WIDTH: f32 = 240.0;
+/// カーソル横の表示の最大幅 [px]。長いエラーやプロンプトはここで折り返す。
+const DYN_MAX_WIDTH: f32 = 480.0;
+/// カーソル横の大きさの見積もり [px]。前フレームの実寸がまだ無いときだけ使う。
+const DYN_SIZE_ESTIMATE: Size = Size { w: 260.0, h: 40.0 };
+/// カーソル横の背景の不透明度。下の図形が透けて見える程度にする。
+const DYN_BACKGROUND_OPACITY: f32 = 0.8;
 
 /// 履歴 1 行の種別。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,6 +88,12 @@ struct Suggestions {
     /// これは選択の由来を区別するためだけの状態で、
     /// 「実行されるのはどれか」とは別物。
     selected: Option<usize>,
+    /// `Esc` で閉じたときの入力。入力がこれと同じ間は候補を出さない。
+    ///
+    /// 候補は毎フレーム入力から作り直すので、閉じた状態を覚えておかないと
+    /// 次のフレームで同じ候補がまた出る。そうなると `Esc` の 2 回目も
+    /// 「候補を閉じる」に化けて、いつまでも中断できない。
+    dismissed_for: Option<String>,
 }
 
 impl Suggestions {
@@ -76,6 +102,11 @@ impl Suggestions {
     /// 候補の顔ぶれが変わったら選択を解除する。選択位置だけ残ると、
     /// 別のコマンドを選んだつもりになる事故が起きる。
     fn update(&mut self, input: &str) {
+        if self.dismissed_for.as_deref() == Some(input) {
+            self.clear();
+            return;
+        }
+        self.dismissed_for = None;
         let next = tools::suggestions(input);
         let changed = next.len() != self.items.len()
             || next
@@ -95,6 +126,12 @@ impl Suggestions {
     fn clear(&mut self) {
         self.items.clear();
         self.selected = None;
+    }
+
+    /// `Esc` で閉じる。入力が変わるまで出さない。
+    fn dismiss(&mut self, input: &str) {
+        self.clear();
+        self.dismissed_for = Some(input.to_owned());
     }
 
     fn is_visible(&self) -> bool {
@@ -167,6 +204,46 @@ pub struct CommandLine {
     composing: bool,
     /// コマンド候補。
     suggestions: Suggestions,
+    /// [`Self::begin_frame`] で消費したキーが表す確定操作。
+    /// [`Self::finish_frame`] で中身を詰めて返す。
+    pending: Option<Submission>,
+    /// カーソル横の動的入力の状態。
+    dynamic: DynamicInput,
+    /// カーソル横に出す直近のエラー。
+    recent_error: Option<RecentError>,
+    /// 直近に描いた入力欄の矩形。変換開始で入力欄が動かないことのテストに使う。
+    #[cfg(test)]
+    input_rect: Option<egui::Rect>,
+}
+
+/// カーソル横に出す直近のエラー。
+#[derive(Debug)]
+struct RecentError {
+    text: String,
+    /// 最初に表示した時刻（`egui::InputState::time`）。
+    ///
+    /// [`CommandLine::error`] は時刻を知らない場所からも呼ばれるので、
+    /// 描画の側で初めて見たときに埋める。
+    shown_at: Option<f64>,
+}
+
+/// カーソル横の動的入力（Issue #20 段階 A）の状態。
+#[derive(Debug)]
+struct DynamicInput {
+    /// オンか。既定はオン。F12 / ステータスバーで切り替える。
+    enabled: bool,
+    /// このフレームの描画に使うオン/オフ。
+    ///
+    /// [`CommandLine::begin_frame`] で `enabled` を写し、フレームの途中では変えない。
+    /// F12 やステータスバーで途中に切り替わると、画面下とカーソル横の両方に
+    /// 入力欄を描いて（または両方とも描かずに）確定操作を二重に処理しかねないため。
+    frame_enabled: bool,
+    /// 基準にするマウス位置。キャンバスの外にいる間は最後の位置のまま。
+    anchor: Option<egui::Pos2>,
+    /// 直前のフレームで置いた位置。変換が始まったときの固定先になる。
+    previous: Option<Point>,
+    /// 変換中に固定している位置。
+    frozen: Option<Point>,
 }
 
 impl Default for CommandLine {
@@ -185,6 +262,17 @@ impl CommandLine {
             last_command: None,
             composing: false,
             suggestions: Suggestions::default(),
+            pending: None,
+            dynamic: DynamicInput {
+                enabled: true,
+                frame_enabled: true,
+                anchor: None,
+                previous: None,
+                frozen: None,
+            },
+            recent_error: None,
+            #[cfg(test)]
+            input_rect: None,
         }
     }
 
@@ -216,8 +304,34 @@ impl CommandLine {
     }
 
     /// エラーを表示する。
+    ///
+    /// 履歴には必ず残す。動的入力がオンならカーソル横にも数秒出す。
     pub fn error(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        self.recent_error = Some(RecentError {
+            text: text.clone(),
+            shown_at: None,
+        });
         self.push_line(LineKind::Error, text);
+    }
+
+    /// 動的入力（カーソル横の入力欄）がオンか。
+    #[must_use]
+    pub fn is_dynamic(&self) -> bool {
+        self.dynamic.enabled
+    }
+
+    /// 動的入力のオン/オフを切り替え、切り替え後の状態を返す。
+    ///
+    /// 描く場所が変わるのは次のフレームから（[`DynamicInput::frame_enabled`]）。
+    pub fn toggle_dynamic(&mut self) -> bool {
+        self.dynamic.enabled = !self.dynamic.enabled;
+        self.dynamic.enabled
+    }
+
+    /// カーソル横の基準にするマウス位置を伝える。キャンバス上にあるときだけ呼ぶ。
+    pub fn set_cursor_anchor(&mut self, pos: egui::Pos2) {
+        self.dynamic.anchor = Some(pos);
     }
 
     /// 入力欄を空にする。
@@ -233,8 +347,8 @@ impl CommandLine {
     /// このフレームの IME イベントを反映する。
     ///
     /// `TextEdit` を描画する前に呼ぶこと。
-    fn track_ime(&mut self, ui: &egui::Ui) {
-        ui.input(|i| {
+    fn track_ime(&mut self, ctx: &egui::Context) {
+        ctx.input(|i| {
             for ev in &i.events {
                 if let egui::Event::Ime(ime) = ev {
                     match ime {
@@ -248,48 +362,240 @@ impl CommandLine {
         });
     }
 
-    /// コマンドラインを描画し、確定操作を返す。
+    /// フレームの最初に呼ぶ。IME の状態を追い、キー入力を消費する。
     ///
-    /// - `prompt` … 実行中コマンドの案内（例: `線分の始点を指定:`）
+    /// **入力欄（`TextEdit`）を描くより前に呼ぶこと。** 候補の操作キーや
+    /// `Enter` を先に奪わないと、`TextEdit` にカーソル移動や確定として取られる。
+    ///
+    /// 確定操作はここでは決めず、入力欄を描いたあとの [`Self::finish_frame`] で決める。
+    /// 同じフレームで打たれた文字が入力欄に入ってから確定させるため
+    /// （分ける前の `show` と同じ順序）。
+    ///
     /// - `allow_suggestions` … コマンド候補を出してよいか。
     ///   ツール実行中や選択待ち中は座標やオプションを打っている段階なので `false` を渡す
-    pub fn show(&mut self, ui: &mut egui::Ui, prompt: &str, allow_suggestions: bool) -> Submission {
-        self.track_ime(ui);
+    pub fn begin_frame(&mut self, ctx: &egui::Context, allow_suggestions: bool) {
+        self.dynamic.frame_enabled = self.dynamic.enabled;
+        let now = ctx.input(|i| i.time);
+        if let Some(e) = &mut self.recent_error {
+            e.shown_at.get_or_insert(now);
+        }
+        self.track_ime(ctx);
         self.refresh_suggestions(allow_suggestions);
 
         // 変換中はキーを一切奪わない。IME に確定させるのが先。
         // 候補の操作キーもこのブロックの中にあるので、変換中は自動的に無効になる。
-        let submitted = if self.composing {
+        let pending = if self.composing {
             None
         } else {
-            ui.input_mut(|i| self.consume_keys(i))
+            ctx.input_mut(|i| self.consume_keys(i))
         };
+        self.pending = pending;
+    }
 
+    /// このフレームで動的入力がオンか（描く場所の判断に使う）。
+    #[must_use]
+    pub fn frame_is_dynamic(&self) -> bool {
+        self.dynamic.frame_enabled
+    }
+
+    /// 画面下のコマンドラインを描く。
+    ///
+    /// - 動的入力がオフ … 履歴・候補・プロンプト・入力欄（従来どおり）
+    /// - 動的入力がオン … 履歴と、読み取り専用のプロンプト 1 行だけ。
+    ///   入力欄と候補はカーソル横（[`Self::show_floating`]）に出る
+    ///
+    /// `prompt` … 実行中コマンドの案内（例: `線分の始点を指定:`）
+    pub fn show_bottom(&mut self, ui: &mut egui::Ui, prompt: &str) {
         self.show_history(ui);
+        if self.dynamic.frame_enabled {
+            // プロンプトは下にも残す。カーソル横を見落としても、履歴の続きとして読める。
+            ui.horizontal(|ui| {
+                ui.monospace(prompt);
+                ui.weak(egui::RichText::new("（入力はカーソル横  F12 で切替）").small());
+            });
+            return;
+        }
         self.show_suggestions(ui);
 
         ui.horizontal(|ui| {
             ui.monospace(prompt);
-            // 変換中は確定処理を止めているので、その旨をユーザーに見せる。
-            if self.composing {
-                ui.colored_label(
-                    egui::Color32::from_rgb(0xff, 0xc1, 0x07),
-                    egui::RichText::new("[変換中]").monospace(),
-                );
-            }
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.input)
-                    .desired_width(f32::INFINITY)
-                    .font(egui::TextStyle::Monospace),
-            );
-            // キー入力が常にコマンドラインへ流れるよう、他に入力先が無ければ
-            // 毎フレーム自分にフォーカスを戻す。
-            if ui.memory(|m| m.focused().is_none()) {
-                response.request_focus();
-            }
+            self.show_composing_badge(ui);
+            self.show_input(ui, f32::INFINITY);
+        });
+    }
+
+    /// 変換中は確定処理を止めているので、その旨をユーザーに見せる。
+    fn show_composing_badge(&self, ui: &mut egui::Ui) {
+        if self.composing {
+            ui.colored_label(COMPOSING_COLOR, egui::RichText::new("[変換中]").monospace());
+        }
+    }
+
+    /// 入力欄を描く。**バッファも `TextEdit` の ID も 1 つだけ。**
+    ///
+    /// ID を固定しておくと、描く場所（画面下 / カーソル横）を切り替えても
+    /// フォーカスとキャレットの位置が引き継がれる。
+    fn show_input(&mut self, ui: &mut egui::Ui, width: f32) {
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.input)
+                .id(egui::Id::new(INPUT_ID))
+                .desired_width(width)
+                .font(egui::TextStyle::Monospace),
+        );
+        #[cfg(test)]
+        {
+            self.input_rect = Some(response.rect);
+        }
+        // キー入力が常にコマンドラインへ流れるよう、他に入力先が無ければ
+        // 毎フレーム自分にフォーカスを戻す。
+        if ui.memory(|m| m.focused().is_none()) {
+            response.request_focus();
+        }
+    }
+
+    /// 直近に描いた入力欄の矩形（テスト用）。
+    #[cfg(test)]
+    pub fn input_rect(&self) -> Option<egui::Rect> {
+        self.input_rect
+    }
+
+    /// 入力欄の中身（テスト用）。
+    #[cfg(test)]
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+
+    /// コマンド候補が出ているか（テスト用）。
+    #[cfg(test)]
+    pub fn suggestions_visible(&self) -> bool {
+        self.suggestions.is_visible()
+    }
+
+    /// カーソル横に入力欄を描く（動的入力がオンのときだけ）。
+    ///
+    /// - `canvas` … キャンバス（ビューポート）の矩形。この中に収める
+    /// - `tool_active` … コマンドを実行中か（選択待ちを含む）
+    ///
+    /// **何もしていないときも入力欄は毎フレーム描く。** egui は描かれなかった
+    /// ウィジェットのフォーカスを外すので、描くのをやめるとキー入力が流れなくなる。
+    /// そのときは不透明度 0 で描いて見た目だけ消す。
+    /// `set_invisible` は使わない。`TextEdit` は「見えている」ときしか IME へ
+    /// 入力欄の位置を伝えない（`PlatformOutput::ime`）ので、変換が始まらなくなる。
+    pub fn show_floating(
+        &mut self,
+        ctx: &egui::Context,
+        prompt: &str,
+        canvas: egui::Rect,
+        tool_active: bool,
+    ) {
+        if !self.dynamic.frame_enabled {
+            return;
+        }
+
+        let now = ctx.input(|i| i.time);
+        let error_remaining = self.recent_error.as_mut().and_then(|e| {
+            let shown_at = *e.shown_at.get_or_insert(now);
+            dynamic::error_remaining(shown_at, now)
+        });
+        if let Some(remaining) = error_remaining {
+            // 期限が来たら消えるように再描画を予約する。
+            ctx.request_repaint_after(Duration::from_secs_f64(remaining));
+        }
+        let visible = dynamic::is_visible(Activity {
+            tool_active,
+            has_input: !self.input.is_empty(),
+            composing: self.composing,
+            error_shown: error_remaining.is_some(),
         });
 
-        match submitted {
+        let area_id = egui::Id::new(DYN_AREA_ID);
+        // 大きさは前フレームの実寸を使う。中身で大きさが変わるので、このフレームの
+        // 大きさは描き終わるまで分からない。
+        let size = ctx
+            .memory(|m| m.area_rect(area_id))
+            .map_or(DYN_SIZE_ESTIMATE, |r| Size {
+                w: r.width(),
+                h: r.height(),
+            });
+        let bounds = Bounds {
+            left: canvas.left(),
+            top: canvas.top(),
+            right: canvas.right(),
+            bottom: canvas.bottom(),
+        };
+        let anchor = self
+            .dynamic
+            .anchor
+            .map_or_else(|| bounds.center(), |p| Point { x: p.x, y: p.y });
+        let computed = dynamic::place(anchor, size, bounds);
+        let pos = dynamic::resolve_position(
+            self.composing,
+            &mut self.dynamic.frozen,
+            self.dynamic.previous,
+            computed,
+        );
+        self.dynamic.previous = Some(pos);
+
+        egui::Area::new(area_id)
+            .order(egui::Order::Foreground)
+            .fixed_pos(egui::pos2(pos.x, pos.y))
+            .constrain_to(canvas)
+            // クリックを素通しする。キャンバスの点の指定やホバーを奪わないように。
+            // キー入力はフォーカスで届くので、ここを切っても入力欄は動く。
+            .interactable(false)
+            .fade_in(false)
+            .show(ctx, |ui| {
+                // **入力欄より前（上・左）に来るものは、見せるときも隠すときも同じ並びで描く。**
+                // 並びが変わると変換が始まったフレームで入力欄が動き、入力欄に付いて出る
+                // IME の候補ウィンドウが最初の 1 打鍵で跳ねる（Area は固定していても）。
+                // 隠すときは同じ並びのまま不透明度 0 にする。
+                if !visible {
+                    ui.multiply_opacity(0.0);
+                }
+                // Area の中身の最大幅は前フレームの大きさになっているので、
+                // 広げないと候補やエラーが前フレームの幅で折り返される。
+                ui.set_max_width(DYN_MAX_WIDTH);
+                let fill = ui
+                    .visuals()
+                    .window_fill
+                    .gamma_multiply(DYN_BACKGROUND_OPACITY);
+                let stroke = ui.visuals().window_stroke;
+                egui::Frame::new()
+                    .fill(fill)
+                    .stroke(stroke)
+                    .corner_radius(4)
+                    .inner_margin(egui::Margin::same(6))
+                    .show(ui, |ui| {
+                        ui.label(
+                            egui::RichText::new(prompt).color(ui.visuals().strong_text_color()),
+                        );
+                        ui.horizontal(|ui| {
+                            self.show_input(ui, DYN_INPUT_WIDTH);
+                            // `[変換中]` は入力欄の後ろに置く。前に置くと入力欄が右へずれる。
+                            self.show_composing_badge(ui);
+                        });
+                        // ここから下は入力欄の位置に影響しない。
+                        self.show_suggestions(ui);
+                        if let (Some(_), Some(e)) = (error_remaining, &self.recent_error) {
+                            ui.colored_label(ERROR_COLOR, egui::RichText::new(&e.text).monospace());
+                        }
+                    });
+            });
+    }
+
+    /// 入力欄を描いたあとに呼び、このフレームの確定操作を返す。
+    pub fn finish_frame(&mut self) -> Submission {
+        let submission = self.resolve_pending();
+        if submission != Submission::None {
+            // 次の操作に移ったので、前のエラーはカーソル横から下げる（履歴には残る）。
+            // この後の処理で新しいエラーが出れば、それが改めて出る。
+            self.recent_error = None;
+        }
+        submission
+    }
+
+    fn resolve_pending(&mut self) -> Submission {
+        match self.pending.take() {
             Some(Submission::Cancel) => {
                 self.input.clear();
                 self.suggestions.clear();
@@ -339,7 +645,7 @@ impl CommandLine {
             // 候補が出ていれば、まず候補だけを閉じる。
             // いきなりコマンドを中断すると、打ち間違いのやり直しが面倒になる。
             if self.suggestions.is_visible() {
-                self.suggestions.clear();
+                self.suggestions.dismiss(&self.input);
                 return None;
             }
             return Some(Submission::Cancel);
@@ -450,7 +756,7 @@ impl CommandLine {
                     let color = match line.kind {
                         LineKind::Input => ui.visuals().text_color(),
                         LineKind::Info => ui.visuals().weak_text_color(),
-                        LineKind::Error => egui::Color32::from_rgb(0xff, 0x70, 0x43),
+                        LineKind::Error => ERROR_COLOR,
                     };
                     ui.colored_label(color, egui::RichText::new(&line.text).monospace());
                 }
@@ -590,6 +896,21 @@ mod tests {
         s.selected = Some(1);
         s.update("L");
         assert_eq!(s.selected, None);
+    }
+
+    /// `Esc` で閉じた候補は、入力が同じ間は作り直しても出ないこと。
+    /// 入力が変われば再び出ること。
+    #[test]
+    fn dismissed_suggestions_stay_closed_until_the_input_changes() {
+        let mut s = suggestions_for("L");
+        assert!(s.is_visible(), "前提");
+        s.dismiss("L");
+        s.update("L");
+        assert!(!s.is_visible(), "同じ入力では出ない");
+        s.update("LA");
+        assert!(s.is_visible(), "入力が変われば出る");
+        s.update("L");
+        assert!(s.is_visible(), "一度変わったら閉じた記憶は消える");
     }
 
     /// Tab の補完先は Enter で実行される候補と一致すること。

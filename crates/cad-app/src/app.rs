@@ -176,7 +176,7 @@ impl CadApp {
 
     // ---- UI ---------------------------------------------------------------
 
-    fn status_bar(&self, ui: &mut egui::Ui) {
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             // 座標は小数点以下 4 桁で表示する。
             match self.cursor_model {
@@ -211,6 +211,23 @@ impl CadApp {
                 ui.weak(egui::RichText::new("osnap").monospace());
             }
             ui.separator();
+            // 動的入力。OSNAP と同じ見せ方にし、クリックでも切り替えられるようにする。
+            let dyn_text = if self.session.cmdline.is_dynamic() {
+                egui::RichText::new("DYN")
+                    .monospace()
+                    .color(egui::Color32::from_rgb(0xc6, 0xff, 0x00))
+            } else {
+                egui::RichText::new("dyn")
+                    .monospace()
+                    .color(ui.visuals().weak_text_color())
+            };
+            let dyn_label = ui
+                .add(egui::Label::new(dyn_text).sense(egui::Sense::click()))
+                .on_hover_text("動的入力（カーソル横の入力欄）の ON/OFF  F12");
+            if dyn_label.clicked() {
+                self.toggle_dynamic_input();
+            }
+            ui.separator();
             if self.session.has_active_tool() {
                 ui.colored_label(
                     egui::Color32::from_rgb(0xff, 0xc1, 0x07),
@@ -235,23 +252,63 @@ impl CadApp {
 
     fn command_area(&mut self, ui: &mut egui::Ui) {
         let prompt = self.session.prompt();
-        // ツール実行中と選択待ち中は候補を出さない。座標やオプションを打つ段階なので、
-        // コマンド名の候補が出ると邪魔になる。
-        let allow_suggestions = !self.session.has_active_tool();
-        let submission = self.session.cmdline.show(ui, &prompt, allow_suggestions);
+        self.session.cmdline.show_bottom(ui, &prompt);
+        // 動的入力がオンなら入力欄はカーソル横にあり、まだ描いていない。
+        // 確定はそちらを描いたあと（`dynamic_input_area`）で行う。
+        if !self.session.cmdline.frame_is_dynamic() {
+            let submission = self.session.cmdline.finish_frame();
+            self.apply_submission(submission);
+        }
+    }
+
+    /// カーソル横の入力欄を描き、確定操作を実行する（動的入力がオンのときだけ）。
+    ///
+    /// キャンバスの矩形とマウス位置が要るので、キャンバスを描いたあとに呼ぶ。
+    fn dynamic_input_area(&mut self, ctx: &egui::Context) {
+        if !self.session.cmdline.frame_is_dynamic() {
+            return;
+        }
+        // キャンバスでのクリックでツールが進んでいるかもしれないので、ここで取り直す。
+        let prompt = self.session.prompt();
+        let tool_active = self.session.has_active_tool();
+        self.session
+            .cmdline
+            .show_floating(ctx, &prompt, self.viewport.rect(), tool_active);
+        let submission = self.session.cmdline.finish_frame();
         if submission != Submission::None {
-            self.session.handle_submission(submission, &mut self.doc);
-            for action in self.session.take_view_actions() {
-                self.apply_view_action(action);
-            }
-            for action in self.session.take_ui_actions() {
-                match action {
-                    UiAction::ToggleLayerPanel => self.layer_panel.toggle(),
-                    UiAction::ToggleComponentPanel => self.component_panel.toggle(),
-                    UiAction::File(a) => {
-                        let outcome = self.files.request(a, &mut self.doc);
-                        self.report_file_outcome(outcome);
-                    }
+            // キャンバスはもう描き終えているので、確定の結果（ラバーバンドや新しい図形）は
+            // 次のフレームで描かれる。その次のフレームを待たせずに確実に起こす。
+            ctx.request_repaint();
+        }
+        self.apply_submission(submission);
+    }
+
+    /// 動的入力を切り替え、履歴に残す。
+    fn toggle_dynamic_input(&mut self) {
+        let state = if self.session.cmdline.toggle_dynamic() {
+            "ON"
+        } else {
+            "OFF"
+        };
+        self.session.cmdline.info(format!("動的入力: {state}"));
+    }
+
+    /// コマンドラインで確定された操作を実行する。
+    fn apply_submission(&mut self, submission: Submission) {
+        if submission == Submission::None {
+            return;
+        }
+        self.session.handle_submission(submission, &mut self.doc);
+        for action in self.session.take_view_actions() {
+            self.apply_view_action(action);
+        }
+        for action in self.session.take_ui_actions() {
+            match action {
+                UiAction::ToggleLayerPanel => self.layer_panel.toggle(),
+                UiAction::ToggleComponentPanel => self.component_panel.toggle(),
+                UiAction::File(a) => {
+                    let outcome = self.files.request(a, &mut self.doc);
+                    self.report_file_outcome(outcome);
                 }
             }
         }
@@ -281,6 +338,15 @@ impl CadApp {
             self.session
                 .cmdline
                 .info(format!("オブジェクトスナップ: {state}"));
+        }
+        // F12 で動的入力を切り替える（AutoCAD と同じキー）。F3 と同じく TextEdit は消費しない。
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12)) {
+            self.toggle_dynamic_input();
+        }
+
+        // カーソル横の入力欄の基準。キャンバスの外にいる間は最後の位置に留める。
+        if let Some(pos) = response.hover_pos() {
+            self.session.cmdline.set_cursor_anchor(pos);
         }
 
         let raw_cursor = response
@@ -559,13 +625,21 @@ impl eframe::App for CadApp {
         self.handle_file_input(&ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
 
+        // ツール実行中と選択待ち中は候補を出さない。座標やオプションを打つ段階なので、
+        // コマンド名の候補が出ると邪魔になる。
+        let allow_suggestions = !self.session.has_active_tool();
+        self.session.cmdline.begin_frame(&ctx, allow_suggestions);
         egui::Panel::bottom("cmdline").show(ui, |ui| self.command_area(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         self.layer_area(ui);
         self.component_area(ui);
         egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
+        self.dynamic_input_area(&ctx);
     }
 }
+
+#[cfg(test)]
+mod behavior_tests;
 
 #[cfg(test)]
 mod tests {
