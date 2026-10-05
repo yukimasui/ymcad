@@ -711,6 +711,12 @@ impl CadApp {
 }
 
 impl CadApp {
+    /// リボンの状態（スクリーンショットのテスト用。`ui_snapshot` は別モジュールなので）。
+    #[cfg(test)]
+    pub fn ribbon(&self) -> &Ribbon {
+        &self.ribbon
+    }
+
     /// 画面上端のリボンを描き、押されたコマンドを始める。
     ///
     /// **コマンド名を打つのと同じ扱い**（`Session::start_command_from_ui`）。

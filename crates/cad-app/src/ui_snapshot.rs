@@ -275,3 +275,179 @@ fn ui_snapshot_ortho_and_polar_status() {
     let mut h = line_tracking(&[egui::Key::F8, egui::Key::F10], 40.0, 100.0);
     shot(&mut h, "ortho_polar_c_both_on_status");
 }
+
+// ---- リボン（Issue #26） ----------------------------------------------------
+
+/// 全アイコンを 2 倍（44px）と等倍（22px）で、名前つきの格子に並べた一覧。
+///
+/// アイコンが何のコマンドか分かる絵になっているかを人が見て確かめるための画像。
+fn icon_sheet(theme: egui::Theme, name: &str) {
+    use crate::ribbon::{icons, layout};
+
+    const COLS: u16 = 8;
+    const CELL: egui::Vec2 = egui::vec2(110.0, 92.0);
+    let names: Vec<&'static str> = layout::placed_commands().collect();
+    let count = u16::try_from(names.len()).expect("コマンド数は小さい");
+    let rows = count.div_ceil(COLS);
+    let size = egui::vec2(
+        CELL.x * f32::from(COLS) + 16.0,
+        CELL.y * f32::from(rows) + 16.0,
+    );
+    let mut harness = Harness::builder()
+        .with_size(size)
+        .with_theme(theme)
+        .wgpu()
+        .build_ui(move |ui| {
+            egui_extras::install_image_loaders(ui.ctx());
+            // build_ui はパネルを置かないので、背景をテーマの色で塗る。
+            ui.painter()
+                .rect_filled(ui.clip_rect(), 0.0, ui.visuals().panel_fill);
+            let origin = ui.max_rect().min + egui::vec2(8.0, 8.0);
+            for (i, name) in (0..count).zip(&names) {
+                let (col, row) = (f32::from(i % COLS), f32::from(i / COLS));
+                let cell = egui::Rect::from_min_size(
+                    origin + egui::vec2(col * CELL.x, row * CELL.y),
+                    CELL,
+                );
+                let painter = ui.painter();
+                painter.rect_stroke(
+                    cell.shrink(2.0),
+                    3.0,
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                    egui::StrokeKind::Inside,
+                );
+                let fg = ui.visuals().text_color();
+                let big = egui::Rect::from_min_size(
+                    cell.min + egui::vec2(10.0, 10.0),
+                    egui::vec2(44.0, 44.0),
+                );
+                icons::paint(ui, name, big, fg);
+                let small = egui::Rect::from_min_size(
+                    cell.min + egui::vec2(70.0, 21.0),
+                    egui::vec2(22.0, 22.0),
+                );
+                icons::paint(ui, name, small, fg);
+                // 実行中（強調）の見た目も小さく並べる。
+                let hi = egui::Rect::from_min_size(
+                    cell.min + egui::vec2(66.0, 46.0),
+                    egui::vec2(30.0, 30.0),
+                );
+                ui.painter()
+                    .rect_filled(hi, 3.0, ui.visuals().selection.bg_fill);
+                icons::paint(
+                    ui,
+                    name,
+                    hi.shrink(4.0),
+                    ui.visuals().selection.stroke.color,
+                );
+                let painter = ui.painter();
+                painter.text(
+                    egui::pos2(cell.min.x + 32.0, cell.max.y - 14.0),
+                    egui::Align2::CENTER_CENTER,
+                    *name,
+                    egui::FontId::proportional(11.0),
+                    ui.visuals().text_color(),
+                );
+            }
+        });
+    harness.run_steps(2);
+    let img = harness.render().expect("描画に失敗");
+    let path = out_dir().join(format!("{name}.png"));
+    img.save(&path).expect("PNG を保存できない");
+    println!("saved {}", path.display());
+}
+
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_ribbon_icon_sheet() {
+    icon_sheet(egui::Theme::Dark, "ribbon_icon_sheet");
+    icon_sheet(egui::Theme::Light, "ribbon_icon_sheet_light");
+}
+
+/// リボンのボタン（今のタブで描かれたもの）の矩形。
+fn ribbon_button_rect(harness: &Harness<'_, CadApp>, name: &str) -> egui::Rect {
+    harness
+        .state()
+        .ribbon()
+        .probe()
+        .buttons
+        .iter()
+        .find(|b| b.name == name)
+        .unwrap_or_else(|| panic!("{name} のボタンが見えていない"))
+        .rect
+}
+
+fn ribbon_tab(harness: &mut Harness<'_, CadApp>, title: &str) {
+    let rect = harness
+        .state()
+        .ribbon()
+        .probe()
+        .tabs
+        .iter()
+        .find(|(t, _)| *t == title)
+        .unwrap_or_else(|| panic!("{title} のタブが無い"))
+        .1;
+    click(harness, rect.center());
+}
+
+/// 各タブを幅 1280 で。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_ribbon_tabs() {
+    let mut h = harness();
+    hover(&mut h, CANVAS_CENTER);
+    shot(&mut h, "ribbon_a_home_1280");
+    ribbon_tab(&mut h, "コンポーネント");
+    hover(&mut h, CANVAS_CENTER);
+    shot(&mut h, "ribbon_b_component_1280");
+    ribbon_tab(&mut h, "表示・ファイル");
+    hover(&mut h, CANVAS_CENTER);
+    shot(&mut h, "ribbon_c_view_file_1280");
+}
+
+/// 幅 800 では横スクロールになる。ホイールで右端まで送った状態も撮る。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_ribbon_narrow() {
+    let mut h = harness();
+    h.set_size(egui::vec2(800.0, 600.0));
+    hover(&mut h, egui::pos2(400.0, 300.0));
+    shot(&mut h, "ribbon_d_home_800");
+
+    let over = ribbon_button_rect(&h, "LINE").center();
+    hover(&mut h, egui::pos2(400.0, over.y));
+    for _ in 0..10 {
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Point,
+            delta: egui::vec2(0.0, -200.0),
+            phase: egui::TouchPhase::Move,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.run_steps(30);
+    shot(&mut h, "ribbon_e_home_800_scrolled_to_end");
+}
+
+/// ボタンにマウスを乗せるとツールチップ「名前（エイリアス）説明」が出る。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_ribbon_tooltip() {
+    let mut h = harness();
+    let trim = ribbon_button_rect(&h, "TRIM").center();
+    h.hover_at(trim);
+    h.run_steps(60);
+    shot(&mut h, "ribbon_f_tooltip_trim");
+}
+
+/// LINE を押して実行中 → LINE のボタンが選択色で強調される。カーソル横にプロンプト。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_ribbon_line_running() {
+    let mut h = harness();
+    hover(&mut h, CANVAS_CENTER);
+    let line = ribbon_button_rect(&h, "LINE").center();
+    click(&mut h, line);
+    hover(&mut h, CANVAS_CENTER);
+    hover(&mut h, egui::pos2(700.0, 380.0));
+    shot(&mut h, "ribbon_g_line_running_highlighted");
+}
