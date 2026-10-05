@@ -126,6 +126,9 @@ impl Drafting {
         let state = if *flag { "ON" } else { "OFF" };
         let note = if self.polar_overridden() {
             "（両方オンの間は直交が優先されます）"
+        } else if mode == Mode::Ortho && self.polar {
+            // 直交を切ると、それまで負けていた極が効き始める。ON のときの案内と対にする。
+            "（極トラッキングが効きます）"
         } else {
             ""
         };
@@ -313,10 +316,63 @@ pub fn track_cursor(
 
 // ---- キーとステータスバー（egui） ------------------------------------------
 
+/// IME の変換中かを、IME のイベント 1 つで更新する。
+///
+/// 空でない Preedit で変換中、空の Preedit（取り消し）と Commit（確定）で終わり。
+/// コマンドラインの `track_ime` と同じ解釈。
+#[must_use]
+pub fn composing_after(composing: bool, ev: &egui::ImeEvent) -> bool {
+    match ev {
+        egui::ImeEvent::Preedit { text, .. } => !text.is_empty(),
+        egui::ImeEvent::Commit(_) => false,
+        _ => composing,
+    }
+}
+
+/// どの入力欄でも、IME の変換中かを追う（[`take_key_toggles`] が使う）。
+///
+/// コマンドラインの変換中フラグはコマンドラインがキーの持ち主のときしか立たない（ADR-0035）。
+/// パネルの欄（レイヤ名など）での変換も見たいので、フォーカスの持ち主を問わずに追う。
+/// フォーカスが移ったら変換は終わったとみなす（確定・取り消しは移った先へ届くため）。
+#[derive(Clone, Copy, Debug, Default)]
+struct ImeWatch {
+    composing: bool,
+    focus: Option<egui::Id>,
+}
+
 /// このフレームで押された切り替えキー（F8 / F10）を取る。
 ///
 /// F3 / F12 と同じく `TextEdit` はファンクションキーを消費しないので、キャンバスで拾ってよい。
+///
+/// **いずれかの入力欄が IME で変換中のフレームでは何も取らない。** 日本語 IME では
+/// F8 が半角カナ、F10 が半角英数への変換キーで、名前を打つとき（ADR-0032）によく使う。
+/// 変換のつもりで押したキーで作図補助が切り替わると、気づかないまま作図が変わる（ADR-0002）。
+/// 状態はアプリに持たせず egui の一時データに置く（このモジュールに閉じるため）。
 pub fn take_key_toggles(ui: &egui::Ui) -> Vec<Mode> {
+    let ctx = ui.ctx();
+    let id = egui::Id::new("drafting::ime_watch");
+    let focus = ctx.memory(|m| m.focused());
+    let mut watch: ImeWatch = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
+    if watch.focus != focus {
+        watch = ImeWatch {
+            composing: false,
+            focus,
+        };
+    }
+    // フレームの途中で確定した場合も、そのフレームは変換中として扱う（確定と同じ打鍵の可能性）。
+    let mut composed = watch.composing;
+    ctx.input(|i| {
+        for ev in &i.events {
+            if let egui::Event::Ime(ime) = ev {
+                watch.composing = composing_after(watch.composing, ime);
+                composed |= watch.composing;
+            }
+        }
+    });
+    ctx.data_mut(|d| d.insert_temp(id, watch));
+    if composed {
+        return Vec::new();
+    }
     Mode::ALL
         .into_iter()
         .filter(|m| ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, m.key())))
@@ -639,11 +695,83 @@ mod tests {
             "両方オンになったら案内する: {msg}"
         );
         assert!(d.polar_overridden());
-        assert_eq!(d.toggle(Mode::Ortho), "直交モード: OFF");
+        assert_eq!(
+            d.toggle(Mode::Ortho),
+            "直交モード: OFF（極トラッキングが効きます）",
+            "直交を切ると極が効き始めることを案内する"
+        );
         assert!(d.is_on(Mode::Polar), "F8 を切っても POLAR は残る");
         d.toggle(Mode::Ortho);
         d.toggle(Mode::Polar);
         assert!(d.is_on(Mode::Ortho), "F10 を切っても ORTHO は残る");
         assert!(!d.is_on(Mode::Polar));
+        assert_eq!(
+            d.toggle(Mode::Ortho),
+            "直交モード: OFF",
+            "極がオフなら案内は付けない"
+        );
+    }
+
+    /// IME のイベントによる変換中の判定。
+    #[test]
+    fn composing_follows_preedit_and_commit() {
+        let preedit = |t: &str| egui::ImeEvent::Preedit {
+            text: t.to_owned(),
+            active_range_chars: None,
+        };
+        assert!(composing_after(false, &preedit("せん")));
+        assert!(
+            !composing_after(true, &preedit("")),
+            "空の Preedit は取り消し"
+        );
+        assert!(!composing_after(
+            true,
+            &egui::ImeEvent::Commit("線".to_owned())
+        ));
+    }
+
+    // ---- 基準点（Session::tracking_base） ----
+
+    /// 直前の点を持つが、図形の指定を待つこともあるツール（いまは該当するツールが無いので試験用）。
+    #[derive(Debug)]
+    struct PickTool {
+        wants_entity: bool,
+    }
+
+    impl crate::tools::Tool for PickTool {
+        fn name(&self) -> &'static str {
+            "PICKTEST"
+        }
+        fn prompt(&self) -> String {
+            String::new()
+        }
+        fn last_point(&self) -> Option<Point2> {
+            Some(BASE)
+        }
+        fn wants_entity(&self) -> bool {
+            self.wants_entity
+        }
+        fn step(
+            &mut self,
+            _input: crate::tools::StepInput,
+            _ctx: &crate::tools::ToolCtx<'_>,
+        ) -> crate::tools::StepOutcome {
+            crate::tools::StepOutcome::Continue
+        }
+    }
+
+    /// 図形の指定を待っている間は、直前の点があっても拘束しない（ピックを邪魔しない）。
+    #[test]
+    fn no_tracking_while_a_tool_wants_an_entity() {
+        let mut doc = cad_core::Document::new();
+        for (wants_entity, expected) in [(false, Some(BASE)), (true, None)] {
+            let mut session = Session::new();
+            session.start_tool_directly(Box::new(PickTool { wants_entity }), &mut doc);
+            assert_eq!(
+                session.tracking_base(),
+                expected,
+                "wants_entity {wants_entity}"
+            );
+        }
     }
 }

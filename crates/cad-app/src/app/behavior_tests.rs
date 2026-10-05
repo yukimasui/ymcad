@@ -1378,3 +1378,125 @@ fn ortho_and_polar_in_the_status_bar_are_clickable_with_a_pointing_hand() {
         .count();
     assert_eq!(toggled, 3, "クリックでも履歴に残る");
 }
+
+/// 変換中（コマンドラインでもパネルの欄でも）は F8 / F10 で切り替えない。
+///
+/// 日本語 IME では F8 が半角カナ、F10 が半角英数への変換キー。変換のつもりで押したキーで
+/// 作図補助が切り替わると、気づかないまま作図が変わる（PR #35 の操作レビュー）。
+#[test]
+fn f8_and_f10_do_nothing_while_composing() {
+    let commit = || egui::Event::Ime(egui::ImeEvent::Commit("線".to_owned()));
+    let mut h = app_with_dynamic(true);
+    hover(&mut h, P1);
+
+    // コマンドラインで変換中。
+    frame(&mut h, [preedit("せん")]);
+    settle(&mut h);
+    press(&mut h, egui::Key::F8);
+    press(&mut h, egui::Key::F10);
+    assert!(
+        !h.state().drafting.is_on(Mode::Ortho),
+        "変換中の F8 で切り替えない"
+    );
+    assert!(
+        !h.state().drafting.is_on(Mode::Polar),
+        "変換中の F10 で切り替えない"
+    );
+
+    // 同じフレームに Preedit と F8 が来ても切り替えない。
+    let mut events = vec![preedit("せんぶん")];
+    events.extend(key(egui::Key::F8));
+    frame(&mut h, events);
+    settle(&mut h);
+    assert!(!h.state().drafting.is_on(Mode::Ortho), "同じフレームの F8");
+
+    // 確定した後は効く。
+    frame(&mut h, [commit()]);
+    settle(&mut h);
+    press(&mut h, egui::Key::F8);
+    assert!(h.state().drafting.is_on(Mode::Ortho), "確定後の F8 は効く");
+
+    // パネルの欄（レイヤ名）で変換中。
+    focus_layer_name_field(&mut h);
+    frame(&mut h, [preedit("れいや")]);
+    settle(&mut h);
+    press(&mut h, egui::Key::F10);
+    press(&mut h, egui::Key::F8);
+    assert!(
+        !h.state().drafting.is_on(Mode::Polar),
+        "パネルで変換中の F10"
+    );
+    assert!(h.state().drafting.is_on(Mode::Ortho), "パネルで変換中の F8");
+
+    // 取り消し（空の Preedit）の後は効く。
+    frame(&mut h, [preedit("")]);
+    settle(&mut h);
+    press(&mut h, egui::Key::F10);
+    assert!(
+        h.state().drafting.is_on(Mode::Polar),
+        "取り消し後の F10 は効く"
+    );
+}
+
+/// MIRROR で軸を決めた後の「元を消すか Y/N」では、点を指さないので拘束しない。
+#[test]
+fn mirror_yes_no_prompt_is_not_tracked() {
+    let mut h = app_with_dynamic(true);
+    hover(&mut h, P1);
+    press(&mut h, egui::Key::F10);
+    // 選ぶ線分を 1 本引く。
+    let a = egui::pos2(300.0, 500.0);
+    let b = egui::pos2(400.0, 520.0);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, a);
+    click(&mut h, b);
+    press(&mut h, egui::Key::Escape);
+
+    type_text(&mut h, "MI");
+    press(&mut h, egui::Key::Enter);
+    // 線分の中点を選ぶ。履歴が伸びて作図領域が縮むので、画面位置はモデル座標から取り直す。
+    let l = lines(&h)[0];
+    let mid = h.state().viewport.model_to_screen(l.a.lerp(l.b, 0.5));
+    click(&mut h, mid);
+    assert_eq!(h.state().session.selection.len(), 1, "前提: 線分を選んだ");
+    press(&mut h, egui::Key::Enter); // 選択を確定
+    click(&mut h, P1);
+    assert!(
+        h.state().session.tracking_base().is_some(),
+        "前提: 軸の 2 点目では効く"
+    );
+    click(&mut h, P2);
+    assert!(
+        h.state().session.prompt().contains("[はい(Y)/いいえ(N)]"),
+        "前提: Y/N の問い合わせ中: {}",
+        h.state().session.prompt()
+    );
+    assert_eq!(
+        h.state().session.tracking_base(),
+        None,
+        "Y/N の間は拘束しない"
+    );
+    let pos = screen_at(&h, model(&h, P1), 44.0, 100.0);
+    hover(&mut h, pos);
+    assert_point(cursor(&h), model(&h, pos), "45° に吸い付かない");
+}
+
+/// 動的入力がオフでも、直接距離入力の向きは直交に従う（コマンドラインの経路）。
+#[test]
+fn direct_distance_follows_ortho_with_dynamic_input_off() {
+    let mut h = app_with_dynamic(false);
+    hover(&mut h, P1);
+    press(&mut h, egui::Key::F8);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, P1);
+    let base = h.state().session.tracking_base().expect("前提: 基準点");
+    let pos = screen_at(&h, base, 250.0, 200.0);
+    hover(&mut h, pos);
+    type_text(&mut h, "50");
+    press(&mut h, egui::Key::Enter);
+    let l = lines(&h);
+    assert_eq!(l.len(), 1);
+    assert_point(l[0].b, Point2::new(base.x, base.y - 50.0), "下へ垂直に 50");
+}
