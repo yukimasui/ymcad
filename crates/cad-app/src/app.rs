@@ -176,7 +176,7 @@ impl CadApp {
 
     // ---- UI ---------------------------------------------------------------
 
-    fn status_bar(&self, ui: &mut egui::Ui) {
+    fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             // 座標は小数点以下 4 桁で表示する。
             match self.cursor_model {
@@ -211,6 +211,23 @@ impl CadApp {
                 ui.weak(egui::RichText::new("osnap").monospace());
             }
             ui.separator();
+            // 動的入力。OSNAP と同じ見せ方にし、クリックでも切り替えられるようにする。
+            let dyn_text = if self.session.cmdline.is_dynamic() {
+                egui::RichText::new("DYN")
+                    .monospace()
+                    .color(egui::Color32::from_rgb(0xc6, 0xff, 0x00))
+            } else {
+                egui::RichText::new("dyn")
+                    .monospace()
+                    .color(ui.visuals().weak_text_color())
+            };
+            let dyn_label = ui
+                .add(egui::Label::new(dyn_text).sense(egui::Sense::click()))
+                .on_hover_text("動的入力（カーソル横の入力欄）の ON/OFF  F12");
+            if dyn_label.clicked() {
+                self.toggle_dynamic_input();
+            }
+            ui.separator();
             if self.session.has_active_tool() {
                 ui.colored_label(
                     egui::Color32::from_rgb(0xff, 0xc1, 0x07),
@@ -236,8 +253,39 @@ impl CadApp {
     fn command_area(&mut self, ui: &mut egui::Ui) {
         let prompt = self.session.prompt();
         self.session.cmdline.show_bottom(ui, &prompt);
+        // 動的入力がオンなら入力欄はカーソル横にあり、まだ描いていない。
+        // 確定はそちらを描いたあと（`dynamic_input_area`）で行う。
+        if !self.session.cmdline.frame_is_dynamic() {
+            let submission = self.session.cmdline.finish_frame();
+            self.apply_submission(submission);
+        }
+    }
+
+    /// カーソル横の入力欄を描き、確定操作を実行する（動的入力がオンのときだけ）。
+    ///
+    /// キャンバスの矩形とマウス位置が要るので、キャンバスを描いたあとに呼ぶ。
+    fn dynamic_input_area(&mut self, ctx: &egui::Context) {
+        if !self.session.cmdline.frame_is_dynamic() {
+            return;
+        }
+        // キャンバスでのクリックでツールが進んでいるかもしれないので、ここで取り直す。
+        let prompt = self.session.prompt();
+        let tool_active = self.session.has_active_tool();
+        self.session
+            .cmdline
+            .show_floating(ctx, &prompt, self.viewport.rect(), tool_active);
         let submission = self.session.cmdline.finish_frame();
         self.apply_submission(submission);
+    }
+
+    /// 動的入力を切り替え、履歴に残す。
+    fn toggle_dynamic_input(&mut self) {
+        let state = if self.session.cmdline.toggle_dynamic() {
+            "ON"
+        } else {
+            "OFF"
+        };
+        self.session.cmdline.info(format!("動的入力: {state}"));
     }
 
     /// コマンドラインで確定された操作を実行する。
@@ -285,6 +333,15 @@ impl CadApp {
             self.session
                 .cmdline
                 .info(format!("オブジェクトスナップ: {state}"));
+        }
+        // F12 で動的入力を切り替える（AutoCAD と同じキー）。F3 と同じく TextEdit は消費しない。
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12)) {
+            self.toggle_dynamic_input();
+        }
+
+        // カーソル横の入力欄の基準。キャンバスの外にいる間は最後の位置に留める。
+        if let Some(pos) = response.hover_pos() {
+            self.session.cmdline.set_cursor_anchor(pos);
         }
 
         let raw_cursor = response
@@ -572,6 +629,7 @@ impl eframe::App for CadApp {
         self.layer_area(ui);
         self.component_area(ui);
         egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
+        self.dynamic_input_area(&ctx);
     }
 }
 
