@@ -53,7 +53,7 @@
 | **ホーム**（起動時） | 作図 | LINE / POLYLINE / CIRCLE / ARC / RECTANGLE / XLINE |
 | | 修正 | ERASE / MOVE / COPY / STRETCH / ROTATE / SCALE / MIRROR / TRIM / EXTEND / FILLET / CHAMFER / EXPLODE |
 | | グループ | GROUP / UNGROUP |
-| | 画層 | LAYER |
+| | レイヤ | LAYER |
 | **コンポーネント** | 定義・編集 | COMPONENT / REDEFINE / EDITCOMP / ENDCOMP |
 | | 配置 | INSERT |
 | | パラメータ | PARAM / BIND / PSET |

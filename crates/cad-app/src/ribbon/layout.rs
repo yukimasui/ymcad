@@ -32,7 +32,7 @@ pub struct GroupSpec {
 
 /// リボンの全タブ。起動時は先頭（ホーム）を開く。
 ///
-/// 日常の作図・修正・グループ・画層は全部「ホーム」に置く。線を引いてすぐトリムするような
+/// 日常の作図・修正・グループ・レイヤは全部「ホーム」に置く。線を引いてすぐトリムするような
 /// 日常操作でタブを切り替えさせないため（Issue #26 の「世間の不満」）。
 /// UNDO / REDO / SAVE はタブには置かず、タブの行の右端に常に出す（[`QUICK_ACCESS`]）。
 pub static TABS: &[TabSpec] = &[
@@ -55,7 +55,7 @@ pub static TABS: &[TabSpec] = &[
                 commands: &["GROUP", "UNGROUP"],
             },
             GroupSpec {
-                title: "画層",
+                title: "レイヤ",
                 commands: &["LAYER"],
             },
         ],
@@ -198,7 +198,7 @@ mod tests {
         }
     }
 
-    /// 起動時に開く先頭タブはホームで、日常の作図・修正・画層が全部そこにあること。
+    /// 起動時に開く先頭タブはホームで、日常の作図・修正・レイヤが全部そこにあること。
     /// UNDO / REDO / SAVE はタブではなくクイックアクセス（どのタブでも押せる）。
     #[test]
     fn home_tab_comes_first_and_holds_daily_commands() {

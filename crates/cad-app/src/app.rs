@@ -201,7 +201,7 @@ impl CadApp {
                 .layers()
                 .get(self.doc.layers().current())
                 .map_or("?", |l| l.name.as_str());
-            ui.monospace(format!("画層 {layer_name}"));
+            ui.monospace(format!("レイヤ {layer_name}"));
             ui.separator();
             ui.monospace(format!("選択 {}", self.session.selection.len()));
             ui.separator();

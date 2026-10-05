@@ -85,7 +85,7 @@ impl LayerPanel {
             return commands;
         }
 
-        ui.heading("画層");
+        ui.heading("レイヤ");
         ui.separator();
 
         self.show_add_row(ui, doc, &mut commands);
@@ -286,7 +286,7 @@ impl LayerPanel {
     ) {
         ui.horizontal_wrapped(|ui| {
             if selection.is_empty() {
-                ui.weak("選択中の要素を別の画層へ移すには、先に要素を選択してください");
+                ui.weak("選択中の要素を別のレイヤへ移すには、先に要素を選択してください");
                 return;
             }
             ui.label(format!("選択中の {} 要素を移動:", selection.len()));
