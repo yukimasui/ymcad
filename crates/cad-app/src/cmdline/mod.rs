@@ -472,7 +472,7 @@ impl CommandLine {
 
     /// このフレームの IME イベントを反映する。
     ///
-    /// `TextEdit` を描画する前に呼ぶこと。
+    /// `TextEdit` を描画する前に呼ぶこと。入力欄が持ち主のとき（[`owns_keys`]）だけ呼ぶ。
     fn track_ime(&mut self, ctx: &egui::Context) {
         ctx.input(|i| {
             for ev in &i.events {
@@ -505,12 +505,21 @@ impl CommandLine {
         if let Some(e) = &mut self.recent_error {
             e.shown_at.get_or_insert(now);
         }
-        self.track_ime(ctx);
-        self.refresh_suggestions(allow_suggestions);
-
         let focused = ctx.memory(|m| m.focused());
         let owns_keys = owns_keys(egui::Id::new(INPUT_ID), self.focused_last_frame, focused);
         self.focused_last_frame = focused;
+
+        // IME のイベントもキーと同じく、入力欄が持ち主のときだけ拾う。パネルの入力欄で
+        // 変換していると、そちら宛ての Preedit でコマンドラインまで「変換中」になり、
+        // カーソル横に `[変換中]` が出て位置が固定され、キーも候補も止まっていた。
+        // 持ち主でなくなったら変換中も終える。変換の途中でパネルへ移ると、確定・取り消しは
+        // パネルへ届くので、ここで落とさないと立ちっぱなしになる。
+        if owns_keys {
+            self.track_ime(ctx);
+        } else {
+            self.composing = false;
+        }
+        self.refresh_suggestions(allow_suggestions);
 
         // 変換中はキーを一切奪わない。IME に確定させるのが先。
         // 候補の操作キーもこのブロックの中にあるので、変換中は自動的に無効になる。
@@ -622,6 +631,12 @@ impl CommandLine {
     #[cfg(test)]
     pub fn input(&self) -> &str {
         &self.input
+    }
+
+    /// コマンドラインの入力欄で変換中か（テスト用）。
+    #[cfg(test)]
+    pub fn is_composing(&self) -> bool {
+        self.composing
     }
 
     /// コマンド候補が出ているか（テスト用）。

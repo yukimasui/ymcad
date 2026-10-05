@@ -569,6 +569,82 @@ fn panel_text_field_keeps_enter_space_and_escape() {
     }
 }
 
+/// LINE 実行中にパネルの入力欄で日本語を変換しても、コマンドラインは変換中にならない。
+///
+/// IME のイベントはフォーカスの持ち主へ届くもので、コマンドラインのものとは限らない。
+/// 持ち主を見ずに拾うと、カーソル横に `[変換中]` が出て位置が固定され、
+/// キーの扱いや候補の更新も止まっていた（実機の不具合報告）。
+#[test]
+fn ime_in_a_panel_field_does_not_make_the_command_line_compose() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        type_text(&mut h, "L");
+        press(&mut h, egui::Key::Enter);
+        assert!(h.state().session.has_active_tool(), "前提: LINE 実行中");
+
+        focus_layer_name_field(&mut h);
+        hover(&mut h, P1);
+        frame(&mut h, [preedit("にほん")]);
+        settle(&mut h);
+        assert!(
+            !h.state().session.cmdline.is_composing(),
+            "パネルの変換でコマンドラインが変換中にならない（動的入力 {on}）"
+        );
+        if on {
+            // カーソル横は固定されず、マウスに付いていく。
+            let before = input_rect(&h);
+            hover(&mut h, P2);
+            assert_ne!(input_rect(&h), before, "マウスに追従する");
+        }
+
+        frame(
+            &mut h,
+            [egui::Event::Ime(egui::ImeEvent::Commit("日本".to_owned()))],
+        );
+        settle(&mut h);
+        assert_eq!(
+            layer_name_field_value(&h),
+            "日本",
+            "パネルの欄に入る（動的入力 {on}）"
+        );
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            "",
+            "コマンドラインには入らない"
+        );
+
+        // キャンバスへ戻って点を打つと LINE に入る。
+        click(&mut h, P1);
+        type_text(&mut h, "@10,0");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(
+            lines(&h).len(),
+            1,
+            "クリックした始点から打った座標まで線が引かれる（動的入力 {on}）"
+        );
+    }
+}
+
+/// コマンドラインで変換中のままパネルへフォーカスを移しても、変換中が残らない。
+///
+/// 変換の確定・取り消しはパネル側へ届くので、残るとキーを奪わない・候補を
+/// 作り直さない・カーソル横が固定されたままになる。
+#[test]
+fn moving_focus_to_a_panel_ends_the_command_line_composition() {
+    let mut h = app_with_dynamic(true);
+    hover(&mut h, P1);
+    frame(&mut h, [preedit("に")]);
+    settle(&mut h);
+    assert!(h.state().session.cmdline.is_composing(), "前提: 変換中");
+
+    focus_layer_name_field(&mut h);
+    assert!(
+        !h.state().session.cmdline.is_composing(),
+        "フォーカスが移ったら変換中ではない"
+    );
+}
+
 // ---- 寸法入力（Issue #20 段階 B） -------------------------------------------
 
 use crate::cmdline::dimension::{DimValues, Field};
