@@ -226,8 +226,11 @@ fn unit(angle_deg: f64) -> Vec2 {
 pub fn point_at(base: Point2, length: f64, angle_deg: f64) -> Result<Point2, DimError> {
     let length = check_length(length)?;
     let angle_deg = check_angle(angle_deg)?;
-    let p = base + unit(angle_deg) * length;
-    // 巨大な長さで桁あふれすると無限大になる。座標へ流さない。
+    finite(base + unit(angle_deg) * length)
+}
+
+/// 座標が有限か。巨大な長さで桁あふれすると無限大になる。座標へ流さない。
+fn finite(p: Point2) -> Result<Point2, DimError> {
     if p.x.is_finite() && p.y.is_finite() {
         Ok(p)
     } else {
@@ -256,7 +259,9 @@ pub fn resolve(base: Point2, cursor: Option<Point2>, v: DimValues) -> Result<Poi
         (Some(length), None) => {
             let length = check_length(length)?;
             let dir = direction(base, cursor).ok_or(DimError::NoDirection)?;
-            point_at(base, length, dir.angle().to_degrees())
+            // 単位方向をそのまま伸ばす。角度（度）へ直して戻すと、atan2 → 度 → cos/sin の
+            // 往復で誤差が乗り、`1` と打った線の長さが 1.0000000000000047 になっていた。
+            finite(base + dir * length)
         }
         (None, Some(angle)) => {
             let angle = check_angle(angle)?;
@@ -533,6 +538,22 @@ mod tests {
         assert_point(got, p(40.0, 60.0));
         let got = direct_distance(BASE, Some(p(-1000.0, 20.0)), 5.0).unwrap();
         assert_point(got, p(5.0, 20.0));
+    }
+
+    /// 直接距離入力は単位方向をそのまま伸ばした点になる（角度へ直して戻さない）。
+    /// 往復させると、`1` と打った線の長さが 1.0000000000000047 になっていた。
+    #[test]
+    fn direct_distance_does_not_round_trip_through_degrees() {
+        for cursor in [p(13.0, 24.0), p(11.0, 27.0), p(-3.0, 9.0), p(10.7, 19.2)] {
+            let dir = (cursor - BASE)
+                .normalized()
+                .expect("前提: 基点から離れている");
+            for length in [1.0, 7.0, 1000.0, 0.25] {
+                let got = direct_distance(BASE, Some(cursor), length).unwrap();
+                assert_eq!(got, BASE + dir * length, "{cursor:?} {length}");
+                assert!(eq_len(got.dist(BASE), length), "{cursor:?} {length}");
+            }
+        }
     }
 
     #[test]
