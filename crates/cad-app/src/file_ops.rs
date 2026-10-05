@@ -98,8 +98,13 @@ pub struct PendingAction(pub FileAction);
 pub enum FileOutcome {
     /// 何も起きなかった（ダイアログでキャンセルされた等）。
     Nothing,
-    /// 成功。表示するメッセージ。
+    /// 成功（保存など）。図面はそのまま。表示するメッセージ。
     Ok(String),
+    /// 成功して、図面を入れ替えた（NEW / OPEN）。表示するメッセージ。
+    ///
+    /// 呼び出し側は選択やスナップなど、前の図面に結びついた状態を捨てる。
+    /// 保存（[`Self::Ok`]）と分けるのは、保存のたびに選択が外れていたため（Issue #41）。
+    Replaced(String),
     /// 失敗。表示するメッセージ。
     Failed(String),
     /// アプリを終了してよい。
@@ -199,7 +204,7 @@ impl FileOps {
         match action {
             FileAction::New => {
                 *doc = Document::new();
-                FileOutcome::Ok("新規図面を作成しました".to_owned())
+                FileOutcome::Replaced("新規図面を作成しました".to_owned())
             }
             FileAction::Open => Self::open(doc),
             FileAction::Save => match doc.path().map(Path::to_path_buf) {
@@ -232,7 +237,7 @@ impl FileOps {
             Ok(mut loaded) => {
                 loaded.mark_saved(Some(path.clone()));
                 *doc = loaded;
-                FileOutcome::Ok(format!("開きました: {}", path.display()))
+                FileOutcome::Replaced(format!("開きました: {}", path.display()))
             }
             Err(e) => FileOutcome::Failed(format!("読み込みに失敗しました: {e}")),
         }
@@ -338,7 +343,10 @@ mod tests {
         assert!(!doc.is_dirty());
 
         let outcome = ops.request(FileAction::New, &mut doc);
-        assert!(matches!(outcome, FileOutcome::Ok(_)));
+        assert!(
+            matches!(outcome, FileOutcome::Replaced(_)),
+            "新規作成は図面の入れ替え"
+        );
         assert!(!ops.is_confirming());
     }
 

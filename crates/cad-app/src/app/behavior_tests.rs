@@ -858,7 +858,7 @@ fn coordinate_field_does_not_shrink_back() {
 
     // 図面を入れ替えたら（新規・開く）最小の幅に戻る。
     h.state_mut()
-        .report_file_outcome(crate::file_ops::FileOutcome::Ok(
+        .report_file_outcome(crate::file_ops::FileOutcome::Replaced(
             "新規図面を作成しました".to_owned(),
         ));
     hover(&mut h, P2);
@@ -912,6 +912,130 @@ fn status_bar_items_do_not_move_with_the_state() {
         idle,
         "ortho / polar / DYN / レイヤ / OSNAP の位置が動かない"
     );
+}
+
+// ---- 保存しても状態を変えない（Issue #41） ------------------------------------
+
+/// 修飾キーつきでキーを押して離す 2 イベント。
+fn key_with(k: egui::Key, modifiers: egui::Modifiers) -> [egui::Event; 2] {
+    [true, false].map(|pressed| egui::Event::Key {
+        key: k,
+        physical_key: None,
+        pressed,
+        repeat: false,
+        modifiers,
+    })
+}
+
+/// 線分を 1 本引いてクリックで選び、座標の欄を広げた状態（大きい座標を映して指した後、原点付近へ戻す）。
+fn drawing_with_a_selection_and_a_wide_coordinate_field() -> Harness<'static, CadApp> {
+    let mut h = app();
+    let a = egui::pos2(300.0, 300.0);
+    let b = egui::pos2(500.0, 360.0);
+    hover(&mut h, a);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, a);
+    click(&mut h, b);
+    press(&mut h, egui::Key::Escape);
+    let l = lines(&h)[0];
+    let mid = h.state().viewport.model_to_screen(l.a.lerp(l.b, 0.5));
+    click(&mut h, mid);
+    assert_eq!(h.state().session.selection.len(), 1, "前提: 線分を選んだ");
+
+    let far = Point2::new(2.0e7, 2.0e7);
+    h.state_mut().viewport.zoom_to_fit(
+        cad_core::geom::Aabb::new(far, far + cad_core::geom::Vec2::new(420.0, 297.0)),
+        0.05,
+    );
+    hover(&mut h, P2);
+    h.state_mut().viewport.zoom_to_fit(
+        cad_core::geom::Aabb::new(Point2::ORIGIN, Point2::new(420.0, 297.0)),
+        0.05,
+    );
+    hover(&mut h, P2);
+    assert!(
+        h.state().coord_width > super::COORD_MIN_WIDTH,
+        "前提: 座標の欄が広がっている"
+    );
+    h
+}
+
+/// 保存（Ctrl+S、保存先がある図面）しても、選択は外れず、座標の欄の幅も変わらない。
+///
+/// 以前は保存の成功を図面の入れ替えと同じに扱い、保存のたびに選択が外れ、
+/// 座標の欄が最小の幅に戻って切り替え部品が跳ねていた。
+#[test]
+fn saving_keeps_the_selection_and_the_coordinate_field() {
+    let dir = std::env::temp_dir().join(format!("ymcad_issue41_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("テスト用ディレクトリ");
+    let path = dir.join("drawing.ymc");
+
+    let mut h = drawing_with_a_selection_and_a_wide_coordinate_field();
+    // 保存先がある図面にしておく（Ctrl+S でファイルダイアログを開かずに保存される）。
+    h.state_mut().doc.mark_saved(Some(path.clone()));
+    let width = h.state().coord_width;
+
+    frame(&mut h, key_with(egui::Key::S, egui::Modifiers::CTRL));
+    settle(&mut h);
+
+    assert!(path.is_file(), "保存された");
+    assert!(
+        h.state()
+            .session
+            .cmdline
+            .history()
+            .any(|l| l.text.starts_with("保存しました")),
+        "保存の案内が出る"
+    );
+    assert_eq!(h.state().session.selection.len(), 1, "選択は外れない");
+    assert_eq!(h.state().coord_width, width, "座標の欄の幅は変わらない");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// 図面の入れ替え（Ctrl+N）では、従来どおり選択を外し、座標の欄も最小の幅に戻す。
+#[test]
+fn replacing_the_drawing_clears_the_selection_and_the_coordinate_field() {
+    let mut h = drawing_with_a_selection_and_a_wide_coordinate_field();
+    // 変更が無い図面にして、未保存の確認を挟まずに新規作成させる。
+    h.state_mut().doc.mark_saved(None);
+
+    frame(&mut h, key_with(egui::Key::N, egui::Modifiers::CTRL));
+    settle(&mut h);
+
+    assert!(
+        h.state().doc.entities().is_empty(),
+        "前提: 新しい図面になった"
+    );
+    assert_eq!(h.state().session.selection.len(), 0, "選択は外れる");
+    assert_eq!(
+        h.state().coord_width,
+        super::COORD_MIN_WIDTH,
+        "座標の欄は最小の幅に戻る"
+    );
+}
+
+/// ステータスバーの情報表示（座標・レイヤ・選択・要素・倍率・描画時間）に乗せても I ビームにならない。
+#[test]
+fn status_info_labels_do_not_show_a_text_cursor() {
+    use egui_kittest::kittest::Queryable as _;
+
+    // 描画時間まで出る幅とフォントで（フォントが無いと「日本語フォント未検出」で描画時間が押し出される）。
+    let mut h = app_with_width(SCREEN.x);
+    for text in ["  Y ", "レイヤ 0", "選択 0", "要素 0", "倍率 ", "描画 平均"] {
+        let target = h
+            .query_by_label_contains(text)
+            .unwrap_or_else(|| panic!("{text} が出ている"))
+            .rect()
+            .center();
+        hover(&mut h, target);
+        assert_ne!(
+            h.output().platform_output.cursor_icon,
+            egui::CursorIcon::Text,
+            "{text} に乗せても I ビームにならない"
+        );
+    }
 }
 
 // ---- 寸法入力（Issue #20 段階 B） -------------------------------------------

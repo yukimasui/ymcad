@@ -193,10 +193,12 @@ impl CadApp {
             // それより大きい座標が出たら広げて、そのあとは縮めない（PR #39）。
             self.coord_width = coord_width_for(self.coord_width, self.cursor_model);
             let w = self.coord_width;
-            match self.cursor_model {
-                Some(p) => ui.monospace(format!("X {:>w$.4}  Y {:>w$.4}", p.x, p.y)),
-                None => ui.monospace(format!("X {:>w$}  Y {:>w$}", "-", "-")),
+            let coords = match self.cursor_model {
+                Some(p) => format!("X {:>w$.4}  Y {:>w$.4}", p.x, p.y),
+                None => format!("X {:>w$}  Y {:>w$}", "-", "-"),
             };
+            // 情報表示は文字を選ばせない（乗せても I ビームにしない。ほかの部品とそろえる）。
+            ui.add(egui::Label::new(egui::RichText::new(coords).monospace()).selectable(false));
             ui.separator();
             // 切り替え部品（OSNAP / ORTHO / POLAR / DYN）は座標の直後に置く（Issue #38）。
             let separator_width = self.status_toggles(ui);
@@ -692,10 +694,12 @@ fn show_while_fits(ui: &mut egui::Ui, items: Vec<InfoItem>, separator_width: f32
             ui.separator();
         }
         let rich = egui::RichText::new(item.text).monospace();
-        let response = ui.label(match item.color {
+        let rich = match item.color {
             Some(c) => rich.color(c),
             None => rich,
-        });
+        };
+        // 文字を選ばせない。乗せても I ビームにならないようにする（Issue #41）。
+        let response = ui.add(egui::Label::new(rich).selectable(false));
         if let Some(tip) = item.tooltip {
             response.on_hover_text(tip);
         }
@@ -752,9 +756,11 @@ impl CadApp {
     fn report_file_outcome(&mut self, outcome: FileOutcome) {
         match outcome {
             FileOutcome::Nothing => {}
-            FileOutcome::Ok(msg) => {
+            // 保存。図面はそのままなので、選択・スナップ・座標の欄は変えない（Issue #41）。
+            FileOutcome::Ok(msg) => self.session.cmdline.info(msg),
+            FileOutcome::Replaced(msg) => {
                 self.session.cmdline.info(msg);
-                // 図面が入れ替わったので、選択とスナップの状態を捨てる。
+                // 図面が入れ替わったので、前の図面に結びついた選択とスナップの状態を捨てる。
                 // 座標の欄も最小の幅へ戻す（広がったままにしない）。
                 self.session.selection.clear();
                 self.snap.release();
