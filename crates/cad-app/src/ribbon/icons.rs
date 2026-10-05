@@ -13,11 +13,13 @@
 //! - 補助線（元の形・消える部分）は白のまま不透明度を下げる（`stroke-opacity` など）。
 //!   乗算なので、どの色に着色しても「薄い同じ色」になる
 //! - 線幅は 1.5 にそろえる。文字（`<text>`）は使わない（`svg_text` 機能を入れていないので出ない）
+//! - `currentColor` は使わない。ルートに `fill="none"` を書く（どちらも書かないと黒になる）
 //!
 //! # 差し替えの口
 //!
 //! リボン（`ribbon/mod.rs`）がアイコンに触るのは [`paint`] だけ。網羅のテストは
-//! このファイルの末尾にある（全コマンドに SVG がある・余分なファイルが無い・全部読める・白一色）。
+//! このファイルの末尾にある（全コマンドに SVG がある・余分なファイルが無い・全部読める・
+//! ラスタライズした画素が白一色）。
 
 /// 1 アイコン = (コマンド名, SVG のバイト列)。
 macro_rules! icon {
@@ -172,33 +174,44 @@ mod tests {
         }
     }
 
-    /// 色の指定は白（か none）だけであること。表示側の `tint` は乗算なので、
-    /// 白以外の色が混ざると、その部分だけ文字色・選択色にならない。
+    /// 描かれた画素がすべて白（不透明度だけが違う）であること。
+    ///
+    /// 表示側の `tint` は乗算なので、白以外の画素はその色のまま残る。とくに黒は
+    /// どの色に着色しても黒で、暗いテーマではアイコンが消える。
+    ///
+    /// 属性の文字列ではなく**ラスタライズした結果**で確かめる。文字列の検査では、
+    /// `stroke="currentColor"`（`color` が無ければ黒になる）や、ルートの `fill="none"` を
+    /// 書き忘れた図形（SVG の既定の塗りは黒）を見逃していた（PR #32 のレビュー）。
+    /// 画素は乗算済みアルファなので、白なら `r == g == b == a` になる。半透明の補助線も同じ
+    /// （縁の補間でもずれないことを確かめたので、差は許さない）。
     #[test]
     fn icons_are_white_only() {
         for (name, bytes) in ICONS {
-            let text = std::str::from_utf8(bytes).expect("UTF-8");
-            // 属性（`fill="…"`）と、外部ツールが書く style の中（`fill:…;`）の両方を見る。
-            for (attr, end) in [
-                ("stroke=\"", '"'),
-                ("fill=\"", '"'),
-                ("color=\"", '"'),
-                ("stroke:", ';'),
-                ("fill:", ';'),
-                ("color:", ';'),
+            for hint in [
+                egui::SizeHint::default(),
+                egui::SizeHint::Size {
+                    width: 72,
+                    height: 72,
+                    maintain_aspect_ratio: true,
+                },
             ] {
-                for (i, _) in text.match_indices(attr) {
-                    let rest = &text[i + attr.len()..];
-                    let stop = rest.find([end, '"']).unwrap_or(rest.len());
-                    let value = rest[..stop].trim();
-                    assert!(
-                        matches!(
-                            value.to_ascii_lowercase().as_str(),
-                            "#ffffff" | "#fff" | "white" | "none" | "currentcolor"
-                        ),
-                        "{name}.svg の {attr}{value} は白一色の約束に反する"
-                    );
-                }
+                let image =
+                    egui_extras::image::load_svg_bytes_with_size(bytes, hint, &Default::default())
+                        .unwrap_or_else(|e| panic!("{name}.svg が読めない: {e}"));
+                let bad = image
+                    .pixels
+                    .iter()
+                    .filter(|p| p.a() > 0)
+                    .filter(|p| {
+                        let a = p.a();
+                        [p.r(), p.g(), p.b()].iter().any(|&c| c != a)
+                    })
+                    .count();
+                assert_eq!(
+                    bad, 0,
+                    "{name}.svg に白でない画素が {bad} 個ある（色は #ffffff だけ。\
+                     currentColor や、ルートの fill=\"none\" の書き忘れは黒になる）"
+                );
             }
         }
     }
