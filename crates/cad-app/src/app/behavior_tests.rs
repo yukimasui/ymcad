@@ -1892,6 +1892,18 @@ fn quick_access_is_available_on_every_tab() {
             "{tab}: タブの中には置かない"
         );
     }
+    // タブの直後（区切り線の右）に並ぶ。右端だと視線の外になっていた。
+    let last_tab = h.state().ribbon.probe().tabs.last().expect("タブ").1;
+    let first_quick = ribbon_buttons(&h)
+        .into_iter()
+        .filter(|b| b.quick)
+        .map(|b| b.rect.left())
+        .fold(f32::INFINITY, f32::min);
+    let gap = first_quick - last_tab.right();
+    assert!(
+        (0.0..=24.0).contains(&gap),
+        "最後のタブのすぐ右に置く: 間 {gap}px"
+    );
     // ホーム以外のタブから UNDO / REDO。
     press_ribbon(&mut h, "UNDO");
     assert!(lines(&h).is_empty(), "UNDO");
@@ -1992,4 +2004,49 @@ fn overflow_hints_follow_the_scroll_position() {
         (true, false),
         "右端まで送った"
     );
+}
+
+/// 幅 800px で「›」の帯を押すと、下に隠れたボタンは押されず、表示範囲が右へ動く。
+/// 右端まで送ると「‹」が出て、押すと左へ戻る（PR #32 の操作レビュー）。
+#[test]
+fn overflow_hints_scroll_instead_of_pressing_the_button_below() {
+    let mut h = app();
+    h.set_size(egui::vec2(800.0, 600.0));
+    settle(&mut h);
+    let probe = h.state().ribbon.probe().clone();
+    let right = probe.hints[1].expect("前提: 「›」が出ている");
+    assert!(probe.hints[0].is_none(), "前提: 「‹」は出ていない");
+    // 帯の中で、下にボタンが隠れている点を押す（帯の中央はグループの隙間のことがある）。
+    let hidden = ribbon_buttons(&h)
+        .into_iter()
+        .find(|b| !b.quick && b.rect.intersects(right))
+        .expect("前提: 「›」の帯の下にボタンが隠れている");
+    let at = egui::pos2(
+        hidden
+            .rect
+            .center()
+            .x
+            .clamp(right.left() + 1.0, right.right() - 1.0),
+        hidden.rect.center().y,
+    );
+    assert!(hidden.rect.contains(at) && right.contains(at), "前提");
+    let before = probe.offset;
+
+    click(&mut h, at);
+    settle(&mut h);
+    assert!(input_lines(&h).is_empty(), "下のボタンは押されない");
+    assert!(!h.state().session.has_active_tool());
+    assert!(!h.state().layer_panel.is_open());
+    let after = h.state().ribbon.probe().offset;
+    assert!(after > before, "右へ送られる: {before} → {after}");
+
+    let left = h.state().ribbon.probe().hints[0].expect("送ったので「‹」が出る");
+    click(&mut h, left.center());
+    settle(&mut h);
+    assert!(
+        input_lines(&h).is_empty(),
+        "「‹」でも下のボタンは押されない"
+    );
+    let back = h.state().ribbon.probe().offset;
+    assert!(back < after, "左へ戻る: {after} → {back}");
 }

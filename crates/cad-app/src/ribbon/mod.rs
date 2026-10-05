@@ -1,13 +1,14 @@
 //! リボン（画面上端のタブつきアイコンバー）。Issue #26、ADR-0037。
 //!
-//! - 1 段目にタブ、右端にどのタブでも押せるクイックアクセス（UNDO / REDO / SAVE）
+//! - 1 段目にタブ、その直後（区切り線の右）にどのタブでも押せるクイックアクセス
+//!   （UNDO / REDO / SAVE）
 //! - 2 段目にグループ（枠とグループ名）ごとのアイコンボタン
 //! - **ボタンを押すことはコマンド名を打つのと同じ扱い。** このモジュールは押された
 //!   コマンド名を返すだけで、始めるのは呼び出し側（`Session::start_command_from_ui`）
 //! - 幅が足りないときは横スクロール（マウスホイールの縦回転でも横に動く）。送れる側の端を
-//!   背景色へ消すぼかしと「›」で示す
+//!   背景色へ消すぼかしと「›」で示し、その帯を押すと表示幅の 3/4 だけ送る
 //! - 実行中のコマンドのボタンは選択色で強調する。そのコマンドが別のタブにあれば、
-//!   そのタブの見出しの横に点を出す
+//!   そのタブの名前の下に選択色の下線を引く
 //!
 //! ボタンはキーボードのフォーカスを取らない。`Sense::CLICK`（`FOCUSABLE` を含まない）で
 //! 作るので、Tab 移動でも止まらない（`Sense::click()` は `FOCUSABLE` を含む）。押した後も
@@ -35,12 +36,14 @@ const LABEL_SIZE: f32 = 9.0;
 const GROUP_TITLE_SIZE: f32 = 9.5;
 /// ボタンの角の丸み [px]。
 const CORNER: u8 = 3;
-/// 実行中のコマンドがあるタブに付ける点の半径 [px] と、そのために空ける幅 [px]。
-const TAB_MARK_RADIUS: f32 = 2.5;
-const TAB_MARK_WIDTH: f32 = 8.0;
-/// 横に送れる端のぼかしの幅 [px] と段数。
+/// 実行中のコマンドがあるタブに引く下線の太さ [px] と、見出しの左右から詰める幅 [px]。
+const TAB_MARK_THICKNESS: f32 = 2.0;
+const TAB_MARK_INSET: f32 = 4.0;
+/// 横に送れる端のぼかしの幅 [px] と段数。この帯全体が「送る」ボタンになる。
 const FADE_WIDTH: f32 = 28.0;
 const FADE_STEPS: u16 = 14;
+/// 「›」「‹」を押したときに送る量（表示幅に対する割合）。少し重ねて、どこまで見ていたかを残す。
+const PAGE_FRACTION: f32 = 0.75;
 
 /// スクロール領域の ID。
 const SCROLL_ID: &str = "ribbon_scroll";
@@ -50,6 +53,8 @@ const SCROLL_ID: &str = "ribbon_scroll";
 pub struct Ribbon {
     /// 開いているタブ（`layout::TABS` の添字）。起動時はホーム（0）。
     tab: usize,
+    /// 「›」「‹」で押された送り先（次のフレームでスクロール領域へ渡す）。
+    scroll_to: Option<f32>,
     /// 直前に描いた結果（テスト用）。
     #[cfg(test)]
     probe: Probe,
@@ -67,6 +72,10 @@ pub struct Probe {
     pub viewport: Option<egui::Rect>,
     /// 左・右へ送れることを示したか。
     pub overflow: (bool, bool),
+    /// 「‹」「›」の帯（押せる範囲）。出していなければ `None`。
+    pub hints: [Option<egui::Rect>; 2],
+    /// 横スクロールの位置 [px]。
+    pub offset: f32,
     /// リボン全体の矩形。
     pub rect: Option<egui::Rect>,
 }
@@ -118,15 +127,15 @@ impl Ribbon {
         let mut pressed = None;
         ui.horizontal(|ui| {
             self.show_tabs(ui, active);
-            // クイックアクセスはタブの行の右端。右から並べるので逆順に描く。
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 1.0;
-                for &name in QUICK_ACCESS.iter().rev() {
-                    if self.show_quick_button(ui, name, active == Some(name)) {
-                        pressed = Some(name);
-                    }
+            // クイックアクセスはタブの直後に区切り線を挟んで置く。右端だと 1280px で
+            // タブから約 950px 離れ、視線の外になっていた（PR #32 の操作レビュー）。
+            ui.separator();
+            ui.spacing_mut().item_spacing.x = 1.0;
+            for &name in QUICK_ACCESS {
+                if self.show_quick_button(ui, name, active == Some(name)) {
+                    pressed = Some(name);
                 }
-            });
+            }
         });
 
         let groups = TABS[self.tab].groups;
@@ -134,50 +143,86 @@ impl Ribbon {
         // egui の既定では Shift を押しながらでないと横に動かず、横ホイールの無いマウスで
         // 右端のボタンに届かない。このパネルの `Ui` だけに効く。
         ui.style_mut().always_scroll_the_only_direction = true;
-        let output = egui::ScrollArea::horizontal()
+        let mut area = egui::ScrollArea::horizontal()
             .id_salt(SCROLL_ID)
-            .auto_shrink([false, true])
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    for group in groups {
-                        if let Some(name) = self.show_group(ui, group, active) {
-                            pressed = Some(name);
-                        }
+            .auto_shrink([false, true]);
+        if let Some(x) = self.scroll_to.take() {
+            area = area.horizontal_scroll_offset(x);
+        }
+        let output = area.show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for group in groups {
+                    if let Some(name) = self.show_group(ui, group, active) {
+                        pressed = Some(name);
                     }
-                });
+                }
             });
-        let overflow = overflow_sides(
-            output.state.offset.x,
-            output.content_size.x,
-            output.inner_rect.width(),
-        );
-        paint_overflow_hints(ui, output.inner_rect, overflow);
+        });
+        let offset = output.state.offset.x;
+        let visible = output.inner_rect;
+        let max_offset = (output.content_size.x - visible.width()).max(0.0);
+        let overflow = overflow_sides(offset, output.content_size.x, visible.width());
+        for (side, (show, dir)) in [(overflow.0, -1.0_f32), (overflow.1, 1.0_f32)]
+            .into_iter()
+            .enumerate()
+        {
+            if !show {
+                continue;
+            }
+            let rect = hint_rect(visible, dir);
+            // ボタンより後に登録するので、帯の上のクリックはこちらが取る（下のボタンへ届かない）。
+            // 当初は絵だけで、「›」を押すと下に隠れたボタン（幅 800px では LAYER）が押されていた
+            // （PR #32 の操作レビュー）。
+            let response = ui
+                .interact(
+                    rect,
+                    ui.id().with((SCROLL_ID, "hint", side)),
+                    egui::Sense::CLICK,
+                )
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(if dir > 0.0 {
+                    "右へ送る"
+                } else {
+                    "左へ送る"
+                });
+            paint_overflow_hint(ui, rect, dir, response.hovered());
+            if response.clicked() {
+                let step = dir * visible.width() * PAGE_FRACTION;
+                self.scroll_to = Some((offset + step).clamp(0.0, max_offset));
+                ui.ctx().request_repaint();
+            }
+            #[cfg(test)]
+            {
+                self.probe.hints[side] = Some(rect);
+            }
+        }
         #[cfg(test)]
         {
-            self.probe.viewport = Some(output.inner_rect);
+            self.probe.viewport = Some(visible);
+            self.probe.offset = offset;
             self.probe.overflow = overflow;
             self.probe.rect = Some(egui::Rect::from_min_max(top, ui.min_rect().max));
         }
         pressed
     }
 
-    /// 1 段目のタブ。実行中のコマンドが別のタブにあれば、その見出しの横に点を出す。
+    /// 1 段目のタブ。実行中のコマンドが別のタブにあれば、その見出しの名前の下に
+    /// 選択色の下線を引く。
+    ///
+    /// 当初はタブとタブの間に点を出していたが、区切り文字に見え、どちらのタブの印か
+    /// 分かりにくかった（隣の「表示・ファイル」にも「・」がある。PR #32 の操作レビュー）。
     fn show_tabs(&mut self, ui: &mut egui::Ui, active: Option<&str>) {
         let marked = active.and_then(layout::tab_of).filter(|&t| t != self.tab);
         for (i, tab) in TABS.iter().enumerate() {
             let response = ui.selectable_label(self.tab == i, tab.title);
             let mark = marked == Some(i);
             if mark {
-                // 見出しの文字に混ぜず、横に空けた場所へ描く（フォントに点の字形が無くても出る）。
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(TAB_MARK_WIDTH, response.rect.height()),
-                    egui::Sense::hover(),
-                );
-                ui.painter().circle_filled(
-                    egui::pos2(rect.left() + TAB_MARK_RADIUS, rect.center().y),
-                    TAB_MARK_RADIUS,
-                    ui.visuals().selection.stroke.color,
+                let r = response.rect;
+                ui.painter().hline(
+                    (r.left() + TAB_MARK_INSET)..=(r.right() - TAB_MARK_INSET),
+                    r.bottom() - TAB_MARK_THICKNESS / 2.0,
+                    egui::Stroke::new(TAB_MARK_THICKNESS, ui.visuals().selection.stroke.color),
                 );
             }
             #[cfg(test)]
@@ -358,46 +403,57 @@ fn overflow_sides(offset: f32, content: f32, visible: f32) -> (bool, bool) {
     (offset > 0.5, offset < max - 0.5)
 }
 
-/// 送れる側の端を背景色へ消すぼかしと「›」（「‹」）を描く。
+/// 「›」（`dir` が正）または「‹」の帯。表示範囲の端から `FADE_WIDTH` の幅。
+fn hint_rect(visible: egui::Rect, dir: f32) -> egui::Rect {
+    let x = if dir > 0.0 {
+        (visible.right() - FADE_WIDTH)..=visible.right()
+    } else {
+        visible.left()..=(visible.left() + FADE_WIDTH)
+    };
+    egui::Rect::from_x_y_ranges(x, visible.y_range())
+}
+
+/// 帯に、背景色へ消えるぼかしと「›」（「‹」）を描く。乗せているときは地を明るくする。
 ///
 /// スクロールバーは egui の既定でマウスを乗せたときしか出ず、切れ目がグループの境目に
 /// 重なると送れることに気づけなかった（PR #32 の操作レビュー）。
-fn paint_overflow_hints(ui: &egui::Ui, visible: egui::Rect, (left, right): (bool, bool)) {
+fn paint_overflow_hint(ui: &egui::Ui, band: egui::Rect, dir: f32, hovered: bool) {
     let painter = ui.painter();
     let bg = ui.visuals().panel_fill;
     let ink = ui.visuals().strong_text_color();
     let strip = FADE_WIDTH / f32::from(FADE_STEPS);
-    for (show, dir) in [(left, -1.0_f32), (right, 1.0_f32)] {
-        if !show {
-            continue;
-        }
-        let edge = if dir > 0.0 {
-            visible.right()
-        } else {
-            visible.left()
-        };
-        // 端に近いほど濃い。f32::from(u16) で回して `as f32` を避ける。
-        for k in 0..FADE_STEPS {
-            let t = f32::from(k + 1) / f32::from(FADE_STEPS);
-            let outer = edge - dir * (FADE_WIDTH - strip * f32::from(k + 1));
-            let inner = outer - dir * strip;
-            let rect =
-                egui::Rect::from_x_y_ranges(outer.min(inner)..=outer.max(inner), visible.y_range());
-            painter.rect_filled(rect, 0.0, bg.gamma_multiply(t));
-        }
-        // 山形（›）。字形ではなく線で描く（フォントに依らない）。
-        let cx = edge - dir * 7.0;
-        let cy = visible.center().y;
-        let (w, h) = (3.5, 6.0);
-        painter.line(
-            vec![
-                egui::pos2(cx - dir * w, cy - h),
-                egui::pos2(cx + dir * w, cy),
-                egui::pos2(cx - dir * w, cy + h),
-            ],
-            egui::Stroke::new(2.0, ink),
-        );
+    let edge = if dir > 0.0 { band.right() } else { band.left() };
+    // 端に近いほど濃い。f32::from(u16) で回して `as f32` を避ける。
+    for k in 0..FADE_STEPS {
+        let t = f32::from(k + 1) / f32::from(FADE_STEPS);
+        let outer = edge - dir * (FADE_WIDTH - strip * f32::from(k + 1));
+        let inner = outer - dir * strip;
+        let rect = egui::Rect::from_x_y_ranges(outer.min(inner)..=outer.max(inner), band.y_range());
+        painter.rect_filled(rect, 0.0, bg.gamma_multiply(t));
     }
+    if hovered {
+        let knob = egui::Rect::from_x_y_ranges(
+            if dir > 0.0 {
+                (edge - 14.0)..=edge
+            } else {
+                edge..=(edge + 14.0)
+            },
+            band.y_range(),
+        );
+        painter.rect_filled(knob, CORNER, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    // 山形（›）。字形ではなく線で描く（フォントに依らない）。
+    let cx = edge - dir * 7.0;
+    let cy = band.center().y;
+    let (w, h) = (3.5, 6.0);
+    painter.line(
+        vec![
+            egui::pos2(cx - dir * w, cy - h),
+            egui::pos2(cx + dir * w, cy),
+            egui::pos2(cx - dir * w, cy + h),
+        ],
+        egui::Stroke::new(2.0, ink),
+    );
 }
 
 /// ツールチップの 2 行。1 行目「TRIM — 説明」、2 行目「打つ: TR / TRIM」。
