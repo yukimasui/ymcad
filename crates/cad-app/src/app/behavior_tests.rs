@@ -830,3 +830,55 @@ fn copy_releases_the_locks_after_each_copy() {
         "複写したら固定は外れる"
     );
 }
+
+/// 角度だけ固定してその反対側をクリックすると、点は入らずエラーが出る
+/// （Enter と同じ扱い）。ラバーバンドは基点に縮む。同じ側なら入る。
+#[test]
+fn a_click_behind_an_angle_lock_is_refused() {
+    let (mut h, base) = line_with_first_point(true);
+    press(&mut h, egui::Key::Tab);
+    type_text(&mut h, "0");
+    press(&mut h, egui::Key::Tab); // 0°（右向き）に固定
+
+    // 基点の左側（反対側）。
+    let behind = egui::pos2(P1.x - 150.0, P1.y + 40.0);
+    hover(&mut h, behind);
+    assert_eq!(
+        h.state().cursor_model,
+        Some(base),
+        "ラバーバンドは基点に縮む"
+    );
+    let errors_before = h
+        .state()
+        .session
+        .cmdline
+        .history()
+        .filter(|l| l.kind == LineKind::Error)
+        .count();
+    click(&mut h, behind);
+    assert!(lines(&h).is_empty(), "点は入らない");
+    assert!(h.state().session.has_active_tool(), "LINE は続く");
+    let errors: Vec<String> = h
+        .state()
+        .session
+        .cmdline
+        .history()
+        .filter(|l| l.kind == LineKind::Error)
+        .map(|l| l.text.clone())
+        .collect();
+    assert_eq!(errors.len(), errors_before + 1, "エラー行が 1 つ出る");
+    assert!(
+        errors.last().is_some_and(|e| e.contains("反対側")),
+        "{errors:?}"
+    );
+    assert!(
+        h.state().session.cmdline.dimension_locks().is_some(),
+        "固定は残る（打ち直さずに同じ側でクリックできる）"
+    );
+
+    // 同じ側（右）なら入る。
+    click(&mut h, P2);
+    let l = lines(&h);
+    assert_eq!(l.len(), 1, "同じ側なら入る");
+    assert_point(l[0].b, Point2::new(model(&h, P2).x, base.y), "0° の線上");
+}

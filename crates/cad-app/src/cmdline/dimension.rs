@@ -292,15 +292,24 @@ pub fn direct_distance(
     )
 }
 
-/// 固定した値でカーソルを拘束する。ラバーバンドとクリックに使う。
+/// 固定した値でカーソルを拘束する。クリックで入る点。
 ///
-/// 決まらないとき（カーソルが基点と同じ、角度の反対側にある）は
-/// カーソルをそのまま返す。ラバーバンドを消すより、動いている方が状況が分かる。
-/// その位置でクリックしても、ツール側が「同じ点」として断るか、
-/// 固定とは関係なくその点が入るだけで、`NaN` は生まれない。
+/// # Errors
+///
+/// 決まらないとき（カーソルが基点と同じで向きが無い、角度だけ固定していて
+/// カーソルがその反対側か真横にある）。**クリックでも点を入れない**
+/// （`Enter` と同じ扱い）。カーソルの位置をそのまま入れると、固定を無視した点が入る。
+pub fn constrain(base: Point2, cursor: Point2, locks: DimValues) -> Result<Point2, DimError> {
+    resolve(base, Some(cursor), locks)
+}
+
+/// ラバーバンドの先。[`constrain`] と同じ点で、決まらないときは基点に縮める。
+///
+/// カーソルの位置のまま描くと「クリックすればそこに入る」と見えるが、実際には
+/// クリックは断られる。基点に縮めて線を消し、欄の長さも 0 にして「ここでは決まらない」と見せる。
 #[must_use]
-pub fn constrain(base: Point2, cursor: Point2, locks: DimValues) -> Point2 {
-    resolve(base, Some(cursor), locks).unwrap_or(cursor)
+pub fn rubber_band(base: Point2, cursor: Point2, locks: DimValues) -> Point2 {
+    constrain(base, cursor, locks).unwrap_or(base)
 }
 
 /// 欄にライブ表示する値（基点 → カーソル）。
@@ -548,34 +557,44 @@ mod tests {
 
     #[test]
     fn length_lock_keeps_the_direction_free() {
-        let got = constrain(BASE, p(10.0, 25.0), locks(Some(100.0), None));
+        let got = constrain(BASE, p(10.0, 25.0), locks(Some(100.0), None)).unwrap();
         assert_point(got, p(10.0, 120.0));
-        let got = constrain(BASE, p(13.0, 24.0), locks(Some(10.0), None));
+        let got = constrain(BASE, p(13.0, 24.0), locks(Some(10.0), None)).unwrap();
         assert_point(got, p(16.0, 28.0));
     }
 
     #[test]
     fn angle_lock_projects_onto_the_ray() {
         // 0° に固定 → Y を捨てて X だけが効く。
-        let got = constrain(BASE, p(60.0, 70.0), locks(None, Some(0.0)));
+        let got = constrain(BASE, p(60.0, 70.0), locks(None, Some(0.0))).unwrap();
         assert_point(got, p(60.0, 20.0));
         // 45° に固定 → (10,0) 方向の成分のうち 45° 方向の分。
-        let got = constrain(BASE, p(20.0, 20.0), locks(None, Some(45.0)));
+        let got = constrain(BASE, p(20.0, 20.0), locks(None, Some(45.0))).unwrap();
         assert_point(got, p(15.0, 25.0));
+        assert_eq!(
+            rubber_band(BASE, p(60.0, 70.0), locks(None, Some(0.0))),
+            p(60.0, 20.0),
+            "ラバーバンドもクリックと同じ点"
+        );
     }
 
     #[test]
     fn angle_lock_behind_the_ray_does_not_invent_a_point() {
-        // 半直線の反対側。Enter では止め、ラバーバンドはカーソルのまま。
+        // 半直線の反対側。Enter でもクリックでも止め、ラバーバンドは基点に縮める。
         let c = p(0.0, 20.0);
         assert_eq!(
             resolve(BASE, Some(c), locks(None, Some(0.0))),
             Err(DimError::BehindAngle)
         );
-        assert_eq!(constrain(BASE, c, locks(None, Some(0.0))), c);
+        assert_eq!(
+            constrain(BASE, c, locks(None, Some(0.0))),
+            Err(DimError::BehindAngle),
+            "クリックでも点を作らない"
+        );
+        assert_eq!(rubber_band(BASE, c, locks(None, Some(0.0))), BASE);
         // 真横（射影の長さ 0）も同じ。
         assert_eq!(
-            resolve(BASE, Some(p(10.0, 50.0)), locks(None, Some(0.0))),
+            constrain(BASE, p(10.0, 50.0), locks(None, Some(0.0))),
             Err(DimError::BehindAngle)
         );
     }
@@ -585,7 +604,7 @@ mod tests {
         for c in [p(-500.0, 3.0), BASE, p(1.0, 1.0)] {
             assert_eq!(
                 constrain(BASE, c, locks(Some(100.0), Some(90.0))),
-                p(10.0, 120.0)
+                Ok(p(10.0, 120.0))
             );
         }
         assert_eq!(
@@ -596,19 +615,25 @@ mod tests {
     }
 
     #[test]
-    fn cursor_on_the_base_leaves_the_cursor_alone() {
-        assert_eq!(constrain(BASE, BASE, locks(Some(100.0), None)), BASE);
-        assert_eq!(constrain(BASE, BASE, locks(None, Some(30.0))), BASE);
+    fn cursor_on_the_base_does_not_make_a_point() {
         assert_eq!(
-            resolve(BASE, Some(BASE), locks(Some(100.0), None)),
-            Err(DimError::NoDirection)
+            constrain(BASE, BASE, locks(Some(100.0), None)),
+            Err(DimError::NoDirection),
+            "長さだけ固定では向きが無い"
         );
+        assert_eq!(
+            constrain(BASE, BASE, locks(None, Some(30.0))),
+            Err(DimError::BehindAngle),
+            "角度だけ固定では長さが 0"
+        );
+        assert_eq!(rubber_band(BASE, BASE, locks(Some(100.0), None)), BASE);
     }
 
     #[test]
     fn no_locks_leave_the_cursor_alone() {
         let c = p(33.0, 44.0);
-        assert_eq!(constrain(BASE, c, DimValues::default()), c);
+        assert_eq!(constrain(BASE, c, DimValues::default()), Ok(c));
+        assert_eq!(rubber_band(BASE, c, DimValues::default()), c);
     }
 
     /// 拘束した点にもう一度拘束をかけても動かない（ラバーバンドの点と
@@ -620,8 +645,8 @@ mod tests {
             locks(None, Some(30.0)),
             locks(Some(40.0), Some(30.0)),
         ] {
-            let once = constrain(BASE, p(70.0, 90.0), l);
-            let twice = constrain(BASE, once, l);
+            let once = constrain(BASE, p(70.0, 90.0), l).unwrap();
+            let twice = constrain(BASE, once, l).unwrap();
             assert_point(twice, once);
         }
     }

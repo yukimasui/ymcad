@@ -380,8 +380,8 @@ impl CadApp {
         // 直接距離入力と寸法入力の向きはこの位置（固定をかける前）から決める。
         self.session.set_cursor(cursor);
         // 寸法入力で固定した値（錠前）をかける。ラバーバンドはこの位置で描き、
-        // クリックも同じ `Session::constrain` を通す（`place_point`）。
-        self.cursor_model = cursor.map(|c| self.session.constrain(c));
+        // クリックも同じ計算（`Session::constrain`）を通す（`place_point`）。
+        self.cursor_model = cursor.map(|c| self.session.rubber_band(c));
 
         let active_drag = self.handle_pointer(&response, ui);
 
@@ -523,11 +523,15 @@ impl CadApp {
         let model = self
             .snapped
             .map_or_else(|| self.viewport.screen_to_model(pos), |s| s.point);
-        // 寸法入力で固定した値（錠前）をかける。ラバーバンド（`canvas`）と同じ関数を通すので、
-        // 見えている線の先とクリックで入る点が一致する。
-        let model = self.session.constrain(model);
-        self.session
-            .handle_click(model, shift, pick_tolerance, &mut self.doc);
+        // 寸法入力で固定した値（錠前）をかける。ラバーバンド（`canvas`）と同じ計算を通すので、
+        // 見えている線の先とクリックで入る点が一致する。固定値から点が決まらない位置
+        // （角度だけ固定してその反対側など）では、`Enter` と同じく点を入れずにエラーにする。
+        match self.session.constrain(model) {
+            Ok(model) => self
+                .session
+                .handle_click(model, shift, pick_tolerance, &mut self.doc),
+            Err(e) => self.session.cmdline.error(e.message()),
+        }
         self.snap.release();
     }
 }

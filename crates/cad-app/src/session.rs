@@ -210,15 +210,28 @@ impl Session {
         self.cursor = cursor;
     }
 
-    /// 寸法入力で固定した値（錠前）で点を拘束する。
+    /// 寸法入力で固定した値（錠前）で、クリックした点を拘束する。
     ///
-    /// ラバーバンドのカーソル位置とキャンバスのクリックの**両方**をここに通す。
-    /// 片方だけだと、見えている線と実際に入る点がずれる。
+    /// ラバーバンド（[`Self::rubber_band`]）と同じ `dimension::constrain` を通すので、
+    /// 見えている線の先とクリックで入る点が一致する。
     /// 参加していない・欄が出ていない・固定が無いときはそのまま返す。
-    #[must_use]
-    pub fn constrain(&self, p: Point2) -> Point2 {
+    ///
+    /// # Errors
+    ///
+    /// 固定値からは点が決まらないとき（角度だけ固定してカーソルが反対側にある等）。
+    /// 呼び出し側は点を入れずにエラーを出す（`Enter` と同じ扱い）。
+    pub fn constrain(&self, p: Point2) -> Result<Point2, dimension::DimError> {
         match (self.dimension_base(), self.cmdline.dimension_locks()) {
             (Some(base), Some(locks)) => dimension::constrain(base, p, locks),
+            _ => Ok(p),
+        }
+    }
+
+    /// ラバーバンドの先。点が決まらないときは基点に縮める（[`dimension::rubber_band`]）。
+    #[must_use]
+    pub fn rubber_band(&self, p: Point2) -> Point2 {
+        match (self.dimension_base(), self.cmdline.dimension_locks()) {
+            (Some(base), Some(locks)) => dimension::rubber_band(base, p, locks),
             _ => p,
         }
     }
