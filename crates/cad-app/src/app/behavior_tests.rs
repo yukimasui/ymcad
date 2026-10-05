@@ -701,6 +701,219 @@ fn osnap_in_the_status_bar_is_clickable_with_a_pointing_hand() {
     assert_eq!(toggled, 2);
 }
 
+// ---- 幅が狭いときのステータスバー（Issue #38） --------------------------------
+
+/// 切り替え部品の状態を読む関数。
+type ToggleState = fn(&CadApp) -> bool;
+
+/// 幅を指定したアプリ。文字の幅を実機に合わせるため、日本語フォントを読み込む。
+/// 読み込まないと漢字が代替の □ になってステータスバーの幅が実機と変わり、境目の幅で結果が違う
+/// （元の並びの不具合は、640px ならフォント無しでも再現するが、800px ではフォント無しだと
+/// DYN が画面内に収まって再現しなかった）。さらにフォントが無いと「日本語フォント未検出」が
+/// 並びに入り、1280px でも描画時間が省かれる。
+///
+/// **フォントが見つからなければ理由つきで落とす**（fail-closed）。黙ってフォント無しで進めると、
+/// 検出力の落ちたテストが通ってしまう。CI では `fonts-noto-cjk` を入れている。
+fn app_with_width(width: f32) -> Harness<'static, CadApp> {
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(width, SCREEN.y))
+        .build_eframe(|cc| {
+            let font = crate::jp_font::install(&cc.egui_ctx).expect(
+                "日本語フォントが見つからない（jp_font::CANDIDATES のどれも無い）。\
+                 Ubuntu なら `sudo apt-get install fonts-noto-cjk` で入る",
+            );
+            CadApp::new(Some(format!(
+                "{} (face {})",
+                font.path.display(),
+                font.index
+            )))
+        });
+    h.run_steps(SETTLE);
+    h
+}
+
+/// 幅 800px・640px でも、切り替え部品（OSNAP / ORTHO / POLAR / DYN）がすべて画面内にあり、
+/// クリックで切り替わる。PR #35 で ORTHO / POLAR が増え、800px で DYN が画面外になっていた。
+#[test]
+fn status_toggles_fit_and_click_in_a_narrow_window() {
+    use egui_kittest::kittest::Queryable as _;
+
+    for width in [800.0, 640.0] {
+        let mut h = app_with_width(width);
+        // (表示中のラベル, 切り替え後のラベル, 状態を読む関数)
+        let toggles: [(&str, &str, ToggleState); 4] = [
+            ("OSNAP", "osnap", |a| a.snap.is_enabled()),
+            ("ortho", "ORTHO", |a| {
+                a.drafting.is_on(crate::drafting::Mode::Ortho)
+            }),
+            ("polar", "POLAR", |a| {
+                a.drafting.is_on(crate::drafting::Mode::Polar)
+            }),
+            ("DYN", "dyn", |a| a.session.cmdline.is_dynamic()),
+        ];
+        for (label, after, state) in toggles {
+            let rect = h.get_by_label(label).rect();
+            assert!(
+                rect.min.x >= 0.0 && rect.max.x <= width,
+                "幅 {width}: {label} が画面内にある ({rect:?})"
+            );
+            let before = state(h.state());
+            click(&mut h, rect.center());
+            assert_ne!(
+                state(h.state()),
+                before,
+                "幅 {width}: {label} のクリックで切り替わる"
+            );
+            assert!(
+                h.query_by_label(after).is_some(),
+                "幅 {width}: {label} → {after}"
+            );
+        }
+        // 描画時間は入り切らなければ省く。出すなら途中で切らない。
+        if let Some(node) = h.query_by_label_contains("描画 平均") {
+            assert!(
+                node.rect().max.x <= width,
+                "幅 {width}: 描画時間が途中で切れない"
+            );
+        }
+    }
+}
+
+/// 情報表示の項目（この順に並ぶ）。ラベルに含まれる文字列。
+const INFO_ITEMS: [&str; 5] = ["レイヤ 0", "選択 0", "要素 0", "倍率 ", "描画 平均"];
+
+/// 画面に出ている情報表示の項目の (頭の文字列, 矩形)。
+fn shown_info_items(h: &Harness<'_, CadApp>) -> Vec<(&'static str, egui::Rect)> {
+    use egui_kittest::kittest::Queryable as _;
+    INFO_ITEMS
+        .into_iter()
+        .filter_map(|prefix| {
+            h.query_by_label_contains(prefix)
+                .map(|n| (prefix, n.rect()))
+        })
+        .collect()
+}
+
+/// 情報表示は文字の途中で切れない。入らない項目は右から順に省かれ、
+/// レイヤ・選択が最後まで残る。1280px ではすべて出る（PR #39）。
+#[test]
+fn status_info_items_are_dropped_whole_from_the_right() {
+    for width in [1280.0, 800.0, 640.0] {
+        let h = app_with_width(width);
+        let shown = shown_info_items(&h);
+        let names: Vec<&str> = shown.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            names,
+            INFO_ITEMS[..names.len()].to_vec(),
+            "幅 {width}: 前から順に残り、途中が抜けない"
+        );
+        for (prefix, rect) in &shown {
+            assert!(
+                rect.max.x <= width,
+                "幅 {width}: {prefix} が途中で切れない ({rect:?})"
+            );
+        }
+        for pair in shown.windows(2) {
+            assert!(pair[0].1.max.x < pair[1].1.min.x, "幅 {width}: 並び順");
+        }
+        if width >= SCREEN.x {
+            assert_eq!(names.len(), INFO_ITEMS.len(), "1280px ではすべて出る");
+        } else if width >= 800.0 {
+            assert!(
+                names.starts_with(&["レイヤ 0", "選択 0"]),
+                "幅 {width}: レイヤと選択は残る: {names:?}"
+            );
+        }
+    }
+}
+
+/// 座標の欄は大きい座標で広がり、小さい座標に戻っても縮まない（後ろの部品が跳ねない）。
+/// 図面を入れ替えたら最小の幅に戻る（PR #39 の操作レビュー）。
+#[test]
+fn coordinate_field_does_not_shrink_back() {
+    use egui_kittest::kittest::Queryable as _;
+
+    let mut h = app_with_width(SCREEN.x);
+    let ortho_x = |h: &Harness<'_, CadApp>| h.get_by_label("ortho").rect().min.x;
+    hover(&mut h, P1);
+    let small = ortho_x(&h);
+
+    // 2000 万付近を映して指す（13 文字以上の座標）。
+    let far = cad_core::geom::Point2::new(2.0e7, 2.0e7);
+    h.state_mut().viewport.zoom_to_fit(
+        cad_core::geom::Aabb::new(far, far + cad_core::geom::Vec2::new(420.0, 297.0)),
+        0.05,
+    );
+    hover(&mut h, P2);
+    let big = ortho_x(&h);
+    assert!(big > small, "大きい座標で欄が広がる: {small} → {big}");
+
+    // 原点付近へ戻しても縮まない。
+    h.state_mut().viewport.zoom_to_fit(
+        cad_core::geom::Aabb::new(Point2::ORIGIN, Point2::new(420.0, 297.0)),
+        0.05,
+    );
+    hover(&mut h, P1);
+    assert_eq!(ortho_x(&h), big, "小さい座標に戻っても位置が動かない");
+
+    // 図面を入れ替えたら（新規・開く）最小の幅に戻る。
+    h.state_mut()
+        .report_file_outcome(crate::file_ops::FileOutcome::Ok(
+            "新規図面を作成しました".to_owned(),
+        ));
+    hover(&mut h, P2);
+    assert_eq!(ortho_x(&h), small, "図面を入れ替えたら戻る");
+}
+
+/// 「コマンド実行中」が出ても、スナップの吸着で `OSNAP:端点` になっても、
+/// 切り替え部品と情報表示の位置（押す位置）は動かない（PR #39）。
+#[test]
+fn status_bar_items_do_not_move_with_the_state() {
+    use egui_kittest::kittest::Queryable as _;
+
+    let mut h = app_with_width(SCREEN.x);
+    let xs = |h: &Harness<'_, CadApp>| -> Vec<f32> {
+        ["ortho", "polar", "DYN", "レイヤ 0"]
+            .into_iter()
+            .map(|l| h.get_by_label(l).rect().min.x)
+            .chain(std::iter::once(
+                h.query_by_label_contains("OSNAP")
+                    .expect("OSNAP")
+                    .rect()
+                    .min
+                    .x,
+            ))
+            .collect()
+    };
+    let idle = xs(&h);
+
+    // 線分を 1 本引き、LINE 実行中にその端点へ吸着させる。
+    let a = egui::pos2(300.0, 300.0);
+    let b = egui::pos2(500.0, 360.0);
+    hover(&mut h, a);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, a);
+    click(&mut h, b);
+    press(&mut h, egui::Key::Escape);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    assert!(h.state().session.has_active_tool(), "前提: コマンド実行中");
+    let end = lines(&h)[0].b;
+    let near = h.state().viewport.model_to_screen(end) + egui::vec2(3.0, 3.0);
+    hover(&mut h, near);
+    assert!(
+        h.query_by_label("OSNAP:端点").is_some(),
+        "前提: 端点に吸着して表示が伸びている"
+    );
+    assert!(h.query_by_label("コマンド実行中").is_some(), "前提");
+    assert_eq!(
+        xs(&h),
+        idle,
+        "ortho / polar / DYN / レイヤ / OSNAP の位置が動かない"
+    );
+}
+
 // ---- 寸法入力（Issue #20 段階 B） -------------------------------------------
 
 use crate::cmdline::dimension::{DimValues, Field};
