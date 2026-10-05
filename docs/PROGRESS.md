@@ -12,7 +12,7 @@
 | | |
 |---|---|
 | 完了 Phase | **Phase 0 〜 6 すべて** |
-| 進行中 Phase | **なし。夜間の成果（下の「夜間の自律作業」）のユーザー確認と、`main` へのマージ判断待ち** |
+| 進行中 Phase | **なし。まず下の「次のセッションへ」の節を読むこと**（ユーザーの判断・残りの PR #45・作業ツリー） |
 | 現在ブランチ | `develop` |
 | GitHub push | `develop` は push 済み。**`main` へのマージ/PR は事前にユーザー確認が必要** |
 
@@ -664,12 +664,20 @@ Geometry::Instance(_) => {}
 - 作業報告書は `~/ymcad-reports/report.html`（`content.html` を書き換えて `python3 build.py`）
 
 ### 残っている PR・Issue
-- **PR #45**（Closes #37、コマンド実行中のパネル操作で無効になった図形を書き換えない）: 実装・検証済み、レビュー待ち（夜間にレビュアーが利用上限で止まった）
+- **PR #45**（Closes #37、コマンド実行中のパネル操作で無効になった図形を書き換えない）: 操作レビュー **OK**、コードレビュー **NG（ブロッキング 1 件・未対応）**。
+  UNDO / REDO の後の選択が `crates/cad-app/src/session.rs` の `retain_existing` のままで「編集できるか」を確かめ直していない。
+  パネルでロック → 解除 → 選択 → UNDO（ロックに戻る、選択は残る）→ MOVE でロックされた図形が動く。
+  **直し方: その行を `retain_editable` にし、ADR-0039 に 1 行、テストを 1 本足す**（コードレビューの PR コメント参照）。直したら再レビューしてマージ。
+  操作レビューの非ブロッキング（選択の途中で外れたときの案内など）は Issue #48
 - #44 `SnapKind::all()` の入れ忘れ検査 / #46 リボンのアイコンを倍に
 - `develop` → `main` のマージはユーザー確認後
 
 ### 作業ツリー
-`~/projects/ymcad`（メイン）のほか、夜間に `ymcad-check`（develop の確認用ビルド）、`ymcad-ribbon` / `ymcad-wt24` / `ymcad-wt29`（作業用）を `git worktree` で作った。不要なら `git worktree remove` で片付ける（`ymcad-check` はユーザーが実機確認に使う）
+- `~/projects/ymcad`（メイン）は、マージ済みの古いブランチ `fix/dimension-followups` にいる。`develop` は `ymcad-check` が使っているので、メインで develop を使うなら先に `ymcad-check` を片付けるか、メインは新しい作業ブランチを `origin/develop` から切る
+- `~/projects/ymcad-check` … develop の確認用ビルド（ユーザーが実機確認に使う）
+- `~/projects/ymcad-wt29` … PR #45 の作業ツリー（`fix/issue-37-panel-during-command`）。#45 の修正に使う
+- `~/projects/ymcad-wt24` … この引き継ぎ PR の作業ツリー。マージ後は `git worktree remove` してよい
+- `.claude/worktrees/agent-*` … レビュアー用（detach）。不要なら片付ける（1 つは locked）
 
 ---
 
