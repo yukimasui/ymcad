@@ -18,3 +18,7 @@ rfd.workspace = true
 # それ以外の場所での `as f32` はこの lint で検出する。
 cast_possible_truncation = "warn"
 cast_precision_loss = "warn"
+
+[dev-dependencies]
+# UI のスクリーンショット確認用（テストは #[ignore]。通常の cargo test では走らない）
+egui_kittest = { version = "0.36.2", features = ["wgpu", "snapshot", "eframe"] }

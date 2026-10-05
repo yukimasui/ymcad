@@ -20,6 +20,8 @@ mod selection;
 mod session;
 mod snap;
 mod tools;
+#[cfg(test)]
+mod ui_snapshot;
 mod viewport;
 
 fn main() -> eframe::Result<()> {
