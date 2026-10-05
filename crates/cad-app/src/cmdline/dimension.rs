@@ -198,7 +198,7 @@ pub fn check_lock(field: Field, value: f64) -> Result<f64, DimError> {
 /// 角度 [度] の向きの単位ベクトル。
 ///
 /// 90° の倍数はちょうどの値にする。`cos(90°)` は浮動小数点では 0 にならず
-/// （約 6e-17）、真上に 100 引いたつもりの線の終点 X が基点からわずかにずれる。
+/// （約 6×10⁻¹⁷）、真上に 100 引いたつもりの線の終点 X が基点からわずかにずれる。
 fn unit(angle_deg: f64) -> Vec2 {
     let quarter = angle_deg / 90.0;
     if quarter.fract() == 0.0 {
