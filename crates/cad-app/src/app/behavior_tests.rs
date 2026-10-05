@@ -827,6 +827,44 @@ fn status_info_items_are_dropped_whole_from_the_right() {
     }
 }
 
+/// 座標の欄は大きい座標で広がり、小さい座標に戻っても縮まない（後ろの部品が跳ねない）。
+/// 図面を入れ替えたら最小の幅に戻る（PR #39 の操作レビュー）。
+#[test]
+fn coordinate_field_does_not_shrink_back() {
+    use egui_kittest::kittest::Queryable as _;
+
+    let mut h = app_with_width(SCREEN.x);
+    let ortho_x = |h: &Harness<'_, CadApp>| h.get_by_label("ortho").rect().min.x;
+    hover(&mut h, P1);
+    let small = ortho_x(&h);
+
+    // 2000 万付近を映して指す（13 文字以上の座標）。
+    let far = cad_core::geom::Point2::new(2.0e7, 2.0e7);
+    h.state_mut().viewport.zoom_to_fit(
+        cad_core::geom::Aabb::new(far, far + cad_core::geom::Vec2::new(420.0, 297.0)),
+        0.05,
+    );
+    hover(&mut h, P2);
+    let big = ortho_x(&h);
+    assert!(big > small, "大きい座標で欄が広がる: {small} → {big}");
+
+    // 原点付近へ戻しても縮まない。
+    h.state_mut().viewport.zoom_to_fit(
+        cad_core::geom::Aabb::new(Point2::ORIGIN, Point2::new(420.0, 297.0)),
+        0.05,
+    );
+    hover(&mut h, P1);
+    assert_eq!(ortho_x(&h), big, "小さい座標に戻っても位置が動かない");
+
+    // 図面を入れ替えたら（新規・開く）最小の幅に戻る。
+    h.state_mut()
+        .report_file_outcome(crate::file_ops::FileOutcome::Ok(
+            "新規図面を作成しました".to_owned(),
+        ));
+    hover(&mut h, P2);
+    assert_eq!(ortho_x(&h), small, "図面を入れ替えたら戻る");
+}
+
 /// 「コマンド実行中」が出ても、スナップの吸着で `OSNAP:端点` になっても、
 /// 切り替え部品と情報表示の位置（押す位置）は動かない（PR #39）。
 #[test]
