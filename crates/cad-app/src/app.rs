@@ -271,9 +271,18 @@ impl CadApp {
         // キャンバスでのクリックでツールが進んでいるかもしれないので、ここで取り直す。
         let prompt = self.session.prompt();
         let tool_active = self.session.has_active_tool();
-        self.session
-            .cmdline
-            .show_floating(ctx, &prompt, self.viewport.rect(), tool_active);
+        // 寸法入力の欄のライブ値。固定をかけた後のカーソル（＝ラバーバンドの先）から測る。
+        let dimension = self.session.dimension_base().map(|base| {
+            self.cursor_model
+                .map(|c| crate::cmdline::dimension::live(base, c))
+        });
+        self.session.cmdline.show_floating(
+            ctx,
+            &prompt,
+            self.viewport.rect(),
+            tool_active,
+            dimension,
+        );
         let submission = self.session.cmdline.finish_frame();
         if submission != Submission::None {
             // キャンバスはもう描き終えているので、確定の結果（ラバーバンドや新しい図形）は
@@ -367,9 +376,12 @@ impl CadApp {
         };
 
         // 吸着していればそれを実際のカーソル位置として扱う。
-        self.cursor_model = self.snapped.map(|s| s.point).or(raw_cursor);
-        // 直接距離入力の向きはこの位置から決める。
-        self.session.set_cursor(self.cursor_model);
+        let cursor = self.snapped.map(|s| s.point).or(raw_cursor);
+        // 直接距離入力と寸法入力の向きはこの位置（固定をかける前）から決める。
+        self.session.set_cursor(cursor);
+        // 寸法入力で固定した値（錠前）をかける。ラバーバンドはこの位置で描き、
+        // クリックも同じ `Session::constrain` を通す（`place_point`）。
+        self.cursor_model = cursor.map(|c| self.session.constrain(c));
 
         let active_drag = self.handle_pointer(&response, ui);
 
@@ -511,6 +523,9 @@ impl CadApp {
         let model = self
             .snapped
             .map_or_else(|| self.viewport.screen_to_model(pos), |s| s.point);
+        // 寸法入力で固定した値（錠前）をかける。ラバーバンド（`canvas`）と同じ関数を通すので、
+        // 見えている線の先とクリックで入る点が一致する。
+        let model = self.session.constrain(model);
         self.session
             .handle_click(model, shift, pick_tolerance, &mut self.doc);
         self.snap.release();
@@ -630,6 +645,9 @@ impl eframe::App for CadApp {
         // ツール実行中と選択待ち中は候補を出さない。座標やオプションを打つ段階なので、
         // コマンド名の候補が出ると邪魔になる。
         let allow_suggestions = !self.session.has_active_tool();
+        // 寸法入力の基点。Tab / Esc / Enter の扱いがこれで変わるので、キーを取る前に渡す。
+        let dimension_base = self.session.dimension_base();
+        self.session.cmdline.set_dimension_base(dimension_base);
         self.session.cmdline.begin_frame(&ctx, allow_suggestions);
         egui::Panel::bottom("cmdline").show(ui, |ui| self.command_area(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));

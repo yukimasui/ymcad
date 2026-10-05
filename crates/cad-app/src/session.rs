@@ -210,6 +210,19 @@ impl Session {
         self.cursor = cursor;
     }
 
+    /// 寸法入力で固定した値（錠前）で点を拘束する。
+    ///
+    /// ラバーバンドのカーソル位置とキャンバスのクリックの**両方**をここに通す。
+    /// 片方だけだと、見えている線と実際に入る点がずれる。
+    /// 参加していない・欄が出ていない・固定が無いときはそのまま返す。
+    #[must_use]
+    pub fn constrain(&self, p: Point2) -> Point2 {
+        match (self.dimension_base(), self.cmdline.dimension_locks()) {
+            (Some(base), Some(locks)) => dimension::constrain(base, p, locks),
+            _ => p,
+        }
+    }
+
     fn ctx<'a>(&'a self, doc: &'a Document) -> ToolCtx<'a> {
         ToolCtx {
             doc,
@@ -245,6 +258,26 @@ impl Session {
                 self.cmdline.push_line(LineKind::Input, format!("> {text}"));
                 self.handle_text(&text, doc);
             }
+            Submission::Dimension(values) => {
+                self.cmdline.push_line(
+                    LineKind::Input,
+                    format!("> {}", dimension::describe(values)),
+                );
+                self.handle_dimension(values, doc);
+            }
+        }
+    }
+
+    /// 寸法入力の欄で確定された値を点にしてツールへ送る。
+    fn handle_dimension(&mut self, values: dimension::DimValues, doc: &mut Document) {
+        let Some(base) = self.dimension_base() else {
+            // 確定までの間にツールが終わった（同じフレームのクリックなど）。
+            self.cmdline.error("いまは長さ・角度で点を指定できません");
+            return;
+        };
+        match dimension::resolve(base, self.cursor, values) {
+            Ok(p) => self.feed_tool(StepInput::Point(p), doc),
+            Err(e) => self.cmdline.error(e.message()),
         }
     }
 
@@ -258,6 +291,7 @@ impl Session {
         self.selection.clear();
         self.crossing_rects.clear();
         self.cmdline.clear_input();
+        self.cmdline.reset_dimension();
     }
 
     /// 空のまま確定された場合。
@@ -423,6 +457,9 @@ impl Session {
         let Some(mut tool) = self.tool.take() else {
             return;
         };
+        // 点を受け取ったら寸法入力の固定を外す（次の点へ進んだ）。
+        // 断られたら外さない（同じ固定のまま打ち直せるように）。
+        let is_point = matches!(input, StepInput::Point(_));
 
         let outcome = {
             let ctx = ToolCtx {
@@ -437,6 +474,9 @@ impl Session {
         };
 
         let name = tool.name();
+        if is_point && !matches!(outcome, StepOutcome::Reject(_)) {
+            self.cmdline.reset_dimension();
+        }
         match outcome {
             StepOutcome::Continue => self.tool = Some(tool),
             StepOutcome::Reject(msg) => {

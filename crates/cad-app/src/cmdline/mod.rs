@@ -15,14 +15,15 @@
 //! （変換中は winit がキー入力イベントを送らないため、自然にそうなる）。
 
 pub mod coord;
-// 段階 B の配線（セッション・欄の UI）が入るまでは、本体から使われない関数がある。
-#[allow(dead_code)]
 pub mod dimension;
 pub mod dynamic;
 
 use std::collections::VecDeque;
 use std::time::Duration;
 
+use cad_core::geom::Point2;
+
+use self::dimension::{DimState, DimValues, Field, Live, TabOutcome};
 use self::dynamic::{Activity, Bounds, Point, Size};
 
 use crate::tools::{self, CommandSpec};
@@ -49,6 +50,14 @@ const DYN_MAX_WIDTH: f32 = 480.0;
 const DYN_SIZE_ESTIMATE: Size = Size { w: 260.0, h: 40.0 };
 /// カーソル横の背景の不透明度。下の図形が透けて見える程度にする。
 const DYN_BACKGROUND_OPACITY: f32 = 0.8;
+/// 寸法入力の欄 1 つの幅 [px]。
+const DIM_FIELD_WIDTH: f32 = 110.0;
+/// 固定した欄の目印。
+const LOCK_MARK: &str = "🔒";
+/// 固定した欄の目印と枠の色。数字の「0」と見分けられるよう、大きさと色を変える。
+const LOCK_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
+/// 錠前の文字の大きさ [pt]。
+const LOCK_SIZE: f32 = 16.0;
 
 /// 履歴 1 行の種別。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,7 +93,7 @@ fn owns_keys(input: egui::Id, last_frame: Option<egui::Id>, now: Option<egui::Id
 }
 
 /// このフレームでユーザーが行った確定操作。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Submission {
     /// 何も起きていない。
     None,
@@ -94,6 +103,11 @@ pub enum Submission {
     Empty,
     /// `Esc` が押された。
     Cancel,
+    /// 寸法入力の欄で確定された（Issue #20 段階 B）。
+    ///
+    /// 欠けている欄（`None`）はカーソルから決める。点にするのは基点とカーソルを
+    /// 知っている `Session` の仕事。
+    Dimension(DimValues),
 }
 
 /// コマンド候補の一覧と選択状態。
@@ -253,6 +267,8 @@ pub struct CommandLine {
     dynamic: DynamicInput,
     /// カーソル横に出す直近のエラー。
     recent_error: Option<RecentError>,
+    /// 寸法入力（長さ・角度の欄）の状態。
+    dim: DimensionInput,
     /// 直近に描いた入力欄の矩形。変換開始で入力欄が動かないことのテストに使う。
     #[cfg(test)]
     input_rect: Option<egui::Rect>,
@@ -267,6 +283,22 @@ struct RecentError {
     /// [`CommandLine::error`] は時刻を知らない場所からも呼ばれるので、
     /// 描画の側で初めて見たときに埋める。
     shown_at: Option<f64>,
+}
+
+/// 寸法入力（Issue #20 段階 B）の状態。
+#[derive(Debug, Default)]
+struct DimensionInput {
+    /// フレームの最初の時点で、寸法入力に参加しているツールの基点。
+    /// キー（Tab / Esc / Enter）の扱いを決めるのに使う。
+    base: Option<Point2>,
+    /// 入力中の欄と固定した値。
+    state: DimState,
+    /// 直前のフレームで欄を出したか。
+    ///
+    /// 変換中はバッファに未確定文字列が入っていて分類できない（ADR-0002）ので、
+    /// 変換が始まる前の見た目を保つ。見た目が切り替わると入力欄が動き、
+    /// 入力欄に付いて出る IME の候補ウィンドウが跳ねる（ADR-0034 決定 4）。
+    fields_shown: bool,
 }
 
 /// カーソル横の動的入力（Issue #20 段階 A）の状態。
@@ -315,6 +347,7 @@ impl CommandLine {
                 frozen: None,
             },
             recent_error: None,
+            dim: DimensionInput::default(),
             #[cfg(test)]
             input_rect: None,
         }
@@ -381,6 +414,55 @@ impl CommandLine {
     /// 入力欄を空にする。
     pub fn clear_input(&mut self) {
         self.input.clear();
+    }
+
+    /// 寸法入力に参加しているツールの基点を伝える。[`Self::begin_frame`] の前に毎フレーム呼ぶ。
+    ///
+    /// 基点が変わったら（ツールが次の点へ進んだ・終わった・別のツールになった）
+    /// 固定を外す。前の点で固定した長さが次の線分に残ると、気づかずに使ってしまう。
+    pub fn set_dimension_base(&mut self, base: Option<Point2>) {
+        if self.dim.base != base {
+            self.dim.state.reset();
+        }
+        self.dim.base = base;
+    }
+
+    /// 寸法入力の固定を外し、長さの欄へ戻す。
+    ///
+    /// ツールが点を受け取ったときに呼ぶ。COPY のように基点が変わらないまま
+    /// 次の点へ進むツールがあるので、基点の変化だけでは足りない。
+    pub fn reset_dimension(&mut self) {
+        self.dim.state.reset();
+    }
+
+    /// このフレームで寸法入力の欄を扱うか（キーの扱いを決める）。
+    fn dimension_active(&self) -> bool {
+        self.dynamic.frame_enabled && self.dim.base.is_some()
+    }
+
+    /// 寸法入力の欄が出ているか。変換中は直前の見た目を保つ。
+    fn fields_visible(&self, participating: bool) -> bool {
+        if self.composing {
+            return participating && self.dynamic.frame_enabled && self.dim.fields_shown;
+        }
+        dimension::shows_fields(
+            participating,
+            self.dynamic.frame_enabled,
+            dimension::classify(&self.input),
+        )
+    }
+
+    /// ラバーバンドとクリックに効かせる固定値。欄が出ていて固定があるときだけ `Some`。
+    #[must_use]
+    pub fn dimension_locks(&self) -> Option<DimValues> {
+        let locks = self.dim.state.locks;
+        (self.fields_visible(self.dim.base.is_some()) && !locks.is_empty()).then_some(locks)
+    }
+
+    /// 寸法入力で入力中の欄（テスト用）。
+    #[cfg(test)]
+    pub fn dimension_field(&self) -> Field {
+        self.dim.state.field
     }
 
     /// 履歴（古い順）。
@@ -469,7 +551,7 @@ impl CommandLine {
         ui.horizontal(|ui| {
             ui.monospace(prompt);
             self.show_composing_badge(ui);
-            self.show_input(ui, f32::INFINITY);
+            self.show_input(ui, f32::INFINITY, None);
         });
     }
 
@@ -487,7 +569,9 @@ impl CommandLine {
     ///
     /// ID を固定しておくと、描く場所（画面下 / カーソル横）を切り替えても
     /// フォーカスとキャレットの位置が引き継がれる。
-    fn show_input(&mut self, ui: &mut egui::Ui, width: f32) {
+    ///
+    /// `hint` … 空のときに薄く出す文字（寸法入力のライブ値・固定値）。
+    fn show_input(&mut self, ui: &mut egui::Ui, width: f32, hint: Option<&str>) {
         let id = egui::Id::new(INPUT_ID);
         if std::mem::take(&mut self.caret_to_end) {
             let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
@@ -497,9 +581,12 @@ impl CommandLine {
                 .set_char_range(Some(egui::text::CCursorRange::one(end)));
             state.store(ui.ctx(), id);
         }
+        let mut edit = egui::TextEdit::singleline(&mut self.input);
+        if let Some(hint) = hint {
+            edit = edit.hint_text(egui::RichText::new(hint).monospace());
+        }
         let response = ui.add(
-            egui::TextEdit::singleline(&mut self.input)
-                .id(id)
+            edit.id(id)
                 // Tab・矢印・Esc はコマンドラインが自分で扱うキーなので、egui の
                 // フォーカス移動に使わせない（Issue #22）。既定では Tab が
                 // 「次の部品へ移る」として先に処理され、補完の直後にフォーカスが外れて
@@ -547,6 +634,8 @@ impl CommandLine {
     ///
     /// - `canvas` … キャンバス（ビューポート）の矩形。この中に収める
     /// - `tool_active` … コマンドを実行中か（選択待ちを含む）
+    /// - `dimension` … 寸法入力に参加中なら、基点から（固定をかけた後の）カーソルまでの
+    ///   長さと角度（カーソルが無ければ `None` の中身）。参加していなければ `None`
     ///
     /// **何もしていないときも入力欄は毎フレーム描く。** egui は描かれなかった
     /// ウィジェットのフォーカスを外すので、描くのをやめるとキー入力が流れなくなる。
@@ -559,10 +648,17 @@ impl CommandLine {
         prompt: &str,
         canvas: egui::Rect,
         tool_active: bool,
+        dimension: Option<Option<Live>>,
     ) {
         if !self.dynamic.frame_enabled {
             return;
         }
+        // 寸法入力の欄を出すか。変換中は直前の見た目を保つ（入力欄を動かさない）。
+        let fields = self.fields_visible(dimension.is_some());
+        if !self.composing {
+            self.dim.fields_shown = fields;
+        }
+        let live = dimension.flatten();
 
         let now = ctx.input(|i| i.time);
         let error_remaining = self.recent_error.as_mut().and_then(|e| {
@@ -642,7 +738,11 @@ impl CommandLine {
                             egui::RichText::new(prompt).color(ui.visuals().strong_text_color()),
                         );
                         ui.horizontal(|ui| {
-                            self.show_input(ui, DYN_INPUT_WIDTH);
+                            if fields {
+                                self.show_dimension_fields(ui, live);
+                            } else {
+                                self.show_input(ui, DYN_INPUT_WIDTH, None);
+                            }
                             // `[変換中]` は入力欄の後ろに置く。前に置くと入力欄が右へずれる。
                             // 変換していないときも幅は確保して見えなくするだけにする。
                             // 変換が始まって Area が広がると、キャンバスの右端寄りでは
@@ -666,6 +766,55 @@ impl CommandLine {
             });
     }
 
+    /// 寸法入力の「長さ」「角度」の 2 欄を描く。
+    ///
+    /// **`TextEdit` は 1 つだけ**。入力中の欄の位置に本物の入力欄を置き、もう片方は
+    /// 値を描くだけにする。2 つ描くとフォーカスと IME の出力先が 2 つになる（ADR-0034 決定 6）。
+    ///
+    /// 錠前の幅は固定していなくても常に確保する。固定した瞬間に後ろの欄
+    /// （入力欄のことがある）が右へずれないように。
+    fn show_dimension_fields(&mut self, ui: &mut egui::Ui, live: Option<Live>) {
+        let state = self.dim.state;
+        for field in [Field::Length, Field::Angle] {
+            let locked = state.locks.get(field);
+            let live_value = live.and_then(|l| match field {
+                Field::Length => Some(l.length),
+                Field::Angle => l.angle_deg,
+            });
+            let format = |v: f64| match field {
+                Field::Length => dimension::format_length(v),
+                Field::Angle => dimension::format_angle(v),
+            };
+            // 固定値を優先し、無ければライブ値。どちらも無ければ（カーソルが無い・
+            // 基点と同じで向きが無い）横棒。
+            let shown = locked.or(live_value).map_or_else(|| "-".to_owned(), format);
+            let name = match field {
+                Field::Length => "長さ",
+                Field::Angle => "角度",
+            };
+            let active = field == state.field;
+            let name_color = if active {
+                ui.visuals().strong_text_color()
+            } else {
+                ui.visuals().weak_text_color()
+            };
+            ui.label(egui::RichText::new(name).color(name_color));
+            if active {
+                self.show_input(ui, DIM_FIELD_WIDTH, Some(&shown));
+            } else {
+                show_value_field(ui, &shown, locked.is_some());
+            }
+            ui.add_visible(
+                locked.is_some(),
+                egui::Label::new(
+                    egui::RichText::new(LOCK_MARK)
+                        .size(LOCK_SIZE)
+                        .color(LOCK_COLOR),
+                ),
+            );
+        }
+    }
+
     /// 入力欄を描いたあとに呼び、このフレームの確定操作を返す。
     pub fn finish_frame(&mut self) -> Submission {
         let submission = self.resolve_pending();
@@ -685,6 +834,19 @@ impl CommandLine {
                 Submission::Cancel
             }
             Some(Submission::Text(_)) => {
+                // 寸法入力の欄で確定した。固定値と入力中の値（無い欄はカーソルから）。
+                // 何も無ければ（空 Enter）・数値以外なら、従来どおりの扱いに落とす。
+                if self.dimension_active() {
+                    let values = self
+                        .dim
+                        .state
+                        .enter_values(dimension::classify(&self.input));
+                    if let Some(values) = values {
+                        self.input.clear();
+                        self.suggestions.clear();
+                        return Submission::Dimension(values);
+                    }
+                }
                 // 候補が出ていればそれを実行する。候補が無いときだけ入力文字列を使う。
                 // 未選択でも先頭候補が実行されるので、`L` + Enter で LINE が起動する。
                 let text = self
@@ -731,6 +893,12 @@ impl CommandLine {
                 self.suggestions.dismiss(&self.input);
                 return None;
             }
+            // 寸法入力では、固定か入力があればまずそれを全部解除する。
+            // 何も無ければ従来どおり中断する。
+            if self.dimension_active() && self.dim.state.escape(dimension::classify(&self.input)) {
+                self.input.clear();
+                return None;
+            }
             return Some(Submission::Cancel);
         }
 
@@ -752,6 +920,17 @@ impl CommandLine {
                 }
                 return None;
             }
+        }
+
+        // 寸法入力の Tab。候補が出ているときの Tab は上で補完に使われるので、ここには来ない
+        // （ツール実行中は候補を出さないので、実際には重ならない）。
+        if self.dimension_active() && i.consume_key(NONE, egui::Key::Tab) {
+            match self.dim.state.tab(dimension::classify(&self.input)) {
+                TabOutcome::Moved { consumed: true } => self.input.clear(),
+                TabOutcome::Moved { consumed: false } | TabOutcome::Ignored => {}
+                TabOutcome::Rejected(e) => self.error(e.message()),
+            }
+            return None;
         }
 
         // AutoCAD では Space も Enter と同じく確定として働く。
@@ -846,6 +1025,32 @@ impl CommandLine {
                 }
             });
     }
+}
+
+/// 寸法入力の、入力中でない欄。値を描くだけ（`TextEdit` にしない）。
+///
+/// 固定した値ははっきり（枠も錠前の色）、ライブ値は薄く描く。
+fn show_value_field(ui: &mut egui::Ui, text: &str, locked: bool) {
+    let (color, stroke) = if locked {
+        (
+            ui.visuals().strong_text_color(),
+            egui::Stroke::new(1.0, LOCK_COLOR),
+        )
+    } else {
+        (
+            ui.visuals().weak_text_color(),
+            ui.visuals().widgets.noninteractive.bg_stroke,
+        )
+    };
+    egui::Frame::new()
+        .fill(ui.visuals().extreme_bg_color)
+        .stroke(stroke)
+        .corner_radius(2)
+        .inner_margin(egui::Margin::symmetric(4, 2))
+        .show(ui, |ui| {
+            ui.set_width(DIM_FIELD_WIDTH);
+            ui.label(egui::RichText::new(text).monospace().color(color));
+        });
 }
 
 #[cfg(test)]

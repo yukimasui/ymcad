@@ -63,6 +63,19 @@ impl BufferKind {
     }
 }
 
+/// 寸法入力の欄（長さ・角度）を出すか。
+///
+/// - `participating` … 実行中のツールが寸法入力に参加していて基点がある
+/// - `dynamic` … 動的入力がオン（欄はカーソル横にだけ出す）
+/// - `buffer` … 数値以外を打っていたら出さない（座標・オプションとして従来どおり扱う）
+///
+/// 欄を出している間だけ、固定値をラバーバンドとクリックに効かせる。
+/// 欄が見えないのに拘束が効くと、カーソルと違う点が入る理由が分からない。
+#[must_use]
+pub fn shows_fields(participating: bool, dynamic: bool, buffer: BufferKind) -> bool {
+    participating && dynamic && buffer.keeps_fields()
+}
+
 /// バッファを分類する。全角の数字・記号は半角として扱う（ADR-0002）。
 ///
 /// **変換中のバッファに対して呼ばないこと。** 未確定文字列が入っている（ADR-0002）。
@@ -401,21 +414,12 @@ impl DimState {
     #[must_use]
     pub fn enter_values(self, buffer: BufferKind) -> Option<DimValues> {
         match buffer {
-            BufferKind::Other => None,
+            // 打ちかけ（`-` だけなど）は値にならない。固定値だけで確定すると打った文字を
+            // 黙って捨てることになるので、従来の経路に任せてエラーを出させる。
+            BufferKind::Other | BufferKind::Incomplete => None,
             BufferKind::Number(v) => Some(self.locks.with(self.field, v)),
-            // 打ちかけは値にならない。固定があればそれで確定し、無ければ
-            // 数値として解釈できない文字列として従来の経路に任せる。
-            BufferKind::Incomplete | BufferKind::Empty => {
-                (!self.locks.is_empty()).then_some(self.locks)
-            }
+            BufferKind::Empty => (!self.locks.is_empty()).then_some(self.locks),
         }
-    }
-
-    /// 欄が出ているときに、ラバーバンドとクリックへ効かせる固定値。
-    /// 数値以外を打っている間は欄を出していないので、効かせない（見えない拘束を作らない）。
-    #[must_use]
-    pub fn effective_locks(self, buffer: BufferKind) -> Option<DimValues> {
-        (buffer.keeps_fields() && !self.locks.is_empty()).then_some(self.locks)
     }
 }
 
@@ -765,21 +769,24 @@ mod tests {
             "入力が無ければ固定値だけ（角度はカーソルから）"
         );
         assert_eq!(s.enter_values(BufferKind::Other), None, "座標を打てば座標");
+        assert_eq!(
+            s.enter_values(BufferKind::Incomplete),
+            None,
+            "打ちかけを黙って捨てない"
+        );
     }
 
     #[test]
-    fn locks_take_effect_only_while_the_fields_are_shown() {
-        let mut s = DimState::default();
-        assert_eq!(s.effective_locks(BufferKind::Empty), None, "固定が無い");
-        s.tab(BufferKind::Number(100.0));
-        assert_eq!(
-            s.effective_locks(BufferKind::Empty),
-            Some(locks(Some(100.0), None))
-        );
-        assert_eq!(
-            s.effective_locks(BufferKind::Number(1.0)),
-            Some(locks(Some(100.0), None))
-        );
-        assert_eq!(s.effective_locks(BufferKind::Other), None);
+    fn fields_are_shown_only_for_numbers_in_participating_tools_with_dynamic_input() {
+        for kind in [
+            BufferKind::Empty,
+            BufferKind::Number(1.0),
+            BufferKind::Incomplete,
+        ] {
+            assert!(shows_fields(true, true, kind), "{kind:?}");
+            assert!(!shows_fields(false, true, kind), "参加していない {kind:?}");
+            assert!(!shows_fields(true, false, kind), "動的入力オフ {kind:?}");
+        }
+        assert!(!shows_fields(true, true, BufferKind::Other), "座標・英字");
     }
 }
