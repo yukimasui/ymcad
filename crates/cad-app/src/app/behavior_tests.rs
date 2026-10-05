@@ -1511,18 +1511,29 @@ fn ribbon_buttons(h: &Harness<'_, CadApp>) -> Vec<crate::ribbon::DrawnButton> {
     h.state().ribbon.probe().buttons.clone()
 }
 
-/// 見えているボタンの名前。
+/// 今のタブに見えているボタンの名前（タブの行の右端のクイックアクセスを除く）。
 fn ribbon_names(h: &Harness<'_, CadApp>) -> Vec<&'static str> {
-    ribbon_buttons(h).iter().map(|b| b.name).collect()
+    ribbon_buttons(h)
+        .iter()
+        .filter(|b| !b.quick)
+        .map(|b| b.name)
+        .collect()
+}
+
+/// クイックアクセスに見えているボタンの名前（画面の左から順）。
+fn quick_names(h: &Harness<'_, CadApp>) -> Vec<&'static str> {
+    let mut quick: Vec<_> = ribbon_buttons(h).into_iter().filter(|b| b.quick).collect();
+    quick.sort_by(|a, b| a.rect.left().total_cmp(&b.rect.left()));
+    quick.iter().map(|b| b.name).collect()
 }
 
 /// リボンのボタンを押す。そのボタンが今のタブに無ければ panic。
 fn press_ribbon(h: &mut Harness<'_, CadApp>, name: &str) {
-    let rect = ribbon_buttons(h)
-        .iter()
+    let button = ribbon_buttons(h)
+        .into_iter()
         .find(|b| b.name == name)
-        .unwrap_or_else(|| panic!("{name} のボタンが見えていない"))
-        .rect;
+        .unwrap_or_else(|| panic!("{name} のボタンが見えていない"));
+    let rect = button.rect;
     let viewport = h
         .state()
         .ribbon
@@ -1530,7 +1541,7 @@ fn press_ribbon(h: &mut Harness<'_, CadApp>, name: &str) {
         .viewport
         .expect("リボンが描かれている");
     assert!(
-        viewport.contains(rect.center()),
+        button.quick || viewport.contains(rect.center()),
         "{name} はスクロールの外にあって押せない: {rect:?} / {viewport:?}"
     );
     click(h, rect.center());
@@ -1544,10 +1555,22 @@ fn press_tab(h: &mut Harness<'_, CadApp>, title: &str) {
         .probe()
         .tabs
         .iter()
-        .find(|(t, _)| *t == title)
+        .find(|(t, _, _)| *t == title)
         .unwrap_or_else(|| panic!("{title} のタブが無い"))
         .1;
     click(h, rect.center());
+}
+
+/// 実行中のコマンドの印が付いているタブ。
+fn marked_tabs(h: &Harness<'_, CadApp>) -> Vec<&'static str> {
+    h.state()
+        .ribbon
+        .probe()
+        .tabs
+        .iter()
+        .filter(|(_, _, mark)| *mark)
+        .map(|(t, _, _)| *t)
+        .collect()
 }
 
 /// 強調されているボタンの名前。
@@ -1637,11 +1660,10 @@ fn ribbon_undo_undoes_one_step() {
     assert_eq!(input_lines(&h).last().map(String::as_str), Some("> UNDO"));
 }
 
-/// LAYER を押すとレイヤパネルが開き、もう一度押すと閉じる（UI 要求を出すコマンド）。
+/// LAYER（ホームにある）を押すとレイヤパネルが開き、もう一度押すと閉じる（UI 要求を出すコマンド）。
 #[test]
 fn ribbon_layer_toggles_the_layer_panel() {
     let mut h = app();
-    press_tab(&mut h, "表示・ファイル");
     assert!(!h.state().layer_panel.is_open(), "前提");
     press_ribbon(&mut h, "LAYER");
     assert!(h.state().layer_panel.is_open());
@@ -1670,7 +1692,7 @@ fn ribbon_tabs_switch_the_visible_buttons() {
     press_tab(&mut h, "表示・ファイル");
     let view = ribbon_names(&h);
     assert!(
-        view.contains(&"LAYER") && view.contains(&"SAVE"),
+        view.contains(&"ZOOM") && view.contains(&"SAVEAS"),
         "{view:?}"
     );
     assert!(!view.contains(&"QUIT"), "QUIT は出さない");
@@ -1844,4 +1866,130 @@ fn ribbon_button_does_nothing_while_composing() {
             "その後のキーも通る（動的入力 {on}）"
         );
     }
+}
+
+/// UNDO / REDO / SAVE はタブの行の右端に、どのタブを開いていても出ていて押せる。
+#[test]
+fn quick_access_is_available_on_every_tab() {
+    let mut h = app();
+    hover(&mut h, P1);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, P1);
+    click(&mut h, P2);
+    press(&mut h, egui::Key::Enter);
+    assert_eq!(lines(&h).len(), 1, "前提: 線が 1 本");
+
+    for tab in ["ホーム", "コンポーネント", "表示・ファイル"] {
+        press_tab(&mut h, tab);
+        assert_eq!(
+            quick_names(&h),
+            vec!["UNDO", "REDO", "SAVE"],
+            "{tab}（左から順）"
+        );
+        assert!(
+            !ribbon_names(&h).contains(&"UNDO"),
+            "{tab}: タブの中には置かない"
+        );
+    }
+    // ホーム以外のタブから UNDO / REDO。
+    press_ribbon(&mut h, "UNDO");
+    assert!(lines(&h).is_empty(), "UNDO");
+    press_ribbon(&mut h, "REDO");
+    assert_eq!(lines(&h).len(), 1, "REDO");
+}
+
+/// 実行中のコマンドが別のタブにあるときだけ、そのタブの見出しに印が付く。
+#[test]
+fn tab_with_the_running_command_is_marked() {
+    let mut h = app();
+    hover(&mut h, P1);
+    assert!(marked_tabs(&h).is_empty(), "何もしていなければ印なし");
+
+    press_ribbon(&mut h, "LINE");
+    assert!(
+        marked_tabs(&h).is_empty(),
+        "開いているタブには付けない（ボタンが強調される）"
+    );
+
+    press_tab(&mut h, "コンポーネント");
+    assert_eq!(
+        marked_tabs(&h),
+        vec!["ホーム"],
+        "別のタブを開くとホームに印"
+    );
+    assert_eq!(
+        h.state().session.active_command(),
+        Some("LINE"),
+        "タブの切り替えは中断しない"
+    );
+
+    press(&mut h, egui::Key::Escape);
+    assert!(marked_tabs(&h).is_empty(), "終われば消える");
+}
+
+/// POLYLINE の途中で LAYER を押してもポリラインは消えず、パネルが開いて続きを打てる。
+#[test]
+fn ribbon_layer_keeps_the_running_polyline() {
+    let mut h = app();
+    hover(&mut h, P1);
+    press_ribbon(&mut h, "POLYLINE");
+    click(&mut h, P1);
+    click(&mut h, P2);
+    press_ribbon(&mut h, "LAYER");
+    assert!(h.state().layer_panel.is_open(), "パネルが開く");
+    assert_eq!(
+        h.state().session.active_command(),
+        Some("POLYLINE"),
+        "中断しない"
+    );
+    assert_eq!(highlighted(&h), vec!["POLYLINE"]);
+
+    type_text(&mut h, "0,0");
+    press(&mut h, egui::Key::Enter);
+    press(&mut h, egui::Key::Enter);
+    assert_eq!(
+        h.state().doc.entities().len(),
+        1,
+        "3 点のポリラインが確定する"
+    );
+}
+
+/// 幅が足りないときだけ、送れる側の端に印が出る。
+#[test]
+fn overflow_hints_follow_the_scroll_position() {
+    let mut h = app();
+    assert_eq!(
+        h.state().ribbon.probe().overflow,
+        (false, false),
+        "1280px では収まる"
+    );
+
+    h.set_size(egui::vec2(800.0, 600.0));
+    settle(&mut h);
+    assert_eq!(
+        h.state().ribbon.probe().overflow,
+        (false, true),
+        "右へ送れる"
+    );
+
+    let viewport = h.state().ribbon.probe().viewport.expect("リボン");
+    hover(&mut h, egui::pos2(400.0, viewport.center().y));
+    for _ in 0..10 {
+        frame(
+            &mut h,
+            [egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(0.0, -200.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+    }
+    h.run_steps(30);
+    assert_eq!(
+        h.state().ribbon.probe().overflow,
+        (true, false),
+        "右端まで送った"
+    );
 }

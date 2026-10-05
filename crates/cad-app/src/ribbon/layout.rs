@@ -32,8 +32,9 @@ pub struct GroupSpec {
 
 /// リボンの全タブ。起動時は先頭（ホーム）を開く。
 ///
-/// 日常の作図・修正・グループは全部「ホーム」に置く。線を引いてすぐトリムするような
+/// 日常の作図・修正・グループ・画層は全部「ホーム」に置く。線を引いてすぐトリムするような
 /// 日常操作でタブを切り替えさせないため（Issue #26 の「世間の不満」）。
+/// UNDO / REDO / SAVE はタブには置かず、タブの行の右端に常に出す（[`QUICK_ACCESS`]）。
 pub static TABS: &[TabSpec] = &[
     TabSpec {
         title: "ホーム",
@@ -54,8 +55,8 @@ pub static TABS: &[TabSpec] = &[
                 commands: &["GROUP", "UNGROUP"],
             },
             GroupSpec {
-                title: "元に戻す",
-                commands: &["UNDO", "REDO"],
+                title: "画層",
+                commands: &["LAYER"],
             },
         ],
     },
@@ -85,15 +86,22 @@ pub static TABS: &[TabSpec] = &[
         groups: &[
             GroupSpec {
                 title: "表示",
-                commands: &["ZOOM", "LAYER"],
+                commands: &["ZOOM"],
             },
             GroupSpec {
                 title: "ファイル",
-                commands: &["NEW", "OPEN", "SAVE", "SAVEAS"],
+                commands: &["NEW", "OPEN", "SAVEAS"],
             },
         ],
     },
 ];
+
+/// タブの行の右端に**どのタブを開いていても**出すボタン（AutoCAD のクイックアクセス
+/// ツールバーに当たる）。左から順。
+///
+/// どのタブでも要るのに打つしかなかったもの（ymcad には `Ctrl+Z` が無い）。
+/// ここに置いたコマンドはタブには置かない（1 つのコマンドの置き場所は 1 つ。網羅のテスト）。
+pub static QUICK_ACCESS: &[&str] = &["UNDO", "REDO", "SAVE"];
 
 /// リボンに**わざと出さない**コマンド。
 ///
@@ -103,12 +111,20 @@ pub static TABS: &[TabSpec] = &[
 #[cfg_attr(not(test), allow(dead_code))]
 pub static EXCLUDED: &[&str] = &["QUIT"];
 
-/// リボンに置いた全コマンド名を、タブ → グループ → ボタンの順に返す（テスト用）。
+/// リボンに置いた全コマンド名を、タブ → グループ → ボタン → クイックアクセスの順に返す（テスト用）。
 #[cfg(test)]
 pub fn placed_commands() -> impl Iterator<Item = &'static str> {
     TABS.iter()
         .flat_map(|t| t.groups.iter())
         .flat_map(|g| g.commands.iter().copied())
+        .chain(QUICK_ACCESS.iter().copied())
+}
+
+/// そのコマンドが置かれているタブの添字。クイックアクセスや除外のものは `None`。
+#[must_use]
+pub fn tab_of(name: &str) -> Option<usize> {
+    TABS.iter()
+        .position(|t| t.groups.iter().any(|g| g.commands.contains(&name)))
 }
 
 #[cfg(test)]
@@ -118,7 +134,8 @@ mod tests {
     use super::*;
     use crate::tools::COMMANDS;
 
-    /// 名前ごとに「リボンに置いた回数」と「除外リストに入れた回数」を数える。
+    /// 名前ごとに「リボン（タブとクイックアクセスの合計）に置いた回数」と
+    /// 「除外リストに入れた回数」を数える。
     fn counts() -> BTreeMap<&'static str, (usize, usize)> {
         let mut map: BTreeMap<&'static str, (usize, usize)> = BTreeMap::new();
         for name in placed_commands() {
@@ -130,8 +147,10 @@ mod tests {
         map
     }
 
-    /// コマンド表の全コマンドが「リボンにちょうど 1 回」か「除外リストにちょうど 1 回」の
-    /// どちらか一方に入っていること。コマンドを足して置き忘れるとここで落ちる。
+    /// コマンド表の全コマンドが「リボン（タブかクイックアクセスのどちらか）にちょうど 1 回」か
+    /// 「除外リストにちょうど 1 回」のどちらか一方に入っていること。
+    /// コマンドを足して置き忘れるとここで落ちる。クイックアクセスに置いたものをタブにも
+    /// 置くと 2 回になって落ちる（置き場所は 1 つ）。
     #[test]
     fn every_command_is_placed_exactly_once_or_excluded() {
         let counts = counts();
@@ -179,14 +198,22 @@ mod tests {
         }
     }
 
-    /// 起動時に開く先頭タブはホームで、日常の作図・修正が全部そこにあること。
+    /// 起動時に開く先頭タブはホームで、日常の作図・修正・画層が全部そこにあること。
+    /// UNDO / REDO / SAVE はタブではなくクイックアクセス（どのタブでも押せる）。
     #[test]
     fn home_tab_comes_first_and_holds_daily_commands() {
         let home = &TABS[0];
         assert_eq!(home.title, "ホーム");
         let names: Vec<_> = home.groups.iter().flat_map(|g| g.commands).collect();
-        for daily in ["LINE", "CIRCLE", "MOVE", "COPY", "TRIM", "FILLET", "UNDO"] {
+        for daily in ["LINE", "CIRCLE", "MOVE", "COPY", "TRIM", "FILLET", "LAYER"] {
             assert!(names.contains(&&daily), "{daily} がホームに無い");
         }
+        for anywhere in ["UNDO", "REDO", "SAVE"] {
+            assert!(QUICK_ACCESS.contains(&anywhere), "{anywhere}");
+            assert_eq!(tab_of(anywhere), None, "{anywhere} はタブに置かない");
+        }
+        assert_eq!(tab_of("LINE"), Some(0));
+        assert_eq!(tab_of("INSERT"), Some(1));
+        assert_eq!(tab_of("QUIT"), None);
     }
 }

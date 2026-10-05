@@ -384,7 +384,7 @@ fn ribbon_tab(harness: &mut Harness<'_, CadApp>, title: &str) {
         .probe()
         .tabs
         .iter()
-        .find(|(t, _)| *t == title)
+        .find(|(t, _, _)| *t == title)
         .unwrap_or_else(|| panic!("{title} のタブが無い"))
         .1;
     click(harness, rect.center());
@@ -450,4 +450,20 @@ fn ui_snapshot_ribbon_line_running() {
     hover(&mut h, CANVAS_CENTER);
     hover(&mut h, egui::pos2(700.0, 380.0));
     shot(&mut h, "ribbon_g_line_running_highlighted");
+
+    // 別のタブを開くと、実行中の LINE があるホームの見出しに点が付く。
+    ribbon_tab(&mut h, "コンポーネント");
+    hover(&mut h, egui::pos2(700.0, 380.0));
+    shot(&mut h, "ribbon_h_other_tab_marks_home");
+}
+
+/// クイックアクセス（タブの行の右端）の UNDO にマウスを乗せたところ。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_ribbon_quick_access() {
+    let mut h = harness();
+    let undo = ribbon_button_rect(&h, "UNDO").center();
+    h.hover_at(undo);
+    h.run_steps(60);
+    shot(&mut h, "ribbon_i_quick_access_tooltip");
 }
