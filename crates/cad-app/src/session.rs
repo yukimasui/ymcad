@@ -3875,7 +3875,7 @@ mod ui_start_tests {
     /// ツールとして動くもの（ZOOM）や図面を変える即時コマンド（UNDO）は今までどおり中断する。
     #[test]
     fn other_commands_still_interrupt() {
-        for name in ["ZOOM", "UNDO", "SAVE"] {
+        for name in ["ZOOM", "UNDO", "NEW"] {
             let mut s = Session::new();
             let mut doc = Document::new();
             s.start_command_from_ui("LINE", &mut doc);
@@ -3889,15 +3889,15 @@ mod ui_start_tests {
         }
     }
 
-    /// 中断しないものは「パネルを開閉するだけ」の 2 つだけ。
+    /// 中断しないものは「パネルを開閉するだけ」の 2 つと、保存の 2 つだけ。
     #[test]
-    fn only_panel_toggles_keep_the_running_command() {
+    fn only_panel_toggles_and_saves_keep_the_running_command() {
         let keeping: Vec<_> = tools::COMMANDS
             .iter()
             .filter(|c| tools::immediate(c.name).is_some_and(Immediate::keeps_running_command))
             .map(|c| c.name)
             .collect();
-        assert_eq!(keeping, vec!["COMPONENTS", "LAYER"]);
+        assert_eq!(keeping, vec!["COMPONENTS", "LAYER", "SAVE", "SAVEAS"]);
     }
 
     /// 何も実行していないときに打ちかけの文字があれば捨てる。

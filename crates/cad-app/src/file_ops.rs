@@ -98,8 +98,13 @@ pub struct PendingAction(pub FileAction);
 pub enum FileOutcome {
     /// 何も起きなかった（ダイアログでキャンセルされた等）。
     Nothing,
-    /// 成功。表示するメッセージ。
+    /// 成功（保存など）。図面はそのまま。表示するメッセージ。
     Ok(String),
+    /// 成功して、図面を入れ替えた（NEW / OPEN）。表示するメッセージ。
+    ///
+    /// 呼び出し側は選択やスナップなど、前の図面に結びついた状態を捨てる。
+    /// 保存（[`Self::Ok`]）と分けるのは、保存のたびに選択が外れていたため（Issue #41）。
+    Replaced(String),
     /// 失敗。表示するメッセージ。
     Failed(String),
     /// アプリを終了してよい。
@@ -199,7 +204,7 @@ impl FileOps {
         match action {
             FileAction::New => {
                 *doc = Document::new();
-                FileOutcome::Ok("新規図面を作成しました".to_owned())
+                FileOutcome::Replaced("新規図面を作成しました".to_owned())
             }
             FileAction::Open => Self::open(doc),
             FileAction::Save => match doc.path().map(Path::to_path_buf) {
@@ -232,7 +237,7 @@ impl FileOps {
             Ok(mut loaded) => {
                 loaded.mark_saved(Some(path.clone()));
                 *doc = loaded;
-                FileOutcome::Ok(format!("開きました: {}", path.display()))
+                FileOutcome::Replaced(format!("開きました: {}", path.display()))
             }
             Err(e) => FileOutcome::Failed(format!("読み込みに失敗しました: {e}")),
         }
@@ -338,7 +343,10 @@ mod tests {
         assert!(!doc.is_dirty());
 
         let outcome = ops.request(FileAction::New, &mut doc);
-        assert!(matches!(outcome, FileOutcome::Ok(_)));
+        assert!(
+            matches!(outcome, FileOutcome::Replaced(_)),
+            "新規作成は図面の入れ替え"
+        );
         assert!(!ops.is_confirming());
     }
 
@@ -437,9 +445,8 @@ mod tests {
         use cad_core::geom::{Line, Point2};
         use cad_core::{Entity, Geometry, LayerId};
 
-        let dir = std::env::temp_dir().join(format!("ymcad_fileops_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("テスト用ディレクトリ");
+        // 落ちても消えるよう、Drop で消える一時ディレクトリを使う。
+        let dir = crate::test_util::TempDir::new("fileops");
 
         let mut doc = Document::new();
         doc.apply(Box::new(AddEntities::one(
@@ -479,8 +486,6 @@ mod tests {
             Some(dxf_path.as_path()),
             "保存先が DXF へ移ること（以降の上書き保存も DXF のまま）"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **ネイティブ形式の保存では警告が出ないこと。**
@@ -493,9 +498,7 @@ mod tests {
         use cad_core::geom::{Point2, Vec2, Xline};
         use cad_core::{Entity, EntityId, Geometry, LayerId};
 
-        let dir = std::env::temp_dir().join(format!("ymcad_warn_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("テスト用ディレクトリ");
+        let dir = crate::test_util::TempDir::new("warn");
 
         let mut doc = Document::new();
         let x = Xline::new(Point2::ORIGIN, Vec2::new(1.0, 1.0)).expect("作図線");
@@ -523,7 +526,5 @@ mod tests {
             !ymc_msg.contains("警告"),
             "ネイティブ形式は無損失なので警告は出ないはず: {ymc_msg}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
