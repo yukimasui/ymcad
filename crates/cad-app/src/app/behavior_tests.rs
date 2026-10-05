@@ -1081,6 +1081,58 @@ fn quick_access_save_keeps_a_polyline_in_progress() {
     assert_eq!(polylines, vec![3], "3 点のポリラインが描ける");
 }
 
+/// 変更がある図面で新規作成 → 未保存の確認 → 「保存する」で、保存してから新規図面になる。
+///
+/// 並行して確認のキー操作が変わる（PR #33）ので、ボタンはクリックで押す。
+#[test]
+fn new_with_unsaved_changes_saves_through_the_confirmation_then_replaces() {
+    use egui_kittest::kittest::Queryable as _;
+
+    let dir = crate::test_util::TempDir::new("confirm_save");
+    let path = dir.join("drawing.ymc");
+    let mut h = app();
+    // 保存先がある図面に変更を加える（確認の「保存する」でダイアログを開かずに保存される）。
+    h.state_mut().doc.mark_saved(Some(path.clone()));
+    let a = egui::pos2(300.0, 300.0);
+    hover(&mut h, a);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, a);
+    click(&mut h, egui::pos2(500.0, 360.0));
+    press(&mut h, egui::Key::Escape);
+    let l = lines(&h)[0];
+    let mid = h.state().viewport.model_to_screen(l.a.lerp(l.b, 0.5));
+    click(&mut h, mid);
+    assert!(h.state().doc.is_dirty(), "前提: 未保存の変更がある");
+    assert_eq!(h.state().session.selection.len(), 1, "前提: 選択あり");
+
+    frame(&mut h, key_with(egui::Key::N, egui::Modifiers::CTRL));
+    settle(&mut h);
+    assert!(h.state().files.is_confirming(), "未保存の確認が出る");
+    assert!(!path.exists(), "まだ保存していない");
+
+    let button = h.get_by_label("保存する").rect().center();
+    click(&mut h, button);
+
+    assert!(!h.state().files.is_confirming(), "確認は閉じる");
+    let saved = cad_core::native::read::read_from_file(&path).expect("保存された図面が読める");
+    assert_eq!(saved.entities().len(), 1, "変更ごと保存された");
+    assert!(h.state().doc.entities().is_empty(), "新規図面になった");
+    assert_eq!(
+        h.state().session.selection.len(),
+        0,
+        "入れ替えたので選択は外れる"
+    );
+    assert!(
+        h.state()
+            .session
+            .cmdline
+            .history()
+            .any(|l| l.text == "新規図面を作成しました"),
+        "新規作成の案内が出る"
+    );
+}
+
 /// 図面の入れ替え（Ctrl+N）では、従来どおり選択を外し、座標の欄も最小の幅に戻す。
 #[test]
 fn replacing_the_drawing_clears_the_selection_and_the_coordinate_field() {
