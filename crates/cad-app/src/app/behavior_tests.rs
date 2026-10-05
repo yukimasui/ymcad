@@ -179,6 +179,60 @@ fn escape_closes_suggestions_first_then_clears_the_input() {
     }
 }
 
+/// キャンバスの 1 点をクリックする（押す・離すを別フレームで）。
+fn click(h: &mut Harness<'_, CadApp>, pos: egui::Pos2) {
+    let button = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    frame(h, [egui::Event::PointerMoved(pos), button(true)]);
+    frame(h, [button(false)]);
+    settle(h);
+}
+
+/// Esc で閉じた記憶が、コマンドの実行をまたいで残らないこと。
+///
+/// コマンド実行中は候補を作り直さないので、閉じたときと同じ文字列が入力欄に
+/// 残ったままコマンドが終わると、候補が出ないことがあった（PR #21 の再レビュー）。
+#[test]
+fn dismissed_suggestions_do_not_outlive_a_command() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        type_text(&mut h, "C");
+        press(&mut h, egui::Key::Escape);
+        assert!(
+            !h.state().session.cmdline.suggestions_visible(),
+            "前提: 閉じた"
+        );
+        // 閉じた後の Enter は打った文字のとおり（C = CIRCLE）に実行される。
+        press(&mut h, egui::Key::Enter);
+        assert!(h.state().session.has_active_tool(), "前提: CIRCLE 実行中");
+
+        // 実行中に同じ文字を打っておき、クリックだけでコマンドを終える。
+        type_text(&mut h, "C");
+        click(&mut h, P1);
+        click(&mut h, P2);
+        assert!(
+            !h.state().session.has_active_tool(),
+            "前提: CIRCLE が終わった"
+        );
+        assert_eq!(h.state().doc.entities().len(), 1, "前提: 円ができた");
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            "C",
+            "前提: 入力が残っている"
+        );
+
+        assert!(
+            h.state().session.cmdline.suggestions_visible(),
+            "コマンドが終われば候補が出る（動的入力 {on}）"
+        );
+    }
+}
+
 /// Esc で実行中のコマンドを中断し、空 Enter で直前のコマンドを再実行する。
 #[test]
 fn escape_cancels_and_empty_enter_repeats_the_last_command() {
@@ -280,6 +334,38 @@ fn input_does_not_move_when_composition_starts_while_a_tool_runs() {
     assert_eq!(input_rect(&h), before, "変換中");
 }
 
+/// キャンバスの右端寄りでも、変換が始まった前後で入力欄が 1px も動かないこと。
+///
+/// `[変換中]` のぶん Area が広がると、`constrain_to` が次のフレームで
+/// Area をキャンバスの内側へ押し戻し、入力欄が左へずれていた（PR #21 の再レビュー。
+/// 実測 -21〜-46px）。ずれが起きる帯は Area の幅しだいで動くので、
+/// 右端寄りを一定間隔でなめて、どこでも動かないことを確かめる。
+#[test]
+fn input_does_not_move_when_composition_starts_near_the_right_edge() {
+    let mut h = app_with_dynamic(true);
+    hover(&mut h, P1);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    assert!(h.state().session.has_active_tool(), "前提");
+
+    let right = h.state().viewport.rect().right();
+    let mut x = right - 400.0;
+    while x < right {
+        let cursor = egui::pos2(x, 300.0);
+        hover(&mut h, cursor);
+        let before = input_rect(&h);
+
+        frame(&mut h, [preedit("に")]);
+        assert_eq!(input_rect(&h), before, "変換開始のフレーム（x = {x}）");
+        settle(&mut h);
+        assert_eq!(input_rect(&h), before, "変換中・押し戻されない（x = {x}）");
+
+        // 変換を取り消して次の位置へ。
+        frame(&mut h, [preedit("")]);
+        x += 10.0;
+    }
+}
+
 /// 変換中はマウスを動かしても入力欄が動かず、Enter で確定しない。
 /// 確定（Commit）で追従に戻る。
 #[test]
@@ -307,4 +393,148 @@ fn composing_freezes_the_box_and_blocks_enter() {
         input_rect(&h).min.x > P2.x && input_rect(&h).min.y > P2.y,
         "カーソルの右下"
     );
+}
+
+// ---- Tab とフォーカス（Issue #22） ------------------------------------------
+
+/// Tab で補完したあとも入力欄にフォーカスが残り、続けて打った文字が入る。
+///
+/// `TextEdit` の既定では egui が Tab を「次の部品へフォーカスを移す」に使うので、
+/// こちらが Tab を処理するより先にフォーカスが外れていた。
+#[test]
+fn tab_completion_keeps_focus_in_the_command_line() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        type_text(&mut h, "L");
+        press(&mut h, egui::Key::Tab);
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            "LINE",
+            "補完（動的入力 {on}）"
+        );
+        type_text(&mut h, "Z");
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            "LINEZ",
+            "補完のあとに打った文字が入る（動的入力 {on}）"
+        );
+    }
+}
+
+/// 候補が出ていないときの Tab でも、入力欄からフォーカスが出ていかない。
+#[test]
+fn tab_without_suggestions_keeps_focus() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        // 候補が出ない入力。
+        type_text(&mut h, "XYZZY");
+        assert!(!h.state().session.cmdline.suggestions_visible(), "前提");
+        press(&mut h, egui::Key::Tab);
+        type_text(&mut h, "1");
+        assert_eq!(h.state().session.cmdline.input(), "XYZZY1", "動的入力 {on}");
+
+        // コマンド実行中（候補を出さない段階）でも同じ。
+        press(&mut h, egui::Key::Escape);
+        type_text(&mut h, "L");
+        press(&mut h, egui::Key::Enter);
+        assert!(h.state().session.has_active_tool(), "前提");
+        press(&mut h, egui::Key::Tab);
+        type_text(&mut h, "1");
+        assert_eq!(h.state().session.cmdline.input(), "1", "動的入力 {on}");
+    }
+}
+
+// ---- パネルの入力欄（Issue #22） --------------------------------------------
+
+/// レイヤパネルを開き、「新規」の入力欄をクリックしてフォーカスを移す。
+fn focus_layer_name_field(h: &mut Harness<'_, CadApp>) {
+    use egui_kittest::kittest::Queryable as _;
+
+    if !h.state().layer_panel.is_open() {
+        h.state_mut().layer_panel.toggle();
+        settle(h);
+    }
+    let cmdline = input_rect(h);
+    let target = h
+        .query_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.rect() != cmdline)
+        .expect("レイヤパネルの入力欄があるはず")
+        .rect();
+    let button = |pressed| egui::Event::PointerButton {
+        pos: target.center(),
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    frame(
+        h,
+        [egui::Event::PointerMoved(target.center()), button(true)],
+    );
+    frame(h, [button(false)]);
+    settle(h);
+}
+
+/// レイヤパネルの入力欄の中身。
+fn layer_name_field_value(h: &Harness<'_, CadApp>) -> String {
+    use egui_kittest::kittest::Queryable as _;
+
+    let cmdline = input_rect(h);
+    h.query_all_by_role(egui::accesskit::Role::TextInput)
+        .find(|n| n.rect() != cmdline)
+        .and_then(|n| n.value())
+        .unwrap_or_default()
+}
+
+/// パネルの入力欄を編集している間、Enter / Space / Esc をコマンドラインが奪わない。
+///
+/// 奪うと、レイヤ名の Space や Enter でコマンドが進み（空 Enter なら直前のコマンドを
+/// 再実行し）、Esc で実行中のコマンドが中断される。
+#[test]
+fn panel_text_field_keeps_enter_space_and_escape() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        type_text(&mut h, "L");
+        press(&mut h, egui::Key::Enter);
+        assert!(h.state().session.has_active_tool(), "前提: LINE 実行中");
+        let lines_before = h.state().session.cmdline.history().count();
+
+        focus_layer_name_field(&mut h);
+        type_text(&mut h, "A");
+        let mut space = Vec::from(key(egui::Key::Space));
+        space.insert(1, egui::Event::Text(" ".to_owned()));
+        frame(&mut h, space);
+        settle(&mut h);
+        type_text(&mut h, "B");
+        assert_eq!(layer_name_field_value(&h), "A B", "動的入力 {on}");
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            "",
+            "コマンドラインには入らない"
+        );
+
+        // Esc はパネルの入力欄のフォーカスを外すだけ。egui がフレームの最初に
+        // フォーカスを外すので、このフレームだけを見ると誰も持っていないように見える。
+        press(&mut h, egui::Key::Escape);
+        assert!(
+            h.state().session.has_active_tool(),
+            "Space / Esc で LINE が進んだり中断されたりしない（動的入力 {on}）"
+        );
+
+        // Enter はパネルの入力欄の確定。編集を終えるとフォーカスはコマンドラインへ戻る
+        // （以降のキーはコマンドラインのもの）。
+        focus_layer_name_field(&mut h);
+        press(&mut h, egui::Key::Enter);
+        assert!(
+            h.state().session.has_active_tool(),
+            "Enter で LINE が終わらない（動的入力 {on}）"
+        );
+        assert_eq!(
+            h.state().session.cmdline.history().count(),
+            lines_before,
+            "履歴に何も増えない（動的入力 {on}）"
+        );
+    }
 }

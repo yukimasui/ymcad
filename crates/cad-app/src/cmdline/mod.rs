@@ -30,6 +30,8 @@ const HISTORY_LIMIT: usize = 200;
 const HISTORY_VISIBLE_ROWS: f32 = 10.0;
 /// 入力欄の `TextEdit` の ID。
 const INPUT_ID: &str = "ymcad_cmdline_input";
+/// 変換中の目印。
+const COMPOSING_BADGE: &str = "[変換中]";
 /// `[変換中]` の色。
 const COMPOSING_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
 /// エラーの色。
@@ -61,6 +63,21 @@ pub enum LineKind {
 pub struct HistoryLine {
     pub kind: LineKind,
     pub text: String,
+}
+
+/// コマンドラインがこのフレームのキー（Enter / Space / Esc / Tab / ↑↓）を扱ってよいか。
+///
+/// フォーカスが入力欄にあるか、どこにも無いときだけ扱う。それ以外
+/// （レイヤ名・コンポーネント名などパネルの入力欄）を編集している間に扱うと、
+/// レイヤ名の Space や Enter で実行中のコマンドが進み（空 Enter なら直前の
+/// コマンドが再実行され）、Esc でコマンドが中断される。
+///
+/// 前のフレームのフォーカスも見る。パネルの入力欄で押した Esc は egui が
+/// フレームの最初にフォーカスを外すので、このフレームの状態だけだと
+/// 「どこにも無い」に見えるため。
+fn owns_keys(input: egui::Id, last_frame: Option<egui::Id>, now: Option<egui::Id>) -> bool {
+    let ours = |f: Option<egui::Id>| f.is_none_or(|id| id == input);
+    ours(last_frame) && ours(now)
 }
 
 /// このフレームでユーザーが行った確定操作。
@@ -103,7 +120,7 @@ impl Suggestions {
     /// 別のコマンドを選んだつもりになる事故が起きる。
     fn update(&mut self, input: &str) {
         if self.dismissed_for.as_deref() == Some(input) {
-            self.clear();
+            self.hide();
             return;
         }
         self.dismissed_for = None;
@@ -123,14 +140,25 @@ impl Suggestions {
         }
     }
 
+    /// 候補を片付け、`Esc` で閉じた記憶も捨てる。
+    ///
+    /// 確定・中断のほか、コマンド実行中（候補を出さない段階）は毎フレーム呼ばれる。
+    /// 記憶を残すと、閉じたときと同じ文字列が入力欄に残ったままコマンドが終わったとき、
+    /// 候補が出ないことがある（コマンド実行中は [`Self::update`] が呼ばれないため）。
     fn clear(&mut self) {
+        self.hide();
+        self.dismissed_for = None;
+    }
+
+    /// 候補を見えなくする。`Esc` で閉じた記憶は残す。
+    fn hide(&mut self) {
         self.items.clear();
         self.selected = None;
     }
 
     /// `Esc` で閉じる。入力が変わるまで出さない。
     fn dismiss(&mut self, input: &str) {
-        self.clear();
+        self.hide();
         self.dismissed_for = Some(input.to_owned());
     }
 
@@ -202,6 +230,17 @@ pub struct CommandLine {
     last_command: Option<String>,
     /// IME で変換中か。
     composing: bool,
+    /// 次に入力欄を描くとき、キャレットを末尾へ動かす。
+    ///
+    /// Tab 補完はバッファを外から書き換えるので、`TextEdit` のキャレットは
+    /// 補完前の位置（`L` の直後）に残る。そのまま打つと `LZINE` になる。
+    caret_to_end: bool,
+    /// 前のフレームの [`Self::begin_frame`] の時点でフォーカスを持っていた部品。
+    ///
+    /// パネルの入力欄で Esc を押すと、egui はフレームの最初にフォーカスを外す。
+    /// その時点の状態だけを見ると「誰もフォーカスを持っていない」になり、
+    /// Esc をコマンドラインが拾って実行中のコマンドを中断してしまう。
+    focused_last_frame: Option<egui::Id>,
     /// コマンド候補。
     suggestions: Suggestions,
     /// [`Self::begin_frame`] で消費したキーが表す確定操作。
@@ -261,6 +300,8 @@ impl CommandLine {
             history: VecDeque::new(),
             last_command: None,
             composing: false,
+            caret_to_end: false,
+            focused_last_frame: None,
             suggestions: Suggestions::default(),
             pending: None,
             dynamic: DynamicInput {
@@ -382,9 +423,14 @@ impl CommandLine {
         self.track_ime(ctx);
         self.refresh_suggestions(allow_suggestions);
 
+        let focused = ctx.memory(|m| m.focused());
+        let owns_keys = owns_keys(egui::Id::new(INPUT_ID), self.focused_last_frame, focused);
+        self.focused_last_frame = focused;
+
         // 変換中はキーを一切奪わない。IME に確定させるのが先。
         // 候補の操作キーもこのブロックの中にあるので、変換中は自動的に無効になる。
-        let pending = if self.composing {
+        // パネルの入力欄を編集している間も奪わない（Issue #22）。
+        let pending = if self.composing || !owns_keys {
             None
         } else {
             ctx.input_mut(|i| self.consume_keys(i))
@@ -427,7 +473,10 @@ impl CommandLine {
     /// 変換中は確定処理を止めているので、その旨をユーザーに見せる。
     fn show_composing_badge(&self, ui: &mut egui::Ui) {
         if self.composing {
-            ui.colored_label(COMPOSING_COLOR, egui::RichText::new("[変換中]").monospace());
+            ui.colored_label(
+                COMPOSING_COLOR,
+                egui::RichText::new(COMPOSING_BADGE).monospace(),
+            );
         }
     }
 
@@ -436,9 +485,29 @@ impl CommandLine {
     /// ID を固定しておくと、描く場所（画面下 / カーソル横）を切り替えても
     /// フォーカスとキャレットの位置が引き継がれる。
     fn show_input(&mut self, ui: &mut egui::Ui, width: f32) {
+        let id = egui::Id::new(INPUT_ID);
+        if std::mem::take(&mut self.caret_to_end) {
+            let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+            let end = egui::text::CCursor::new(self.input.chars().count());
+            state
+                .cursor
+                .set_char_range(Some(egui::text::CCursorRange::one(end)));
+            state.store(ui.ctx(), id);
+        }
         let response = ui.add(
             egui::TextEdit::singleline(&mut self.input)
-                .id(egui::Id::new(INPUT_ID))
+                .id(id)
+                // Tab・矢印・Esc はコマンドラインが自分で扱うキーなので、egui の
+                // フォーカス移動に使わせない（Issue #22）。既定では Tab が
+                // 「次の部品へ移る」として先に処理され、補完の直後にフォーカスが外れて
+                // 続けて打った文字が消えていた。候補が無いときの Tab も、入力欄から
+                // 出ていかないほうがよい（打ち間違いで入力先が変わると気づきにくい）。
+                .event_filter(egui::EventFilter {
+                    tab: true,
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    escape: true,
+                })
                 .desired_width(width)
                 .font(egui::TextStyle::Monospace),
         );
@@ -572,7 +641,18 @@ impl CommandLine {
                         ui.horizontal(|ui| {
                             self.show_input(ui, DYN_INPUT_WIDTH);
                             // `[変換中]` は入力欄の後ろに置く。前に置くと入力欄が右へずれる。
-                            self.show_composing_badge(ui);
+                            // 変換していないときも幅は確保して見えなくするだけにする。
+                            // 変換が始まって Area が広がると、キャンバスの右端寄りでは
+                            // `constrain_to` が次のフレームで Area を左へ押し戻し、
+                            // 入力欄（と候補ウィンドウ）が跳ねる。
+                            ui.add_visible(
+                                self.composing,
+                                egui::Label::new(
+                                    egui::RichText::new(COMPOSING_BADGE)
+                                        .monospace()
+                                        .color(COMPOSING_COLOR),
+                                ),
+                            );
                         });
                         // ここから下は入力欄の位置に影響しない。
                         self.show_suggestions(ui);
@@ -664,6 +744,7 @@ impl CommandLine {
                 // Enter で実行される候補をそのまま入力欄へ入れる。
                 if let Some(name) = self.suggestions.completion(&self.input) {
                     self.input = name;
+                    self.caret_to_end = true;
                     self.suggestions.update(&self.input);
                 }
                 return None;
@@ -898,6 +979,26 @@ mod tests {
         assert_eq!(s.selected, None);
     }
 
+    /// フォーカスが入力欄か無いときだけキーを扱い、パネルの入力欄が
+    /// フォーカスを持っている（持っていた）間は扱わないこと。
+    #[test]
+    fn keys_belong_to_the_command_line_only_when_no_one_else_has_focus() {
+        let input = egui::Id::new(INPUT_ID);
+        let panel = egui::Id::new("panel");
+        assert!(owns_keys(input, None, None), "起動直後");
+        assert!(owns_keys(input, Some(input), Some(input)), "入力欄にある");
+        assert!(owns_keys(input, Some(input), None), "入力欄から外れた直後");
+        assert!(!owns_keys(input, None, Some(panel)), "パネルに移った");
+        assert!(
+            !owns_keys(input, Some(panel), Some(panel)),
+            "パネルを編集中"
+        );
+        assert!(
+            !owns_keys(input, Some(panel), None),
+            "パネルで Esc（egui がフレームの最初にフォーカスを外す）"
+        );
+    }
+
     /// `Esc` で閉じた候補は、入力が同じ間は作り直しても出ないこと。
     /// 入力が変われば再び出ること。
     #[test]
@@ -911,6 +1012,12 @@ mod tests {
         assert!(s.is_visible(), "入力が変われば出る");
         s.update("L");
         assert!(s.is_visible(), "一度変わったら閉じた記憶は消える");
+
+        // 確定・中断・コマンド実行中の clear でも記憶は消える。
+        s.dismiss("L");
+        s.clear();
+        s.update("L");
+        assert!(s.is_visible(), "clear の後は同じ入力でも出る");
     }
 
     /// Tab の補完先は Enter で実行される候補と一致すること。
