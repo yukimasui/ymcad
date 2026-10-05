@@ -228,3 +228,50 @@ fn ui_snapshot_dim_back_to_plain_input() {
     type_text(&mut h, "@50,20");
     shot(&mut h, "dim_e_non_number_plain_input");
 }
+
+// ---- 直交モード・極トラッキング（Issue #29） ---------------------------------
+
+/// 補助を `keys` で切り替えてから LINE の 1 点目をキャンバス中央に置き、
+/// 1 点目から画面上で `deg`°・`r` px の位置を指した状態。
+fn line_tracking(keys: &[egui::Key], deg: f32, r: f32) -> Harness<'static, CadApp> {
+    let mut h = harness();
+    hover(&mut h, CANVAS_CENTER);
+    for k in keys {
+        press(&mut h, *k);
+    }
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, CANVAS_CENTER);
+    // 1 点目を置いた後は履歴が増えないので、1 点目の画面位置は中央のまま。
+    let (s, c) = deg.to_radians().sin_cos();
+    hover(
+        &mut h,
+        egui::pos2(CANVAS_CENTER.x + r * c, CANVAS_CENTER.y - r * s),
+    );
+    h
+}
+
+/// F8 → LINE の 2 点目を斜め（30°）に指す → ラバーバンドは水平。ステータスバーに `ORTHO`。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_ortho_line() {
+    let mut h = line_tracking(&[egui::Key::F8], 30.0, 200.0);
+    shot(&mut h, "ortho_a_line_horizontal");
+}
+
+/// F10 → 40° 付近を指す → 45° に吸い付き、補助線（点線）と `45°` が出る。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_polar_snapped() {
+    let mut h = line_tracking(&[egui::Key::F10], 40.0, 100.0);
+    shot(&mut h, "polar_b_snapped_45");
+}
+
+/// 両方オン → ステータスバーに `ORTHO` と `POLAR`（直交が優先なので POLAR は控えめの色）。
+/// 40° を指しても直交が勝つので水平になり、極の補助線は出ない。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_ortho_and_polar_status() {
+    let mut h = line_tracking(&[egui::Key::F8, egui::Key::F10], 40.0, 100.0);
+    shot(&mut h, "ortho_polar_c_both_on_status");
+}

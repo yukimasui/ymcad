@@ -1060,3 +1060,312 @@ fn tab_with_dynamic_input_off_explains_instead_of_locking() {
     press(&mut h, egui::Key::Tab);
     assert_eq!(guides(&h), 1, "参加していなければ案内しない");
 }
+
+// ---- 直交モード・極トラッキング（Issue #29、ADR-0038） ------------------------
+
+use crate::drafting::Mode;
+
+/// 基準点から画面上で `deg`°（モデルの向き。画面の y は下向きなので符号を返す）、`r` px の位置。
+fn screen_at(h: &Harness<'_, CadApp>, base: Point2, deg: f32, r: f32) -> egui::Pos2 {
+    let from = h.state().viewport.model_to_screen(base);
+    let (s, c) = deg.to_radians().sin_cos();
+    egui::pos2(from.x + r * c, from.y - r * s)
+}
+
+/// 補助を `keys` で切り替えてから LINE を始め、P1 に 1 点目を置く。基準点を返す。
+fn line_from_p1_with(keys: &[egui::Key]) -> (Harness<'static, CadApp>, Point2) {
+    let mut h = app_with_dynamic(true);
+    hover(&mut h, P1);
+    for k in keys {
+        press(&mut h, *k);
+    }
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, P1);
+    let base = h
+        .state()
+        .session
+        .tracking_base()
+        .expect("前提: 1 点目を置いたので基準点がある");
+    (h, base)
+}
+
+fn cursor(h: &Harness<'_, CadApp>) -> Point2 {
+    h.state().cursor_model.expect("カーソルはキャンバスの上")
+}
+
+/// F8 → LINE の 2 点目を斜めに指すと、ラバーバンドもクリックで入る点も水平・垂直になる。
+#[test]
+fn f8_makes_the_rubber_band_and_the_click_horizontal_or_vertical() {
+    let (mut h, base) = line_from_p1_with(&[egui::Key::F8]);
+    assert!(h.state().drafting.is_on(Mode::Ortho), "F8 でオン");
+
+    // 20° の向き（水平寄り）→ 水平。
+    let pos = screen_at(&h, base, 20.0, 200.0);
+    hover(&mut h, pos);
+    let expected = Point2::new(model(&h, pos).x, base.y);
+    assert_point(cursor(&h), expected, "ラバーバンドの先は水平");
+    click(&mut h, pos);
+    let l = lines(&h);
+    assert_eq!(l.len(), 1);
+    assert_point(
+        l[0].b,
+        expected,
+        "クリックで入った点もラバーバンドの先と同じ",
+    );
+    assert_eq!(l[0].b.y, base.y, "ちょうど水平");
+
+    // 110° の向き（垂直寄り）→ 垂直。
+    let base = l[0].b;
+    let pos = screen_at(&h, base, 110.0, 150.0);
+    hover(&mut h, pos);
+    let rubber = cursor(&h);
+    assert_point(rubber, Point2::new(base.x, model(&h, pos).y), "垂直");
+    click(&mut h, pos);
+    let l = lines(&h);
+    assert_eq!(l.len(), 2);
+    assert_point(l[1].b, rubber, "クリックで入った点");
+    assert_eq!(l[1].b.x, base.x, "ちょうど垂直");
+}
+
+/// F10 → 40° 付近を指すと 45° に吸い付き、クリックでも 45° の線になる。遠ければカーソルのまま。
+#[test]
+fn f10_snaps_a_click_near_40_degrees_to_45() {
+    let (mut h, base) = line_from_p1_with(&[egui::Key::F10]);
+    assert!(h.state().drafting.is_on(Mode::Polar), "F10 でオン");
+
+    // 100px 先なら 45° の半直線まで 100·sin5° ≈ 8.7px（吸い付く距離 10px 以内）。
+    let pos = screen_at(&h, base, 40.0, 100.0);
+    hover(&mut h, pos);
+    let rubber = cursor(&h);
+    let toward = rubber - base;
+    assert!(
+        eq_len(toward.x, toward.y),
+        "ラバーバンドは 45° に吸い付く: {toward:?}"
+    );
+    click(&mut h, pos);
+    let l = lines(&h);
+    assert_eq!(l.len(), 1);
+    assert_point(l[0].b, rubber, "クリックで入った点もラバーバンドの先と同じ");
+    let d = l[0].b - l[0].a;
+    assert!(eq_len(d.x, d.y) && d.x > 0.0, "45° の線: {d:?}");
+
+    // 400px 先の 220°（225° から 5°）は半直線から ≈ 35px 離れているので吸い付かない。
+    let base = l[0].b;
+    let pos = screen_at(&h, base, 220.0, 400.0);
+    hover(&mut h, pos);
+    assert_point(cursor(&h), model(&h, pos), "遠ければカーソルのまま");
+}
+
+/// 両方オンなら直交が優先される（40° でも 45° ではなく水平）。
+#[test]
+fn ortho_wins_when_both_are_on() {
+    let (mut h, base) = line_from_p1_with(&[egui::Key::F8, egui::Key::F10]);
+    assert!(h.state().drafting.is_on(Mode::Ortho) && h.state().drafting.is_on(Mode::Polar));
+    let pos = screen_at(&h, base, 40.0, 100.0);
+    hover(&mut h, pos);
+    let rubber = cursor(&h);
+    assert_point(rubber, Point2::new(model(&h, pos).x, base.y), "水平");
+    click(&mut h, pos);
+    assert_point(lines(&h)[0].b, rubber, "クリックで入った点");
+}
+
+/// 片方を切っても他方の状態は変わらない（AutoCAD のように F8 で F10 が切れない）。
+#[test]
+fn toggling_one_mode_keeps_the_other() {
+    let mut h = app();
+    hover(&mut h, P1);
+    press(&mut h, egui::Key::F10);
+    press(&mut h, egui::Key::F8);
+    press(&mut h, egui::Key::F8);
+    let d = h.state().drafting;
+    assert!(!d.is_on(Mode::Ortho), "F8 を 2 回でオフ");
+    assert!(d.is_on(Mode::Polar), "F8 を切っても POLAR は残る");
+
+    press(&mut h, egui::Key::F8);
+    press(&mut h, egui::Key::F10);
+    let d = h.state().drafting;
+    assert!(d.is_on(Mode::Ortho), "F10 を切っても ORTHO は残る");
+    assert!(!d.is_on(Mode::Polar));
+
+    let toggles: Vec<String> = h
+        .state()
+        .session
+        .cmdline
+        .history()
+        .filter(|l| l.text.starts_with("直交モード:") || l.text.starts_with("極トラッキング:"))
+        .map(|l| l.text.clone())
+        .collect();
+    assert_eq!(toggles.len(), 5, "切り替えるたびに履歴に残る: {toggles:?}");
+    assert_eq!(toggles[0], "極トラッキング: ON");
+}
+
+/// スナップに吸着しているときは直交よりスナップが優先される（端点に吸い付く）。
+#[test]
+fn a_snap_wins_over_ortho() {
+    let mut h = app_with_dynamic(true);
+    // 先に斜めの線分を 1 本引いておく。
+    let a = egui::pos2(300.0, 500.0);
+    let b = egui::pos2(700.0, 200.0);
+    hover(&mut h, a);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, a);
+    click(&mut h, b);
+    press(&mut h, egui::Key::Escape);
+    let end = lines(&h)[0].b;
+
+    press(&mut h, egui::Key::F8);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, P1);
+    let base = h.state().session.tracking_base().expect("前提: 基準点");
+
+    // 端点のすぐ近く（P1 から見て斜め）。直交なら水平になるところ、端点に吸い付く。
+    let near = h.state().viewport.model_to_screen(end) + egui::vec2(3.0, 3.0);
+    hover(&mut h, near);
+    assert!(h.state().snapped.is_some(), "前提: 吸着している");
+    assert_point(cursor(&h), end, "スナップが優先");
+    assert!(cursor(&h).y != base.y, "水平に拘束されていない");
+    click(&mut h, near);
+    let l = lines(&h);
+    assert_eq!(l.len(), 2);
+    assert_point(l[1].b, end, "クリックでも端点");
+}
+
+/// 寸法入力で角度を固定していれば、直交より固定が優先される。
+#[test]
+fn an_angle_lock_wins_over_ortho() {
+    let (mut h, base) = line_from_p1_with(&[egui::Key::F8]);
+    press(&mut h, egui::Key::Tab); // 空の Tab は固定せずに角度の欄へ
+    type_text(&mut h, "30");
+    press(&mut h, egui::Key::Tab);
+    let locks = DimValues {
+        length: None,
+        angle_deg: Some(30.0),
+    };
+    assert_eq!(h.state().session.cmdline.dimension_locks(), Some(locks));
+
+    hover(&mut h, P2);
+    let expected = crate::cmdline::dimension::constrain(base, model(&h, P2), locks)
+        .expect("P2 は 30° の半直線と同じ側");
+    assert_point(cursor(&h), expected, "直交ではなく 30° の半直線へ射影");
+    click(&mut h, P2);
+    assert_point(lines(&h)[0].b, expected, "クリックで入った点");
+}
+
+/// 長さだけ固定しているときは、向きを直交が決める（固定していない欄はカーソルから）。
+#[test]
+fn a_length_lock_follows_the_ortho_direction() {
+    let (mut h, base) = line_from_p1_with(&[egui::Key::F8]);
+    type_text(&mut h, "100");
+    press(&mut h, egui::Key::Tab);
+    let pos = screen_at(&h, base, -20.0, 200.0);
+    hover(&mut h, pos);
+    let expected = Point2::new(base.x + 100.0, base.y);
+    assert_point(cursor(&h), expected, "右へ水平に 100");
+    click(&mut h, pos);
+    assert_point(lines(&h)[0].b, expected, "クリックで入った点");
+}
+
+/// 直接距離入力の向きも直交に従う。
+#[test]
+fn direct_distance_follows_ortho() {
+    let (mut h, base) = line_from_p1_with(&[egui::Key::F8]);
+    let pos = screen_at(&h, base, 160.0, 200.0);
+    hover(&mut h, pos);
+    type_text(&mut h, "50");
+    press(&mut h, egui::Key::Enter);
+    let l = lines(&h);
+    assert_eq!(l.len(), 1);
+    assert_point(l[0].b, Point2::new(base.x - 50.0, base.y), "左へ水平に 50");
+}
+
+/// 基準点が無い段階（LINE の 1 点目）では拘束しない。
+#[test]
+fn nothing_is_constrained_before_the_first_point() {
+    let mut h = app_with_dynamic(true);
+    hover(&mut h, P1);
+    press(&mut h, egui::Key::F8);
+    press(&mut h, egui::Key::F10);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    assert_eq!(
+        h.state().session.tracking_base(),
+        None,
+        "1 点目には基準点が無い"
+    );
+    hover(&mut h, P2);
+    let raw = model(&h, P2);
+    assert_point(cursor(&h), raw, "カーソルのまま");
+    click(&mut h, P2);
+    assert_point(
+        h.state().session.tracking_base().expect("1 点目が入った"),
+        raw,
+        "クリックした位置がそのまま 1 点目",
+    );
+}
+
+/// RECTANGLE の対角は直交にかけない（かけると面積 0 で必ず断られる）。
+#[test]
+fn rectangle_is_not_constrained_by_ortho() {
+    let mut h = app_with_dynamic(true);
+    hover(&mut h, P1);
+    press(&mut h, egui::Key::F8);
+    type_text(&mut h, "REC");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, P1);
+    assert_eq!(
+        h.state().session.tracking_base(),
+        None,
+        "対角は基準点を持たない"
+    );
+    click(&mut h, P2);
+    assert_eq!(h.state().doc.entities().len(), 1, "矩形が描ける");
+}
+
+/// ステータスバーの `ORTHO` / `POLAR` はクリックで切り替わり、指のカーソルになる。
+#[test]
+fn ortho_and_polar_in_the_status_bar_are_clickable_with_a_pointing_hand() {
+    use egui_kittest::kittest::Queryable as _;
+
+    let mut h = app_with_dynamic(true);
+    for (mode, off, on) in [
+        (Mode::Ortho, "ortho", "ORTHO"),
+        (Mode::Polar, "polar", "POLAR"),
+    ] {
+        assert!(!h.state().drafting.is_on(mode), "前提: 起動時はオフ");
+        let target = h.get_by_label(off).rect().center();
+        hover(&mut h, target);
+        assert_eq!(
+            h.output().platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand,
+            "{on}"
+        );
+        click(&mut h, target);
+        assert!(h.state().drafting.is_on(mode), "{on}: クリックでオン");
+        let target = h.get_by_label(on).rect().center();
+        hover(&mut h, target);
+        assert_eq!(
+            h.output().platform_output.cursor_icon,
+            egui::CursorIcon::PointingHand,
+            "{on}"
+        );
+    }
+    // 片方のクリックで他方は変わらない。
+    let target = h.get_by_label("ORTHO").rect().center();
+    click(&mut h, target);
+    assert!(
+        !h.state().drafting.is_on(Mode::Ortho),
+        "もう一度クリックでオフ"
+    );
+    assert!(h.state().drafting.is_on(Mode::Polar), "POLAR は残る");
+    let toggled = h
+        .state()
+        .session
+        .cmdline
+        .history()
+        .filter(|l| l.text.starts_with("直交モード:") || l.text.starts_with("極トラッキング:"))
+        .count();
+    assert_eq!(toggled, 3, "クリックでも履歴に残る");
+}

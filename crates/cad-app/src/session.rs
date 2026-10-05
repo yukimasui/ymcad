@@ -53,7 +53,7 @@ pub struct Session {
     ui_actions: Vec<UiAction>,
     /// コマンド間で覚える設定（FILLET の半径など）。
     settings: ToolSettings,
-    /// キャンバス上のカーソル位置（モデル座標、スナップ後・寸法の固定をかける前）。
+    /// キャンバス上のカーソル位置（モデル座標、スナップ・直交・極トラッキングの後、寸法の固定をかける前）。
     ///
     /// 直接距離入力と寸法入力の `Enter` で、向きや欠けた値をカーソルから決めるのに使う。
     /// カーソルが作図領域の外にあるときは `None`。
@@ -204,7 +204,17 @@ impl Session {
         self.tool.as_ref().and_then(|t| t.dimension_base())
     }
 
-    /// キャンバス上のカーソル位置（スナップ後・寸法の固定をかける前）を伝える。
+    /// 直交モード・極トラッキングの基準点（[`Tool::tracking_base`]、ADR-0038）。
+    /// 点の指定を待っていて、ツールが基準点を持つときだけ `Some`。
+    #[must_use]
+    pub fn tracking_base(&self) -> Option<Point2> {
+        if !self.wants_point() || self.wants_entity() {
+            return None;
+        }
+        self.tool.as_ref().and_then(|t| t.tracking_base())
+    }
+
+    /// キャンバス上のカーソル位置（スナップ・直交・極トラッキングの後、寸法の固定をかける前）を伝える。
     /// 作図領域の外なら `None`。毎フレーム呼ぶ。
     pub fn set_cursor(&mut self, cursor: Option<Point2>) {
         self.cursor = cursor;

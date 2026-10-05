@@ -160,6 +160,16 @@ pub trait Tool: std::fmt::Debug {
         None
     }
 
+    /// 直交モード（F8）・極トラッキング（F10）の基準点（ADR-0038）。
+    ///
+    /// 既定は寸法入力の基点、無ければ直前の点。寸法入力に参加しない
+    /// ROTATE・MIRROR・XLINE なども、基準点からの向きで点を決めるので拘束を効かせる。
+    /// **基準点からの向きに意味が無い点では `None` を返して外れる**
+    /// （RECTANGLE の対角は水平・垂直にすると面積 0 になり、必ず断られる）。
+    fn tracking_base(&self) -> Option<Point2> {
+        self.dimension_base().or_else(|| self.last_point())
+    }
+
     /// 開始時に選択を必要とするか（ERASE / MOVE / COPY）。
     fn wants_selection(&self) -> bool {
         false

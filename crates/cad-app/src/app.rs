@@ -7,6 +7,7 @@ use cad_core::Document;
 
 use crate::cmdline::Submission;
 use crate::component_panel::{ComponentPanel, PanelRequest};
+use crate::drafting::{self, Drafting};
 use crate::file_ops::{self, FileOps, FileOutcome};
 use crate::input::{self, ViewAction};
 use crate::layer_panel::LayerPanel;
@@ -94,6 +95,8 @@ pub struct CadApp {
     session: Session,
     /// オブジェクトスナップ。
     snap: SnapState,
+    /// 直交モード（F8）と極トラッキング（F10）。UI の状態なので保存しない（ADR-0038）。
+    drafting: Drafting,
     /// コンポーネントインスタンスの展開結果。
     ///
     /// 派生データなので `Document` ではなくここに持ち、
@@ -130,6 +133,7 @@ impl CadApp {
             viewport: Viewport::default(),
             session: Session::new(),
             snap: SnapState::new(),
+            drafting: Drafting::new(),
             resolved: ResolvedInstances::new(),
             layer_panel: LayerPanel::new(),
             component_panel: ComponentPanel::new(),
@@ -224,6 +228,9 @@ impl CadApp {
                 self.toggle_osnap();
             }
             ui.separator();
+            if let Some(mode) = drafting::status_toggles(ui, self.drafting) {
+                self.toggle_drafting(mode);
+            }
             // 動的入力。OSNAP と同じ見せ方にし、クリックでも切り替えられるようにする。
             let dyn_text = if self.session.cmdline.is_dynamic() {
                 egui::RichText::new("DYN")
@@ -321,6 +328,24 @@ impl CadApp {
             .info(format!("オブジェクトスナップ: {state}"));
     }
 
+    /// 直交モード・極トラッキングを切り替え、履歴に残す。他方は変えない（ADR-0038）。
+    fn toggle_drafting(&mut self, mode: drafting::Mode) {
+        let msg = self.drafting.toggle(mode);
+        self.session.cmdline.info(msg);
+    }
+
+    /// スナップ前のカーソル（モデル座標）から、ラバーバンドとクリックに使う点を決める。
+    /// スナップの吸着 → 直交 → 極の順（ADR-0038）。寸法入力の固定はこの後に `Session` がかける。
+    fn track(&self, raw: Point2) -> drafting::Tracked {
+        drafting::track_cursor(
+            self.drafting,
+            &self.session,
+            &self.viewport,
+            self.snapped.map(|s| s.point),
+            raw,
+        )
+    }
+
     /// 動的入力を切り替え、履歴に残す。
     fn toggle_dynamic_input(&mut self) {
         let state = if self.session.cmdline.toggle_dynamic() {
@@ -377,6 +402,10 @@ impl CadApp {
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F12)) {
             self.toggle_dynamic_input();
         }
+        // F8 で直交、F10 で極トラッキング（AutoCAD と同じキー）。F3 と同じく TextEdit は消費しない。
+        for mode in drafting::take_key_toggles(ui) {
+            self.toggle_drafting(mode);
+        }
 
         // カーソル横の入力欄の基準。キャンバスの外にいる間は最後の位置に留める。
         if let Some(pos) = response.hover_pos() {
@@ -400,8 +429,10 @@ impl CadApp {
             }
         };
 
-        // 吸着していればそれを実際のカーソル位置として扱う。
-        let cursor = self.snapped.map(|s| s.point).or(raw_cursor);
+        // 吸着していればそれを実際のカーソル位置として扱う。吸着していなければ
+        // 直交・極トラッキングをかける。クリック（`place_point`）も同じ `track` を通す。
+        let tracked = raw_cursor.map(|c| self.track(c));
+        let cursor = tracked.map(|t| t.point);
         // 直接距離入力と寸法入力の向きはこの位置（固定をかける前）から決める。
         self.session.set_cursor(cursor);
         // 寸法入力で固定した値（錠前）をかける。ラバーバンドはこの位置で描き、
@@ -427,6 +458,10 @@ impl CadApp {
 
         let preview = self.session.preview(self.cursor_model, &self.doc);
         render::draw_preview(&painter, &self.viewport, self.doc.definitions(), &preview);
+
+        if let Some(hit) = tracked.and_then(|t| t.polar) {
+            render::draw_polar_guide(&painter, &self.viewport, &hit);
+        }
 
         if let Some(candidate) = &self.snapped {
             render::draw_snap_marker(&painter, &self.viewport, candidate, true);
@@ -544,10 +579,9 @@ impl CadApp {
     /// スクリーン座標を入力点として `Session` へ渡す。
     fn place_point(&mut self, pos: egui::Pos2, shift: bool, pick_tolerance: f64) {
         // 吸着していればその点を使う。クリック位置そのままではなく
-        // スナップ点が入力されるのが OSNAP の要点。
-        let model = self
-            .snapped
-            .map_or_else(|| self.viewport.screen_to_model(pos), |s| s.point);
+        // スナップ点が入力されるのが OSNAP の要点。吸着していなければ直交・極をかける。
+        // ラバーバンド（`canvas`）と同じ `track` を通すので、見えている線の先と一致する。
+        let model = self.track(self.viewport.screen_to_model(pos)).point;
         // 寸法入力で固定した値（錠前）をかける。ラバーバンド（`canvas`）と同じ計算を通すので、
         // 見えている線の先とクリックで入る点が一致する。固定値から点が決まらない位置
         // （角度だけ固定してその反対側など）では、`Enter` と同じく点を入れずにエラーにする。

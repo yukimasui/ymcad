@@ -4,6 +4,7 @@
 //! モデル座標からスクリーン座標への変換は必ず [`Viewport`] を経由すること
 //! （このモジュールに `as f32` を書かない）。
 
+use crate::drafting::PolarHit;
 use crate::editing::EditSession;
 use crate::resolved::ResolvedInstances;
 use crate::selection::{Selection, WindowMode};
@@ -610,6 +611,72 @@ fn closed_path(painter: &egui::Painter, points: &[egui::Pos2], stroke: egui::Str
     }
 }
 
+// ---------------------------------------------------------------------------
+// 極トラッキングの補助線（ADR-0038）
+// ---------------------------------------------------------------------------
+
+/// 補助線と角度表示の色。スナップマーカー（黄緑）と区別できる水色。
+const POLAR_GUIDE_COLOR: egui::Color32 = egui::Color32::from_rgb(0x4f, 0xc3, 0xf7);
+
+/// 極トラッキングで吸い付いているときの補助線（基準点からの点線）と角度の表示を描く。
+///
+/// 補助線は基準点から吸い付いた角度の向きへ、キャンバスの端まで伸ばす。
+/// 角度は吸い付いた点（カーソルの近く）の右上に出す。右下はカーソル横の入力欄
+/// （ADR-0034）なので避ける。
+pub fn draw_polar_guide(painter: &egui::Painter, vp: &Viewport, hit: &PolarHit) {
+    let from = vp.model_to_screen(hit.base);
+    let at = vp.model_to_screen(hit.point);
+    if let Some((a, b)) = clip_ray(from, at - from, vp.rect()) {
+        painter.extend(egui::Shape::dotted_line(
+            &[a, b],
+            POLAR_GUIDE_COLOR,
+            5.0,
+            1.0,
+        ));
+    }
+
+    let galley = painter.layout_no_wrap(
+        hit.label(),
+        egui::FontId::monospace(12.0),
+        POLAR_GUIDE_COLOR,
+    );
+    let pos = at + egui::vec2(12.0, -12.0 - galley.size().y);
+    painter.rect_filled(
+        egui::Rect::from_min_size(pos, galley.size()).expand(2.0),
+        2.0,
+        egui::Color32::from_black_alpha(0xb0),
+    );
+    painter.galley(pos, galley, POLAR_GUIDE_COLOR);
+}
+
+/// 半直線 `from + dir·t`（t ≥ 0）のうち `rect` の中にある部分。無ければ `None`。
+///
+/// 基準点が画面のはるか外にあっても、見えている部分だけを点線にする
+/// （そのまま点線にすると点の数が距離に比例して増える）。
+fn clip_ray(
+    from: egui::Pos2,
+    dir: egui::Vec2,
+    rect: egui::Rect,
+) -> Option<(egui::Pos2, egui::Pos2)> {
+    let mut t0 = 0.0_f32;
+    let mut t1 = f32::INFINITY;
+    for (p, d, lo, hi) in [
+        (from.x, dir.x, rect.min.x, rect.max.x),
+        (from.y, dir.y, rect.min.y, rect.max.y),
+    ] {
+        if d == 0.0 {
+            if p < lo || p > hi {
+                return None;
+            }
+        } else {
+            let (a, b) = ((lo - p) / d, (hi - p) / d);
+            t0 = t0.max(a.min(b));
+            t1 = t1.min(a.max(b));
+        }
+    }
+    (t0 < t1 && t1.is_finite()).then(|| (from + dir * t0, from + dir * t1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -941,5 +1008,66 @@ mod tests {
         );
 
         assert_eq!(finish_and_count(&ctx), 0, "空の図面では何も描かない");
+    }
+
+    // ---- 極トラッキングの補助線 ----
+
+    fn canvas_rect() -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(200.0, 100.0))
+    }
+
+    /// 中から出る半直線は、起点から端まで。
+    #[test]
+    fn clip_ray_from_inside_runs_to_the_edge() {
+        let (a, b) = clip_ray(egui::pos2(50.0, 50.0), egui::vec2(1.0, 0.0), canvas_rect())
+            .expect("見えている");
+        assert_eq!(a, egui::pos2(50.0, 50.0));
+        assert_eq!(b, egui::pos2(200.0, 50.0));
+    }
+
+    /// 起点が画面のはるか外でも、見えている区間だけになる（点の数が距離に比例しない）。
+    #[test]
+    fn clip_ray_from_far_outside_is_cut_to_the_canvas() {
+        let (a, b) = clip_ray(
+            egui::pos2(-1.0e6, 50.0),
+            egui::vec2(1.0, 0.0),
+            canvas_rect(),
+        )
+        .expect("見えている");
+        assert_eq!(a, egui::pos2(0.0, 50.0));
+        assert_eq!(b, egui::pos2(200.0, 50.0));
+    }
+
+    /// 画面から離れていく半直線・画面に掛からない半直線は描かない。
+    #[test]
+    fn clip_ray_outside_draws_nothing() {
+        let r = canvas_rect();
+        assert_eq!(
+            clip_ray(egui::pos2(300.0, 50.0), egui::vec2(1.0, 0.0), r),
+            None
+        );
+        assert_eq!(
+            clip_ray(egui::pos2(50.0, 150.0), egui::vec2(1.0, 0.0), r),
+            None
+        );
+        assert_eq!(
+            clip_ray(egui::pos2(50.0, 50.0), egui::vec2(0.0, 0.0), r),
+            None
+        );
+    }
+
+    /// 吸い付いているときは補助線（点線）と角度の表示が積まれる。
+    #[test]
+    fn polar_guide_draws_dots_and_a_label() {
+        let (ctx, painter) = painter_for_test();
+        let vp = test_viewport();
+        let base = vp.screen_to_model(vp.rect().center());
+        let hit = PolarHit {
+            base,
+            point: base + cad_core::geom::Vec2::new(10.0, 10.0),
+            angle_deg: 45.0,
+        };
+        draw_polar_guide(&painter, &vp, &hit);
+        assert!(finish_and_count(&ctx) > 10, "点線の点と角度の表示");
     }
 }
