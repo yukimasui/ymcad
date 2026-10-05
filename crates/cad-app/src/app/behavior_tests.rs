@@ -179,6 +179,60 @@ fn escape_closes_suggestions_first_then_clears_the_input() {
     }
 }
 
+/// キャンバスの 1 点をクリックする（押す・離すを別フレームで）。
+fn click(h: &mut Harness<'_, CadApp>, pos: egui::Pos2) {
+    let button = |pressed| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    frame(h, [egui::Event::PointerMoved(pos), button(true)]);
+    frame(h, [button(false)]);
+    settle(h);
+}
+
+/// Esc で閉じた記憶が、コマンドの実行をまたいで残らないこと。
+///
+/// コマンド実行中は候補を作り直さないので、閉じたときと同じ文字列が入力欄に
+/// 残ったままコマンドが終わると、候補が出ないことがあった（PR #21 の再レビュー）。
+#[test]
+fn dismissed_suggestions_do_not_outlive_a_command() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        type_text(&mut h, "C");
+        press(&mut h, egui::Key::Escape);
+        assert!(
+            !h.state().session.cmdline.suggestions_visible(),
+            "前提: 閉じた"
+        );
+        // 閉じた後の Enter は打った文字のとおり（C = CIRCLE）に実行される。
+        press(&mut h, egui::Key::Enter);
+        assert!(h.state().session.has_active_tool(), "前提: CIRCLE 実行中");
+
+        // 実行中に同じ文字を打っておき、クリックだけでコマンドを終える。
+        type_text(&mut h, "C");
+        click(&mut h, P1);
+        click(&mut h, P2);
+        assert!(
+            !h.state().session.has_active_tool(),
+            "前提: CIRCLE が終わった"
+        );
+        assert_eq!(h.state().doc.entities().len(), 1, "前提: 円ができた");
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            "C",
+            "前提: 入力が残っている"
+        );
+
+        assert!(
+            h.state().session.cmdline.suggestions_visible(),
+            "コマンドが終われば候補が出る（動的入力 {on}）"
+        );
+    }
+}
+
 /// Esc で実行中のコマンドを中断し、空 Enter で直前のコマンドを再実行する。
 #[test]
 fn escape_cancels_and_empty_enter_repeats_the_last_command() {

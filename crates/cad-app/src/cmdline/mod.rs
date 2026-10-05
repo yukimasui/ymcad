@@ -120,7 +120,7 @@ impl Suggestions {
     /// 別のコマンドを選んだつもりになる事故が起きる。
     fn update(&mut self, input: &str) {
         if self.dismissed_for.as_deref() == Some(input) {
-            self.clear();
+            self.hide();
             return;
         }
         self.dismissed_for = None;
@@ -140,14 +140,25 @@ impl Suggestions {
         }
     }
 
+    /// 候補を片付け、`Esc` で閉じた記憶も捨てる。
+    ///
+    /// 確定・中断のほか、コマンド実行中（候補を出さない段階）は毎フレーム呼ばれる。
+    /// 記憶を残すと、閉じたときと同じ文字列が入力欄に残ったままコマンドが終わったとき、
+    /// 候補が出ないことがある（コマンド実行中は [`Self::update`] が呼ばれないため）。
     fn clear(&mut self) {
+        self.hide();
+        self.dismissed_for = None;
+    }
+
+    /// 候補を見えなくする。`Esc` で閉じた記憶は残す。
+    fn hide(&mut self) {
         self.items.clear();
         self.selected = None;
     }
 
     /// `Esc` で閉じる。入力が変わるまで出さない。
     fn dismiss(&mut self, input: &str) {
-        self.clear();
+        self.hide();
         self.dismissed_for = Some(input.to_owned());
     }
 
@@ -1001,6 +1012,12 @@ mod tests {
         assert!(s.is_visible(), "入力が変われば出る");
         s.update("L");
         assert!(s.is_visible(), "一度変わったら閉じた記憶は消える");
+
+        // 確定・中断・コマンド実行中の clear でも記憶は消える。
+        s.dismiss("L");
+        s.clear();
+        s.update("L");
+        assert!(s.is_visible(), "clear の後は同じ入力でも出る");
     }
 
     /// Tab の補完先は Enter で実行される候補と一致すること。
