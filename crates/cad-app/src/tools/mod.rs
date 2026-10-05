@@ -347,13 +347,13 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "TRIM",
         aliases: &["TR"],
-        summary: "切り取り（他の全図形が境界）",
+        summary: "線分を切り取る（他の全図形が境界）",
         kind: CommandKind::Tool(|| Box::new(edit::TrimTool)),
     },
     CommandSpec {
         name: "EXTEND",
         aliases: &["EX"],
-        summary: "伸ばす（他の全図形が境界）",
+        summary: "線分を伸ばす（他の全図形が境界）",
         kind: CommandKind::Tool(|| Box::new(edit::ExtendTool)),
     },
     CommandSpec {
@@ -473,7 +473,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "OPEN",
         aliases: &[],
-        summary: "DXF を開く",
+        summary: "図面を開く（.ymc / .dxf）",
         kind: CommandKind::Immediate(Immediate::File(FileAction::Open)),
     },
     CommandSpec {
