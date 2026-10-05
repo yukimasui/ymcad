@@ -3,9 +3,9 @@
      白一色で描き、表示側で文字色・選択色に着色する。 -->
 <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24"
      fill="none" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-  <polygon points="10.08,1.44 22.56,1.44 22.56,13.92 10.08,13.92" stroke-dasharray="2 1.5" stroke-linecap="butt"/>
-  <path d="M19.68 4.32 L1.44 4.32 L1.44 11.04 L19.68 11.04 L19.68 4.32"/>
-  <path d="M12.48 4.32 L12.48 11.04" stroke-opacity="0.45" stroke-dasharray="2 1.5" stroke-linecap="butt"/>
-  <path d="M8.64 19.2 L18.24 19.2"/>
-  <polygon points="21.6,19.2 16.32,22.08 16.32,16.32" fill="#ffffff" stroke="none"/>
+  <polygon points="14.4,2.88 23.52,2.88 23.52,21.12 14.4,21.12" stroke-opacity="0.45" stroke-dasharray="2 1.5" stroke-linecap="butt"/>
+  <path d="M22.08 6.72 L1.44 6.72 L1.44 17.28 L22.08 17.28 L22.08 6.72"/>
+  <path d="M12 6.72 L12 17.28" stroke-opacity="0.45" stroke-dasharray="2 1.5" stroke-linecap="butt"/>
+  <path d="M4.8 12 L15.84 12"/>
+  <polygon points="19.2,12 13.92,14.88 13.92,9.12" fill="#ffffff" stroke="none"/>
 </svg>
