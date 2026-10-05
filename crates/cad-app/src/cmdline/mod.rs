@@ -88,6 +88,12 @@ struct Suggestions {
     /// これは選択の由来を区別するためだけの状態で、
     /// 「実行されるのはどれか」とは別物。
     selected: Option<usize>,
+    /// `Esc` で閉じたときの入力。入力がこれと同じ間は候補を出さない。
+    ///
+    /// 候補は毎フレーム入力から作り直すので、閉じた状態を覚えておかないと
+    /// 次のフレームで同じ候補がまた出る。そうなると `Esc` の 2 回目も
+    /// 「候補を閉じる」に化けて、いつまでも中断できない。
+    dismissed_for: Option<String>,
 }
 
 impl Suggestions {
@@ -96,6 +102,11 @@ impl Suggestions {
     /// 候補の顔ぶれが変わったら選択を解除する。選択位置だけ残ると、
     /// 別のコマンドを選んだつもりになる事故が起きる。
     fn update(&mut self, input: &str) {
+        if self.dismissed_for.as_deref() == Some(input) {
+            self.clear();
+            return;
+        }
+        self.dismissed_for = None;
         let next = tools::suggestions(input);
         let changed = next.len() != self.items.len()
             || next
@@ -115,6 +126,12 @@ impl Suggestions {
     fn clear(&mut self) {
         self.items.clear();
         self.selected = None;
+    }
+
+    /// `Esc` で閉じる。入力が変わるまで出さない。
+    fn dismiss(&mut self, input: &str) {
+        self.clear();
+        self.dismissed_for = Some(input.to_owned());
     }
 
     fn is_visible(&self) -> bool {
@@ -599,7 +616,7 @@ impl CommandLine {
             // 候補が出ていれば、まず候補だけを閉じる。
             // いきなりコマンドを中断すると、打ち間違いのやり直しが面倒になる。
             if self.suggestions.is_visible() {
-                self.suggestions.clear();
+                self.suggestions.dismiss(&self.input);
                 return None;
             }
             return Some(Submission::Cancel);
@@ -850,6 +867,21 @@ mod tests {
         s.selected = Some(1);
         s.update("L");
         assert_eq!(s.selected, None);
+    }
+
+    /// `Esc` で閉じた候補は、入力が同じ間は作り直しても出ないこと。
+    /// 入力が変われば再び出ること。
+    #[test]
+    fn dismissed_suggestions_stay_closed_until_the_input_changes() {
+        let mut s = suggestions_for("L");
+        assert!(s.is_visible(), "前提");
+        s.dismiss("L");
+        s.update("L");
+        assert!(!s.is_visible(), "同じ入力では出ない");
+        s.update("LA");
+        assert!(s.is_visible(), "入力が変われば出る");
+        s.update("L");
+        assert!(s.is_visible(), "一度変わったら閉じた記憶は消える");
     }
 
     /// Tab の補完先は Enter で実行される候補と一致すること。
