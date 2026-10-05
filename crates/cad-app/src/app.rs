@@ -235,23 +235,27 @@ impl CadApp {
 
     fn command_area(&mut self, ui: &mut egui::Ui) {
         let prompt = self.session.prompt();
-        // ツール実行中と選択待ち中は候補を出さない。座標やオプションを打つ段階なので、
-        // コマンド名の候補が出ると邪魔になる。
-        let allow_suggestions = !self.session.has_active_tool();
-        let submission = self.session.cmdline.show(ui, &prompt, allow_suggestions);
-        if submission != Submission::None {
-            self.session.handle_submission(submission, &mut self.doc);
-            for action in self.session.take_view_actions() {
-                self.apply_view_action(action);
-            }
-            for action in self.session.take_ui_actions() {
-                match action {
-                    UiAction::ToggleLayerPanel => self.layer_panel.toggle(),
-                    UiAction::ToggleComponentPanel => self.component_panel.toggle(),
-                    UiAction::File(a) => {
-                        let outcome = self.files.request(a, &mut self.doc);
-                        self.report_file_outcome(outcome);
-                    }
+        self.session.cmdline.show_bottom(ui, &prompt);
+        let submission = self.session.cmdline.finish_frame();
+        self.apply_submission(submission);
+    }
+
+    /// コマンドラインで確定された操作を実行する。
+    fn apply_submission(&mut self, submission: Submission) {
+        if submission == Submission::None {
+            return;
+        }
+        self.session.handle_submission(submission, &mut self.doc);
+        for action in self.session.take_view_actions() {
+            self.apply_view_action(action);
+        }
+        for action in self.session.take_ui_actions() {
+            match action {
+                UiAction::ToggleLayerPanel => self.layer_panel.toggle(),
+                UiAction::ToggleComponentPanel => self.component_panel.toggle(),
+                UiAction::File(a) => {
+                    let outcome = self.files.request(a, &mut self.doc);
+                    self.report_file_outcome(outcome);
                 }
             }
         }
@@ -559,6 +563,10 @@ impl eframe::App for CadApp {
         self.handle_file_input(&ctx);
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(self.window_title()));
 
+        // ツール実行中と選択待ち中は候補を出さない。座標やオプションを打つ段階なので、
+        // コマンド名の候補が出ると邪魔になる。
+        let allow_suggestions = !self.session.has_active_tool();
+        self.session.cmdline.begin_frame(&ctx, allow_suggestions);
         egui::Panel::bottom("cmdline").show(ui, |ui| self.command_area(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         self.layer_area(ui);

@@ -24,6 +24,12 @@ use crate::tools::{self, CommandSpec};
 const HISTORY_LIMIT: usize = 200;
 /// 画面に見せる履歴の行数。
 const HISTORY_VISIBLE_ROWS: f32 = 10.0;
+/// 入力欄の `TextEdit` の ID。
+const INPUT_ID: &str = "ymcad_cmdline_input";
+/// `[変換中]` の色。
+const COMPOSING_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
+/// エラーの色。
+const ERROR_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0x70, 0x43);
 
 /// 履歴 1 行の種別。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -167,6 +173,9 @@ pub struct CommandLine {
     composing: bool,
     /// コマンド候補。
     suggestions: Suggestions,
+    /// [`Self::begin_frame`] で消費したキーが表す確定操作。
+    /// [`Self::finish_frame`] で中身を詰めて返す。
+    pending: Option<Submission>,
 }
 
 impl Default for CommandLine {
@@ -185,6 +194,7 @@ impl CommandLine {
             last_command: None,
             composing: false,
             suggestions: Suggestions::default(),
+            pending: None,
         }
     }
 
@@ -233,8 +243,8 @@ impl CommandLine {
     /// このフレームの IME イベントを反映する。
     ///
     /// `TextEdit` を描画する前に呼ぶこと。
-    fn track_ime(&mut self, ui: &egui::Ui) {
-        ui.input(|i| {
+    fn track_ime(&mut self, ctx: &egui::Context) {
+        ctx.input(|i| {
             for ev in &i.events {
                 if let egui::Event::Ime(ime) = ev {
                     match ime {
@@ -248,48 +258,73 @@ impl CommandLine {
         });
     }
 
-    /// コマンドラインを描画し、確定操作を返す。
+    /// フレームの最初に呼ぶ。IME の状態を追い、キー入力を消費する。
     ///
-    /// - `prompt` … 実行中コマンドの案内（例: `線分の始点を指定:`）
+    /// **入力欄（`TextEdit`）を描くより前に呼ぶこと。** 候補の操作キーや
+    /// `Enter` を先に奪わないと、`TextEdit` にカーソル移動や確定として取られる。
+    ///
+    /// 確定操作はここでは決めず、入力欄を描いたあとの [`Self::finish_frame`] で決める。
+    /// 同じフレームで打たれた文字が入力欄に入ってから確定させるため
+    /// （分ける前の `show` と同じ順序）。
+    ///
     /// - `allow_suggestions` … コマンド候補を出してよいか。
     ///   ツール実行中や選択待ち中は座標やオプションを打っている段階なので `false` を渡す
-    pub fn show(&mut self, ui: &mut egui::Ui, prompt: &str, allow_suggestions: bool) -> Submission {
-        self.track_ime(ui);
+    pub fn begin_frame(&mut self, ctx: &egui::Context, allow_suggestions: bool) {
+        self.track_ime(ctx);
         self.refresh_suggestions(allow_suggestions);
 
         // 変換中はキーを一切奪わない。IME に確定させるのが先。
         // 候補の操作キーもこのブロックの中にあるので、変換中は自動的に無効になる。
-        let submitted = if self.composing {
+        let pending = if self.composing {
             None
         } else {
-            ui.input_mut(|i| self.consume_keys(i))
+            ctx.input_mut(|i| self.consume_keys(i))
         };
+        self.pending = pending;
+    }
 
+    /// 画面下のコマンドライン（履歴・候補・プロンプト・入力欄）を描く。
+    ///
+    /// - `prompt` … 実行中コマンドの案内（例: `線分の始点を指定:`）
+    pub fn show_bottom(&mut self, ui: &mut egui::Ui, prompt: &str) {
         self.show_history(ui);
         self.show_suggestions(ui);
 
         ui.horizontal(|ui| {
             ui.monospace(prompt);
-            // 変換中は確定処理を止めているので、その旨をユーザーに見せる。
-            if self.composing {
-                ui.colored_label(
-                    egui::Color32::from_rgb(0xff, 0xc1, 0x07),
-                    egui::RichText::new("[変換中]").monospace(),
-                );
-            }
-            let response = ui.add(
-                egui::TextEdit::singleline(&mut self.input)
-                    .desired_width(f32::INFINITY)
-                    .font(egui::TextStyle::Monospace),
-            );
-            // キー入力が常にコマンドラインへ流れるよう、他に入力先が無ければ
-            // 毎フレーム自分にフォーカスを戻す。
-            if ui.memory(|m| m.focused().is_none()) {
-                response.request_focus();
-            }
+            self.show_composing_badge(ui);
+            self.show_input(ui, f32::INFINITY);
         });
+    }
 
-        match submitted {
+    /// 変換中は確定処理を止めているので、その旨をユーザーに見せる。
+    fn show_composing_badge(&self, ui: &mut egui::Ui) {
+        if self.composing {
+            ui.colored_label(COMPOSING_COLOR, egui::RichText::new("[変換中]").monospace());
+        }
+    }
+
+    /// 入力欄を描く。**バッファも `TextEdit` の ID も 1 つだけ。**
+    ///
+    /// ID を固定しておくと、描く場所（画面下 / カーソル横）を切り替えても
+    /// フォーカスとキャレットの位置が引き継がれる。
+    fn show_input(&mut self, ui: &mut egui::Ui, width: f32) {
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.input)
+                .id(egui::Id::new(INPUT_ID))
+                .desired_width(width)
+                .font(egui::TextStyle::Monospace),
+        );
+        // キー入力が常にコマンドラインへ流れるよう、他に入力先が無ければ
+        // 毎フレーム自分にフォーカスを戻す。
+        if ui.memory(|m| m.focused().is_none()) {
+            response.request_focus();
+        }
+    }
+
+    /// 入力欄を描いたあとに呼び、このフレームの確定操作を返す。
+    pub fn finish_frame(&mut self) -> Submission {
+        match self.pending.take() {
             Some(Submission::Cancel) => {
                 self.input.clear();
                 self.suggestions.clear();
@@ -450,7 +485,7 @@ impl CommandLine {
                     let color = match line.kind {
                         LineKind::Input => ui.visuals().text_color(),
                         LineKind::Info => ui.visuals().weak_text_color(),
-                        LineKind::Error => egui::Color32::from_rgb(0xff, 0x70, 0x43),
+                        LineKind::Error => ERROR_COLOR,
                     };
                     ui.colored_label(color, egui::RichText::new(&line.text).monospace());
                 }
