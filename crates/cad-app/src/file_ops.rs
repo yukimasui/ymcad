@@ -155,53 +155,61 @@ impl FileOps {
         let mut close = false;
 
         let focus_save = std::mem::take(&mut self.focus_save);
-        egui::Modal::new(egui::Id::new("unsaved_changes")).show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.heading("保存されていない変更があります");
-            ui.add_space(6.0);
-            let name = doc.path().and_then(|p| p.file_name()).map_or_else(
-                || "(名称未設定)".to_owned(),
-                |n| n.to_string_lossy().into_owned(),
-            );
-            ui.label(format!("{name} の変更を保存しますか？"));
-            ui.label(format!("この後 {} を行います。", action.label()));
-            ui.add_space(10.0);
+        // Enter / Space はボタンを描く前に奪う。egui のボタンはフォーカスがあると Enter / Space で
+        // 押されるので、Tab を 1 回押した後の Enter が「保存しない」になり、図面が捨てられる。
+        // Enter は必ず「保存する」、Space は何もしない。「保存しない」はクリックでしか押せない。
+        let enter = ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space));
+        egui::Modal::new(egui::Id::new("unsaved_changes"))
+            // 裏のコマンドラインの文字が目に入りにくいよう、既定（alpha 100）より少し暗くする。
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.heading("保存されていない変更があります");
+                ui.add_space(6.0);
+                let name = doc.path().and_then(|p| p.file_name()).map_or_else(
+                    || "(名称未設定)".to_owned(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                ui.label(format!("{name} の変更を保存しますか？"));
+                ui.label(format!("この後 {} を行います。", action.label()));
+                ui.add_space(10.0);
 
-            ui.horizontal(|ui| {
-                // Enter = 保存する。開いたときにここへフォーカスを置く。「保存しない」には
-                // Enter も 1 文字のキーも割り当てない（変更を失う操作を誤打で起こさない）。
-                let save = ui.button("保存する (Enter)");
-                if focus_save {
-                    save.request_focus();
-                }
-                if save.clicked() {
-                    match Self::execute(FileAction::Save, doc) {
-                        FileOutcome::Ok(msg) => {
-                            // 保存できたときだけ元の操作へ進む。
-                            outcome = match Self::execute(action, doc) {
-                                FileOutcome::Nothing => FileOutcome::Ok(msg),
-                                other => other,
-                            };
-                            close = true;
-                        }
-                        FileOutcome::Nothing => {
-                            // 保存ダイアログがキャンセルされた。何もしない。
-                        }
-                        failed => {
-                            outcome = failed;
-                            close = true;
+                ui.horizontal(|ui| {
+                    // Enter = 保存する。開いたときにここへフォーカスを置く。「保存しない」には
+                    // Enter も 1 文字のキーも割り当てない（変更を失う操作を誤打で起こさない）。
+                    let save = ui.button("保存する (Enter)");
+                    if focus_save {
+                        save.request_focus();
+                    }
+                    if save.clicked() || enter {
+                        match Self::execute(FileAction::Save, doc) {
+                            FileOutcome::Ok(msg) => {
+                                // 保存できたときだけ元の操作へ進む。
+                                outcome = match Self::execute(action, doc) {
+                                    FileOutcome::Nothing => FileOutcome::Ok(msg),
+                                    other => other,
+                                };
+                                close = true;
+                            }
+                            FileOutcome::Nothing => {
+                                // 保存ダイアログがキャンセルされた。何もしない。
+                            }
+                            failed => {
+                                outcome = failed;
+                                close = true;
+                            }
                         }
                     }
-                }
-                if ui.button("保存しない").clicked() {
-                    outcome = Self::execute(action, doc);
-                    close = true;
-                }
-                if ui.button("キャンセル (Esc)").clicked() {
-                    close = true;
-                }
+                    if ui.button("保存しない").clicked() {
+                        outcome = Self::execute(action, doc);
+                        close = true;
+                    }
+                    if ui.button("キャンセル (Esc)").clicked() {
+                        close = true;
+                    }
+                });
             });
-        });
 
         // Esc = キャンセル。`should_close()` は背景のクリックでも真になるが、誤クリックで
         // 閉じたくないので Esc だけを自分で見る（Issue #24）。
@@ -233,6 +241,10 @@ impl FileOps {
     }
 
     fn open(doc: &mut Document) -> FileOutcome {
+        // テストでファイルダイアログを開くと返ってこない。理由つきで落として止める。
+        if cfg!(test) {
+            panic!("テストで rfd のダイアログを開こうとした: 図面を開く（経路を避けること）");
+        }
         // ネイティブ形式を先に並べて既定にする。
         let Some(path) = rfd::FileDialog::new()
             .add_filter("ymcad 図面", &[NATIVE_EXTENSION])
@@ -260,6 +272,10 @@ impl FileOps {
     }
 
     fn save_as(doc: &mut Document) -> FileOutcome {
+        // テストでファイルダイアログを開くと返ってこない。理由つきで落として止める。
+        if cfg!(test) {
+            panic!("テストで rfd のダイアログを開こうとした: 名前を付けて保存（図面に保存先を与えること）");
+        }
         // 既に保存先があるならその名前を出す（形式も引き継がれる）。
         let default_name = doc.path().and_then(|p| p.file_name()).map_or_else(
             || format!("drawing.{NATIVE_EXTENSION}"),

@@ -375,8 +375,11 @@ impl CadApp {
             self.toggle_dynamic_input();
         }
         // F8 で直交、F10 で極トラッキング（AutoCAD と同じキー）。F3 と同じく TextEdit は消費しない。
-        for mode in drafting::take_key_toggles(ui) {
-            self.toggle_drafting(mode);
+        // モーダルが出ている間は F3 / F12 と同じく扱わない。
+        if !modal {
+            for mode in drafting::take_key_toggles(ui) {
+                self.toggle_drafting(mode);
+            }
         }
 
         // カーソル横の入力欄の基準。キャンバスの外にいる間は最後の位置に留める。
