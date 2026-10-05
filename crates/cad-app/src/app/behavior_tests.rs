@@ -672,6 +672,35 @@ fn hovering_dyn_in_the_status_bar_shows_a_pointing_hand() {
     );
 }
 
+#[test]
+fn osnap_in_the_status_bar_is_clickable_with_a_pointing_hand() {
+    use egui_kittest::kittest::Queryable as _;
+
+    let mut h = app_with_dynamic(true);
+    assert!(h.state().snap.is_enabled(), "前提: 起動時は OSNAP オン");
+    let target = h.get_by_label("OSNAP").rect().center();
+    hover(&mut h, target);
+    assert_eq!(
+        h.output().platform_output.cursor_icon,
+        egui::CursorIcon::PointingHand
+    );
+
+    // クリックで切り替わり、もう一度で戻る。F3 と同じく履歴にも残る。
+    click(&mut h, target);
+    assert!(!h.state().snap.is_enabled(), "クリックでオフになる");
+    let target = h.get_by_label("osnap").rect().center();
+    click(&mut h, target);
+    assert!(h.state().snap.is_enabled(), "もう一度クリックでオンに戻る");
+    let toggled = h
+        .state()
+        .session
+        .cmdline
+        .history()
+        .filter(|l| l.text.starts_with("オブジェクトスナップ:"))
+        .count();
+    assert_eq!(toggled, 2);
+}
+
 // ---- 寸法入力（Issue #20 段階 B） -------------------------------------------
 
 use crate::cmdline::dimension::{DimValues, Field};
