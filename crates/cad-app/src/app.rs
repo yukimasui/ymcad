@@ -895,7 +895,9 @@ impl eframe::App for CadApp {
         // 寸法入力の基点。Tab / Esc / Enter の扱いがこれで変わるので、キーを取る前に渡す。
         let dimension_base = self.session.dimension_base();
         self.session.cmdline.set_dimension_base(dimension_base);
-        self.session.cmdline.begin_frame(&ctx, allow_suggestions);
+        self.session
+            .cmdline
+            .begin_frame(&ctx, allow_suggestions, self.files.is_confirming());
         egui::Panel::bottom("cmdline").show(ui, |ui| self.command_area(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         self.layer_area(ui);

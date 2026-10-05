@@ -2670,3 +2670,97 @@ fn no_hints_or_padding_when_the_ribbon_fits() {
         "LINE は表示範囲の左端から帯の幅未満にある（余白が無い）: {gap}px"
     );
 }
+
+// ---- 未保存確認のモーダル（Issue #24） ----------------------------------------
+
+/// LINE 実行中に線を 1 本引いて（未保存になる）、Ctrl+N で未保存確認のモーダルを出す。
+fn app_with_unsaved_modal(on: bool) -> Harness<'static, CadApp> {
+    let mut h = app_with_dynamic(on);
+    hover(&mut h, P1);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, P1);
+    click(&mut h, P2);
+    assert_eq!(lines(&h).len(), 1, "前提: 線が 1 本ある");
+    assert!(h.state().doc.is_dirty(), "前提: 未保存");
+    assert!(h.state().session.has_active_tool(), "前提: LINE 実行中");
+    let ctrl_n = egui::Event::Key {
+        key: egui::Key::N,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::CTRL,
+    };
+    frame(&mut h, [ctrl_n]);
+    settle(&mut h);
+    assert!(h.state().files.is_confirming(), "前提: モーダルが出ている");
+    h
+}
+
+/// モーダルが出ている間、コマンドラインは Enter / Space / Esc / 文字キーを扱わない。
+///
+/// 扱うと、Enter で直前のコマンドが再実行され、Esc で実行中のコマンドが中断され、
+/// Space で LINE が進み、文字が入力欄に溜まる。
+#[test]
+fn modal_keeps_enter_space_escape_and_text_from_the_command_line() {
+    for on in [false, true] {
+        let mut h = app_with_unsaved_modal(on);
+        let lines_before = h.state().session.cmdline.history().count();
+
+        press(&mut h, egui::Key::Enter);
+        press(&mut h, egui::Key::Space);
+        type_text(&mut h, "L");
+        press(&mut h, egui::Key::ArrowUp);
+        press(&mut h, egui::Key::Tab);
+        assert!(
+            h.state().session.has_active_tool(),
+            "LINE が進まない・終わらない（動的入力 {on}）"
+        );
+        assert_eq!(
+            h.state().session.cmdline.history().count(),
+            lines_before,
+            "履歴に何も増えない（動的入力 {on}）"
+        );
+        assert_eq!(
+            h.state().session.cmdline.input(),
+            "",
+            "入力欄に文字が入らない（動的入力 {on}）"
+        );
+
+        press(&mut h, egui::Key::Escape);
+        assert!(
+            h.state().session.has_active_tool(),
+            "Esc で LINE が中断されない（動的入力 {on}）"
+        );
+        assert!(h.state().doc.is_dirty(), "未保存の変更は残る");
+        assert_eq!(lines(&h).len(), 1, "図面は残る（動的入力 {on}）");
+    }
+}
+
+/// モーダルを閉じたら、コマンドラインにキーが戻る。図面は消えない。
+#[test]
+fn command_line_gets_keys_back_after_the_modal_closes() {
+    use egui_kittest::kittest::Queryable as _;
+
+    for on in [false, true] {
+        let mut h = app_with_unsaved_modal(on);
+        let target = h.get_by_label("キャンセル").rect().center();
+        click(&mut h, target);
+        assert!(!h.state().files.is_confirming(), "キャンセルで閉じる");
+        assert_eq!(
+            lines(&h).len(),
+            1,
+            "キャンセルでは図面が残る（動的入力 {on}）"
+        );
+        assert!(h.state().doc.is_dirty());
+
+        hover(&mut h, P1);
+        type_text(&mut h, "10,10");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(
+            h.state().session.last_point(),
+            Some(Point2::new(10.0, 10.0)),
+            "打った座標が LINE に入る（動的入力 {on}）"
+        );
+    }
+}
