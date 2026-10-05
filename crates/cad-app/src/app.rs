@@ -186,43 +186,42 @@ impl CadApp {
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            // 座標は小数点以下 4 桁で表示する。
+            // 座標は小数点以下 4 桁で表示する。固定幅は ±999999.9999（12 文字）まで。
+            // 以前は 14 文字で、幅 800px で選択数が入らなかった（PR #39）。
             match self.cursor_model {
-                Some(p) => ui.monospace(format!("X {:>14.4}   Y {:>14.4}", p.x, p.y)),
-                None => ui.monospace(format!("X {:>14}   Y {:>14}", "-", "-")),
+                Some(p) => ui.monospace(format!("X {:>12.4}  Y {:>12.4}", p.x, p.y)),
+                None => ui.monospace(format!("X {:>12}  Y {:>12}", "-", "-")),
             };
             ui.separator();
             // 切り替え部品（OSNAP / ORTHO / POLAR / DYN）は座標の直後に置く（Issue #38）。
-            self.status_toggles(ui);
-            ui.monospace(format!("倍率 {:.6}", self.viewport.scale()));
-            ui.separator();
-            ui.monospace(format!("要素 {}", self.doc.entities().len()));
-            ui.separator();
+            let separator_width = self.status_toggles(ui);
+
+            // 情報表示。幅が足りなければ右から順に、区切り線ごと省く（文字の途中で切らない）。
+            // 作図中に見るレイヤと選択を先にして、最後まで残す（Issue #38 / PR #39）。
             let layer_name = self
                 .doc
                 .layers()
                 .get(self.doc.layers().current())
                 .map_or("?", |l| l.name.as_str());
-            ui.monospace(format!("レイヤ {layer_name}"));
-            ui.separator();
-            ui.monospace(format!("選択 {}", self.session.selection.len()));
-            ui.separator();
-
-            // 60fps の予算は 16.6ms。実測がそれを大きく下回っていることを見せる。
-            // 開発者向けの情報なので最後に置き、入り切らない幅では途中で切らずに省く。
-            let (avg, max) = self.draw_timer.stats_ms();
-            let timing = format!("描画 平均{avg:.2}ms 最大{max:.2}ms");
-            if fits_in_row(ui, &timing) {
-                ui.monospace(timing);
-            }
-
+            let mut items = vec![
+                (format!("レイヤ {layer_name}"), None),
+                (format!("選択 {}", self.session.selection.len()), None),
+                (format!("要素 {}", self.doc.entities().len()), None),
+                (format!("倍率 {:.6}", self.viewport.scale()), None),
+            ];
             if self.font_status.is_none() {
-                ui.separator();
-                ui.colored_label(
-                    egui::Color32::from_rgb(0xff, 0x70, 0x43),
-                    "日本語フォント未検出",
-                );
+                // フォントが無いとこの文言自体が □ になるので、英語も併記する。
+                items.push((
+                    "日本語フォント未検出 (Japanese font not found)".to_owned(),
+                    Some(egui::Color32::from_rgb(0xff, 0x70, 0x43)),
+                ));
             }
+            // 60fps の予算は 16.6ms。実測がそれを大きく下回っていることを見せる。
+            // 開発者向けの情報なので最後に置く。数値は固定幅にして、境目の幅で
+            // フレームごとに出たり消えたりしないようにする。
+            let (avg, max) = self.draw_timer.stats_ms();
+            items.push((format!("描画 平均{avg:>6.2}ms 最大{max:>6.2}ms"), None));
+            show_while_fits(ui, items, separator_width);
         });
     }
 
@@ -557,7 +556,15 @@ impl CadApp {
     /// 座標の直後に置く。幅が足りないとステータスバーは右端から切れるので、
     /// クリックで操作する部品を情報表示より先にする（Issue #38。PR #35 で ORTHO / POLAR が
     /// 増え、幅 800px で DYN が画面外になってクリックできなかった）。
-    fn status_toggles(&mut self, ui: &mut egui::Ui) {
+    ///
+    /// 戻り値は区切り線 1 本ぶんの幅（線と前後の間隔）。後ろの情報表示が入り切るかの判定に使う。
+    fn status_toggles(&mut self, ui: &mut egui::Ui) -> f32 {
+        // `OSNAP` は吸着中に `OSNAP:最近点` のように伸びる。欄の幅をいちばん長い表示で
+        // 固定し、後ろの部品の押す位置が吸着のたびに動かないようにする（PR #39）。
+        let osnap_width = cad_core::snap::SnapKind::all()
+            .into_iter()
+            .map(|k| text_width(ui, &format!("OSNAP:{}", k.label())))
+            .fold(text_width(ui, "OSNAP"), f32::max);
         let osnap_text = if self.snap.is_enabled() {
             // 吸着中はその種別を出す。マーカーの形と合わせて確認できるように。
             let label = self.snap.held().map_or_else(
@@ -573,14 +580,15 @@ impl CadApp {
                 .color(ui.visuals().weak_text_color())
         };
         // DYN と同じく、クリックで切り替える部品として見せる（選択を切って指のカーソル）。
-        let osnap_label = ui
-            .add(
+        let osnap_label = fixed_width(ui, osnap_width, |ui| {
+            ui.add(
                 egui::Label::new(osnap_text)
                     .selectable(false)
                     .sense(egui::Sense::click()),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("オブジェクトスナップの ON/OFF  F3");
+            .on_hover_text("オブジェクトスナップの ON/OFF  F3")
+        });
         if osnap_label.clicked() {
             self.toggle_osnap();
         }
@@ -612,28 +620,74 @@ impl CadApp {
             self.toggle_dynamic_input();
         }
         ui.separator();
-        if self.session.has_active_tool() {
-            ui.colored_label(
-                egui::Color32::from_rgb(0xff, 0xc1, 0x07),
-                egui::RichText::new("コマンド実行中").monospace(),
-            );
-            ui.separator();
-        }
+        // 「コマンド実行中」の欄は待機中も空のまま幅を確保する。出たり消えたりするたびに
+        // 後ろの表示が跳ねないように（PR #39）。
+        const RUNNING: &str = "コマンド実行中";
+        let running_width = text_width(ui, RUNNING);
+        let running = self.session.has_active_tool();
+        fixed_width(ui, running_width, |ui| {
+            if running {
+                ui.colored_label(
+                    egui::Color32::from_rgb(0xff, 0xc1, 0x07),
+                    egui::RichText::new(RUNNING).monospace(),
+                );
+            }
+        });
+        // 区切り線の幅はスタイルで決まるので、実際に描いた前後の位置から測る。
+        let before = ui.cursor().min.x;
+        ui.separator();
+        ui.cursor().min.x - before
     }
 }
 
-/// 等幅の `text` が、横並びの残りの幅（区切り線の分を含む）に入り切るか。
-fn fits_in_row(ui: &egui::Ui, text: &str) -> bool {
-    let width = ui
-        .painter()
+/// 等幅の文字列の幅 [px]。
+fn text_width(ui: &egui::Ui, text: &str) -> f32 {
+    ui.painter()
         .layout_no_wrap(
             text.to_owned(),
             egui::TextStyle::Monospace.resolve(ui.style()),
             egui::Color32::PLACEHOLDER,
         )
         .size()
-        .x;
-    width <= ui.available_width()
+        .x
+}
+
+/// 幅を `width` に固定した欄に中身を描く（中身が短くても幅を確保する）。
+fn fixed_width<R>(ui: &mut egui::Ui, width: f32, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, ui.spacing().interact_size.y),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_width(width);
+            add(ui)
+        },
+    )
+    .inner
+}
+
+/// 情報表示を前から順に、区切り線つきで横に並べる。入り切らない項目に来たら、
+/// その項目から後ろを区切り線ごと省く（文字の途中で切らない。後ろの短い項目も出さない）。
+///
+/// `separator_width` は区切り線 1 本ぶんの幅。先頭の項目の前の区切り線は描き済みとする。
+fn show_while_fits(
+    ui: &mut egui::Ui,
+    items: Vec<(String, Option<egui::Color32>)>,
+    separator_width: f32,
+) {
+    for (i, (text, color)) in items.into_iter().enumerate() {
+        let separator = if i == 0 { 0.0 } else { separator_width };
+        if text_width(ui, &text) + separator > ui.available_width() {
+            return;
+        }
+        if i > 0 {
+            ui.separator();
+        }
+        let rich = egui::RichText::new(text).monospace();
+        ui.label(match color {
+            Some(c) => rich.color(c),
+            None => rich,
+        });
+    }
 }
 
 impl CadApp {

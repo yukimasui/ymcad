@@ -706,8 +706,10 @@ fn osnap_in_the_status_bar_is_clickable_with_a_pointing_hand() {
 /// 切り替え部品の状態を読む関数。
 type ToggleState = fn(&CadApp) -> bool;
 
-/// 幅を指定したアプリ。文字の幅を実機に合わせるため、日本語フォントを読み込む
-/// （読み込まないと漢字が代替の □ になり、ステータスバーの幅が実機と違う）。
+/// 幅を指定したアプリ。文字の幅を実機に合わせるため、日本語フォントを読み込む。
+/// 読み込まないと漢字が代替の □ になってステータスバーの幅が実機と変わり、境目の幅で結果が違う
+/// （元の並びの不具合は、640px ならフォント無しでも再現するが、800px ではフォント無しだと
+/// DYN が画面内に収まって再現しなかった）。
 fn app_with_width(width: f32) -> Harness<'static, CadApp> {
     let mut h = Harness::builder()
         .with_size(egui::vec2(width, SCREEN.y))
@@ -767,16 +769,101 @@ fn status_toggles_fit_and_click_in_a_narrow_window() {
     }
 }
 
-/// 十分な幅（1280px）では描画時間も画面内に出る。
+/// 情報表示の項目（この順に並ぶ）。ラベルに含まれる文字列。
+const INFO_ITEMS: [&str; 5] = ["レイヤ 0", "選択 0", "要素 0", "倍率 ", "描画 平均"];
+
+/// 画面に出ている情報表示の項目の (頭の文字列, 矩形)。
+fn shown_info_items(h: &Harness<'_, CadApp>) -> Vec<(&'static str, egui::Rect)> {
+    use egui_kittest::kittest::Queryable as _;
+    INFO_ITEMS
+        .into_iter()
+        .filter_map(|prefix| {
+            h.query_by_label_contains(prefix)
+                .map(|n| (prefix, n.rect()))
+        })
+        .collect()
+}
+
+/// 情報表示は文字の途中で切れない。入らない項目は右から順に省かれ、
+/// レイヤ・選択が最後まで残る。1280px ではすべて出る（PR #39）。
 #[test]
-fn draw_timing_is_shown_in_a_wide_window() {
+fn status_info_items_are_dropped_whole_from_the_right() {
+    for width in [1280.0, 800.0, 640.0] {
+        let h = app_with_width(width);
+        let shown = shown_info_items(&h);
+        let names: Vec<&str> = shown.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            names,
+            INFO_ITEMS[..names.len()].to_vec(),
+            "幅 {width}: 前から順に残り、途中が抜けない"
+        );
+        for (prefix, rect) in &shown {
+            assert!(
+                rect.max.x <= width,
+                "幅 {width}: {prefix} が途中で切れない ({rect:?})"
+            );
+        }
+        for pair in shown.windows(2) {
+            assert!(pair[0].1.max.x < pair[1].1.min.x, "幅 {width}: 並び順");
+        }
+        if width >= SCREEN.x {
+            assert_eq!(names.len(), INFO_ITEMS.len(), "1280px ではすべて出る");
+        } else if width >= 800.0 {
+            assert!(
+                names.starts_with(&["レイヤ 0", "選択 0"]),
+                "幅 {width}: レイヤと選択は残る: {names:?}"
+            );
+        }
+    }
+}
+
+/// 「コマンド実行中」が出ても、スナップの吸着で `OSNAP:端点` になっても、
+/// 切り替え部品と情報表示の位置（押す位置）は動かない（PR #39）。
+#[test]
+fn status_bar_items_do_not_move_with_the_state() {
     use egui_kittest::kittest::Queryable as _;
 
-    let h = app_with_width(SCREEN.x);
-    let node = h
-        .query_by_label_contains("描画 平均")
-        .expect("1280px では描画時間が出る");
-    assert!(node.rect().max.x <= SCREEN.x, "画面内: {:?}", node.rect());
+    let mut h = app_with_width(SCREEN.x);
+    let xs = |h: &Harness<'_, CadApp>| -> Vec<f32> {
+        ["ortho", "polar", "DYN", "レイヤ 0"]
+            .into_iter()
+            .map(|l| h.get_by_label(l).rect().min.x)
+            .chain(std::iter::once(
+                h.query_by_label_contains("OSNAP")
+                    .expect("OSNAP")
+                    .rect()
+                    .min
+                    .x,
+            ))
+            .collect()
+    };
+    let idle = xs(&h);
+
+    // 線分を 1 本引き、LINE 実行中にその端点へ吸着させる。
+    let a = egui::pos2(300.0, 300.0);
+    let b = egui::pos2(500.0, 360.0);
+    hover(&mut h, a);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    click(&mut h, a);
+    click(&mut h, b);
+    press(&mut h, egui::Key::Escape);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    assert!(h.state().session.has_active_tool(), "前提: コマンド実行中");
+    let end = lines(&h)[0].b;
+    let near = h.state().viewport.model_to_screen(end) + egui::vec2(3.0, 3.0);
+    hover(&mut h, near);
+    assert!(
+        h.query_by_label("OSNAP:端点").is_some(),
+        "前提: 端点に吸着して表示が伸びている"
+    );
+    assert!(h.query_by_label("コマンド実行中").is_some(), "前提");
+    assert_eq!(
+        xs(&h),
+        idle,
+        "ortho / polar / DYN / レイヤ / OSNAP の位置が動かない"
+    );
 }
 
 // ---- 寸法入力（Issue #20 段階 B） -------------------------------------------

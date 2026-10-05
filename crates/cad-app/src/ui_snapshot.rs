@@ -139,15 +139,13 @@ fn ui_snapshot_dyn_composing() {
 
 // ---- 幅が狭いときのステータスバー（Issue #38） --------------------------------
 
-/// 幅 800px と 1280px のステータスバー。800px でも OSNAP / ORTHO / POLAR / DYN が見え、
-/// 描画時間は入り切らなければ省かれる。
+/// 幅 800px・640px・1280px のステータスバーを、待機中と LINE 実行中で撮る。
+/// 狭い幅でも OSNAP / ORTHO / POLAR / DYN が見え、情報表示は右から項目ごとに省かれる。
+/// 「コマンド実行中」の欄は待機中も幅を確保しているので、後ろの位置が変わらない。
 #[test]
 #[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
 fn ui_snapshot_status_bar_widths() {
-    for (width, name) in [
-        (800.0, "status_a_width_800"),
-        (1280.0, "status_b_width_1280"),
-    ] {
+    for width in [800.0, 640.0, 1280.0] {
         let mut h = Harness::builder()
             .with_size(egui::vec2(width, 600.0))
             .wgpu()
@@ -158,7 +156,12 @@ fn ui_snapshot_status_bar_widths() {
             });
         h.run_steps(STEPS);
         hover(&mut h, egui::pos2(width / 2.0, 250.0));
-        shot(&mut h, name);
+        shot(&mut h, &format!("status_width_{width}_a_idle"));
+        type_text(&mut h, "L");
+        h.key_press(egui::Key::Enter);
+        h.run_steps(STEPS);
+        hover(&mut h, egui::pos2(width / 2.0 + 20.0, 260.0));
+        shot(&mut h, &format!("status_width_{width}_b_line"));
     }
 }
 
