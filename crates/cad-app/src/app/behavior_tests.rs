@@ -446,6 +446,27 @@ fn tab_without_suggestions_keeps_focus() {
     }
 }
 
+/// `↓` で候補を選んで Enter すると、選んだ候補が実行される。
+///
+/// 入力欄が `↑` `↓` を自分で受け取る（`event_filter` の `vertical_arrows`）ので、
+/// それを外すと egui がフォーカス移動に使い、動的入力オンでは `↓` で入力欄から
+/// フォーカスが外れて Enter が届かなくなる（`vertical_arrows: false` で落ちることを確認済み。
+/// オフ側はこの変更では落ちないが、同じ操作を両方で固定しておく）。
+#[test]
+fn arrow_keys_pick_a_suggestion_in_both_modes() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        hover(&mut h, P1);
+        type_text(&mut h, "L");
+        assert!(h.state().session.cmdline.suggestions_visible(), "前提");
+        press(&mut h, egui::Key::ArrowDown);
+        press(&mut h, egui::Key::ArrowDown);
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(input_lines(&h), vec!["> LAYER"], "動的入力 {on}");
+        assert!(h.state().layer_panel.is_open(), "動的入力 {on}");
+    }
+}
+
 // ---- パネルの入力欄（Issue #22） --------------------------------------------
 
 /// レイヤパネルを開き、「新規」の入力欄をクリックしてフォーカスを移す。
@@ -535,6 +556,15 @@ fn panel_text_field_keeps_enter_space_and_escape() {
             h.state().session.cmdline.history().count(),
             lines_before,
             "履歴に何も増えない（動的入力 {on}）"
+        );
+
+        // パネルの編集を終えたら、キー入力はコマンドラインへ戻っている。
+        type_text(&mut h, "10,10");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(
+            h.state().session.last_point(),
+            Some(cad_core::geom::Point2::new(10.0, 10.0)),
+            "打った座標が LINE の始点に入る（動的入力 {on}）"
         );
     }
 }
