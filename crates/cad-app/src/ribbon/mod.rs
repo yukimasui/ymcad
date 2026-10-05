@@ -41,7 +41,7 @@ const CORNER: u8 = 3;
 const TAB_MARK_THICKNESS: f32 = 2.0;
 const TAB_MARK_INSET: f32 = 4.0;
 /// 横に送れる端のぼかしの幅 [px] と段数。この帯全体が「送る」ボタンになる。
-const FADE_WIDTH: f32 = 28.0;
+pub(crate) const FADE_WIDTH: f32 = 28.0;
 const FADE_STEPS: u16 = 14;
 /// 「›」「‹」を押したときに送る量（表示幅に対する割合）。少し重ねて、どこまで見ていたかを残す。
 const PAGE_FRACTION: f32 = 0.75;

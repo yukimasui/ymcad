@@ -2190,7 +2190,7 @@ fn no_hints_or_padding_when_the_ribbon_fits() {
         .rect;
     let gap = line.left() - viewport.left();
     assert!(
-        (0.0..28.0).contains(&gap),
-        "LINE は表示範囲の左端から帯の幅（28px）未満にある（余白が無い）: {gap}px"
+        (0.0..crate::ribbon::FADE_WIDTH).contains(&gap),
+        "LINE は表示範囲の左端から帯の幅未満にある（余白が無い）: {gap}px"
     );
 }
