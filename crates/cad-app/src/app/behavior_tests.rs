@@ -1544,6 +1544,11 @@ fn press_ribbon(h: &mut Harness<'_, CadApp>, name: &str) {
         button.quick || viewport.contains(rect.center()),
         "{name} はスクロールの外にあって押せない: {rect:?} / {viewport:?}"
     );
+    let hints = h.state().ribbon.probe().hints;
+    assert!(
+        button.quick || !hints.iter().flatten().any(|b| b.contains(rect.center())),
+        "{name} は「‹」「›」の帯の下にあって押せない"
+    );
     click(h, rect.center());
 }
 
@@ -2015,7 +2020,10 @@ fn overflow_hints_scroll_instead_of_pressing_the_button_below() {
     settle(&mut h);
     let probe = h.state().ribbon.probe().clone();
     let right = probe.hints[1].expect("前提: 「›」が出ている");
-    assert!(probe.hints[0].is_none(), "前提: 「‹」は出ていない");
+    assert!(
+        probe.hints[0].is_some() && probe.overflow == (false, true),
+        "前提: 「‹」の帯も置かれているが、左へは送れない"
+    );
     // 帯の中で、下にボタンが隠れている点を押す（帯の中央はグループの隙間のことがある）。
     let hidden = ribbon_buttons(&h)
         .into_iter()
@@ -2040,7 +2048,8 @@ fn overflow_hints_scroll_instead_of_pressing_the_button_below() {
     let after = h.state().ribbon.probe().offset;
     assert!(after > before, "右へ送られる: {before} → {after}");
 
-    let left = h.state().ribbon.probe().hints[0].expect("送ったので「‹」が出る");
+    let left = h.state().ribbon.probe().hints[0].expect("「‹」の帯");
+    assert!(h.state().ribbon.probe().overflow.0, "送ったので左へ送れる");
     click(&mut h, left.center());
     settle(&mut h);
     assert!(
@@ -2049,4 +2058,111 @@ fn overflow_hints_scroll_instead_of_pressing_the_button_below() {
     );
     let back = h.state().ribbon.probe().offset;
     assert!(back < after, "左へ戻る: {after} → {back}");
+}
+
+/// はみ出している間は「‹」「›」の帯を左右両方に常に置き、端まで送った後に続けて押しても
+/// 下のボタンへ押し抜けない（PR #32 の 3 回目の操作レビュー）。幅 600 / 700 / 800px。
+///
+/// 送れる側だけに帯を置いていたときは、端に着くとその側の帯が消えて同じ位置に端のボタンが
+/// 現れ、「›」の連打で LAYER が開閉し、「‹」で実行中の POLYLINE が中断されていた。
+#[test]
+fn repeated_presses_on_the_hints_never_reach_the_buttons_below() {
+    for width in [600.0, 700.0, 800.0] {
+        let mut h = app();
+        h.set_size(egui::vec2(width, 600.0));
+        settle(&mut h);
+        hover(&mut h, P1);
+        type_text(&mut h, "PL");
+        press(&mut h, egui::Key::Enter);
+        click(&mut h, egui::pos2(300.0, 300.0));
+        click(&mut h, egui::pos2(400.0, 350.0));
+        let point = h.state().session.last_point();
+        assert!(point.is_some(), "前提: POLYLINE に 2 点（{width}px）");
+        let history = input_lines(&h);
+
+        // 人がするのと同じく、山形の見えていた位置を同じ場所で押し続ける（帯があるかどうかを
+        // 毎回確かめてから押すと、帯が消えて下のボタンに当たる不具合を再現できない）。
+        let viewport = h.state().ribbon.probe().viewport.expect("リボン");
+        let spots = [
+            egui::pos2(viewport.left() + 7.0, viewport.center().y),
+            egui::pos2(viewport.right() - 7.0, viewport.center().y),
+        ];
+        for (side, label) in [(1, "›"), (0, "‹")] {
+            for n in 0..4 {
+                click(&mut h, spots[side]);
+                settle(&mut h);
+                assert!(
+                    h.state().ribbon.probe().hints[side].is_some(),
+                    "{width}px: 「{label}」の帯が消えた（{} 回目）",
+                    n + 1
+                );
+                assert_eq!(
+                    h.state().session.active_command(),
+                    Some("POLYLINE"),
+                    "{width}px: 「{label}」{} 回目でコマンドが変わった",
+                    n + 1
+                );
+                assert_eq!(
+                    h.state().session.last_point(),
+                    point,
+                    "{width}px: 点が変わった"
+                );
+                assert_eq!(input_lines(&h), history, "{width}px: 履歴が増えた");
+                assert!(
+                    !h.state().layer_panel.is_open(),
+                    "{width}px: レイヤパネルが開いた"
+                );
+            }
+        }
+        // 4 回ずつ押せば端まで行って戻っている。
+        assert_eq!(
+            h.state().ribbon.probe().overflow,
+            (false, true),
+            "{width}px: 左端に戻った"
+        );
+    }
+}
+
+/// 端まで送ると、端のボタンは帯の下に隠れず押せる（両端に帯の幅の余白を足している）。
+#[test]
+fn edge_buttons_are_clear_of_the_hints_at_both_ends() {
+    let mut h = app();
+    h.set_size(egui::vec2(700.0, 600.0));
+    settle(&mut h);
+    let first = *crate::ribbon::layout::TABS[0].groups[0]
+        .commands
+        .first()
+        .expect("最初のボタン");
+    let last = *crate::ribbon::layout::TABS[0]
+        .groups
+        .last()
+        .and_then(|g| g.commands.last())
+        .expect("最後のボタン");
+    let clear = |h: &Harness<'_, CadApp>, name: &str| {
+        let rect = ribbon_buttons(h)
+            .into_iter()
+            .find(|b| b.name == name)
+            .expect("ボタン")
+            .rect;
+        let probe = h.state().ribbon.probe().clone();
+        probe.viewport.expect("リボン").contains_rect(rect)
+            && !probe.hints.iter().flatten().any(|b| b.intersects(rect))
+    };
+    assert!(clear(&h, first), "左端では {first} が帯にかからない");
+    for _ in 0..4 {
+        let band = h.state().ribbon.probe().hints[1].expect("「›」");
+        click(&mut h, band.center());
+        settle(&mut h);
+    }
+    assert_eq!(
+        h.state().ribbon.probe().overflow,
+        (true, false),
+        "右端まで送った"
+    );
+    assert!(clear(&h, last), "右端では {last} が帯にかからない");
+    press_ribbon(&mut h, last);
+    assert_eq!(
+        input_lines(&h).last().map(String::as_str),
+        Some(&*format!("> {last}"))
+    );
 }

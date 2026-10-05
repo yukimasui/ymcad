@@ -6,7 +6,8 @@
 //! - **ボタンを押すことはコマンド名を打つのと同じ扱い。** このモジュールは押された
 //!   コマンド名を返すだけで、始めるのは呼び出し側（`Session::start_command_from_ui`）
 //! - 幅が足りないときは横スクロール（マウスホイールの縦回転でも横に動く）。送れる側の端を
-//!   背景色へ消すぼかしと「›」で示し、その帯を押すと表示幅の 3/4 だけ送る
+//!   背景色へ消すぼかしと「›」で示し、その帯を押すと表示幅の 3/4 だけ送る。はみ出している間は
+//!   左右両方に帯を置き（送れない側は薄い山形で、押しても何もしない）、並びの両端に余白を足す
 //! - 実行中のコマンドのボタンは選択色で強調する。そのコマンドが別のタブにあれば、
 //!   そのタブの名前の下に選択色の下線を引く
 //!
@@ -55,6 +56,11 @@ pub struct Ribbon {
     tab: usize,
     /// 「›」「‹」で押された送り先（次のフレームでスクロール領域へ渡す）。
     scroll_to: Option<f32>,
+    /// ボタンの並びが表示幅からはみ出しているか（前のフレームで測ったもの）。
+    ///
+    /// はみ出している間は、並びの両端に帯の幅だけ余白を足し、左右両方に帯を置く。
+    /// 余白を足す前の幅で判定するので、余白のせいで判定が振動することはない。
+    overflowing: bool,
     /// 直前に描いた結果（テスト用）。
     #[cfg(test)]
     probe: Probe,
@@ -72,7 +78,8 @@ pub struct Probe {
     pub viewport: Option<egui::Rect>,
     /// 左・右へ送れることを示したか。
     pub overflow: (bool, bool),
-    /// 「‹」「›」の帯（押せる範囲）。出していなければ `None`。
+    /// 「‹」「›」の帯（クリックを受け取る範囲）。はみ出していなければ `None`。
+    /// 送れない側も帯は置く（[`Probe::overflow`] がその側の送れるかどうか）。
     pub hints: [Option<egui::Rect>; 2],
     /// 横スクロールの位置 [px]。
     pub offset: f32,
@@ -149,45 +156,71 @@ impl Ribbon {
         if let Some(x) = self.scroll_to.take() {
             area = area.horizontal_scroll_offset(x);
         }
+        let padded = self.overflowing;
+        let mut natural_width = 0.0;
         let output = area.show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 4.0;
-                for group in groups {
-                    if let Some(name) = self.show_group(ui, group, active) {
-                        pressed = Some(name);
+                // はみ出している間は、両端に帯より広い余白を足す。端まで送ったとき、
+                // 端のボタンが帯の下に隠れず押せるように。
+                if padded {
+                    ui.add_space(FADE_WIDTH);
+                }
+                let row = ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    for group in groups {
+                        if let Some(name) = self.show_group(ui, group, active) {
+                            pressed = Some(name);
+                        }
                     }
+                });
+                natural_width = row.response.rect.width();
+                if padded {
+                    ui.add_space(FADE_WIDTH);
                 }
             });
         });
         let offset = output.state.offset.x;
         let visible = output.inner_rect;
         let max_offset = (output.content_size.x - visible.width()).max(0.0);
+        let overflowing = natural_width > visible.width() + 0.5;
+        if overflowing != self.overflowing {
+            self.overflowing = overflowing;
+            ui.ctx().request_repaint();
+        }
         let overflow = overflow_sides(offset, output.content_size.x, visible.width());
-        for (side, (show, dir)) in [(overflow.0, -1.0_f32), (overflow.1, 1.0_f32)]
+        // はみ出している間は、送れない側も含めて**左右両方に帯を常に置く**。
+        // 送れる側だけに置くと、端に着いた瞬間にその側の帯が消え、同じ位置に端のボタンが
+        // 現れるので、続けて押した 1 回がボタンに当たっていた（PR #32 の 3 回目の操作レビュー。
+        // 「›」の連打で LAYER が開閉し、「‹」で実行中の POLYLINE が中断された）。
+        // 送れない側の帯は山形を薄くし、クリックは受け取るが何もしない。
+        for (side, (enabled, dir)) in [(overflow.0, -1.0_f32), (overflow.1, 1.0_f32)]
             .into_iter()
             .enumerate()
         {
-            if !show {
+            if !(padded && overflowing) {
                 continue;
             }
             let rect = hint_rect(visible, dir);
             // ボタンより後に登録するので、帯の上のクリックはこちらが取る（下のボタンへ届かない）。
             // 当初は絵だけで、「›」を押すと下に隠れたボタン（幅 800px では LAYER）が押されていた
             // （PR #32 の操作レビュー）。
-            let response = ui
-                .interact(
-                    rect,
-                    ui.id().with((SCROLL_ID, "hint", side)),
-                    egui::Sense::CLICK,
-                )
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text(if dir > 0.0 {
-                    "右へ送る"
-                } else {
-                    "左へ送る"
-                });
-            paint_overflow_hint(ui, rect, dir, response.hovered());
-            if response.clicked() {
+            let response = ui.interact(
+                rect,
+                ui.id().with((SCROLL_ID, "hint", side)),
+                egui::Sense::CLICK,
+            );
+            let response = match (enabled, dir > 0.0) {
+                (true, true) => response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("右へ送る"),
+                (true, false) => response
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text("左へ送る"),
+                (false, true) => response.on_hover_text("右端です"),
+                (false, false) => response.on_hover_text("左端です"),
+            };
+            paint_overflow_hint(ui, rect, dir, enabled, response.hovered());
+            if enabled && response.clicked() {
                 let step = dir * visible.width() * PAGE_FRACTION;
                 self.scroll_to = Some((offset + step).clamp(0.0, max_offset));
                 ui.ctx().request_repaint();
@@ -417,10 +450,15 @@ fn hint_rect(visible: egui::Rect, dir: f32) -> egui::Rect {
 ///
 /// スクロールバーは egui の既定でマウスを乗せたときしか出ず、切れ目がグループの境目に
 /// 重なると送れることに気づけなかった（PR #32 の操作レビュー）。
-fn paint_overflow_hint(ui: &egui::Ui, band: egui::Rect, dir: f32, hovered: bool) {
+fn paint_overflow_hint(ui: &egui::Ui, band: egui::Rect, dir: f32, enabled: bool, hovered: bool) {
     let painter = ui.painter();
     let bg = ui.visuals().panel_fill;
-    let ink = ui.visuals().strong_text_color();
+    // 送れない側は山形を薄くする（帯はクリックを受け取るが何もしない）。
+    let ink = if enabled {
+        ui.visuals().strong_text_color()
+    } else {
+        ui.visuals().weak_text_color().gamma_multiply(0.5)
+    };
     let strip = FADE_WIDTH / f32::from(FADE_STEPS);
     let edge = if dir > 0.0 { band.right() } else { band.left() };
     // 端に近いほど濃い。f32::from(u16) で回して `as f32` を避ける。
@@ -431,7 +469,7 @@ fn paint_overflow_hint(ui: &egui::Ui, band: egui::Rect, dir: f32, hovered: bool)
         let rect = egui::Rect::from_x_y_ranges(outer.min(inner)..=outer.max(inner), band.y_range());
         painter.rect_filled(rect, 0.0, bg.gamma_multiply(t));
     }
-    if hovered {
+    if enabled && hovered {
         let knob = egui::Rect::from_x_y_ranges(
             if dir > 0.0 {
                 (edge - 14.0)..=edge
