@@ -1,0 +1,12 @@
+[package]
+name = "dyn-input-ime"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Spike: cursor-following TextEdit and Japanese IME (ibus + mozc) behaviour"
+
+[dependencies]
+eframe = "0.36"
+egui = "0.36"
+
+[workspace]
