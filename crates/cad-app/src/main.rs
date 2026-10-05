@@ -21,6 +21,8 @@ mod ribbon;
 mod selection;
 mod session;
 mod snap;
+#[cfg(test)]
+mod test_util;
 mod tools;
 #[cfg(test)]
 mod ui_snapshot;

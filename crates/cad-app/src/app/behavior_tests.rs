@@ -967,9 +967,7 @@ fn drawing_with_a_selection_and_a_wide_coordinate_field() -> Harness<'static, Ca
 /// 座標の欄が最小の幅に戻って切り替え部品が跳ねていた。
 #[test]
 fn saving_keeps_the_selection_and_the_coordinate_field() {
-    let dir = std::env::temp_dir().join(format!("ymcad_issue41_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("テスト用ディレクトリ");
+    let dir = crate::test_util::TempDir::new("issue41");
     let path = dir.join("drawing.ymc");
 
     let mut h = drawing_with_a_selection_and_a_wide_coordinate_field();
@@ -991,7 +989,6 @@ fn saving_keeps_the_selection_and_the_coordinate_field() {
     );
     assert_eq!(h.state().session.selection.len(), 1, "選択は外れない");
     assert_eq!(h.state().coord_width, width, "座標の欄の幅は変わらない");
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// 図面の入れ替え（Ctrl+N）では、従来どおり選択を外し、座標の欄も最小の幅に戻す。

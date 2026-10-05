@@ -445,9 +445,8 @@ mod tests {
         use cad_core::geom::{Line, Point2};
         use cad_core::{Entity, Geometry, LayerId};
 
-        let dir = std::env::temp_dir().join(format!("ymcad_fileops_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("テスト用ディレクトリ");
+        // 落ちても消えるよう、Drop で消える一時ディレクトリを使う。
+        let dir = crate::test_util::TempDir::new("fileops");
 
         let mut doc = Document::new();
         doc.apply(Box::new(AddEntities::one(
@@ -487,8 +486,6 @@ mod tests {
             Some(dxf_path.as_path()),
             "保存先が DXF へ移ること（以降の上書き保存も DXF のまま）"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// **ネイティブ形式の保存では警告が出ないこと。**
@@ -501,9 +498,7 @@ mod tests {
         use cad_core::geom::{Point2, Vec2, Xline};
         use cad_core::{Entity, EntityId, Geometry, LayerId};
 
-        let dir = std::env::temp_dir().join(format!("ymcad_warn_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("テスト用ディレクトリ");
+        let dir = crate::test_util::TempDir::new("warn");
 
         let mut doc = Document::new();
         let x = Xline::new(Point2::ORIGIN, Vec2::new(1.0, 1.0)).expect("作図線");
@@ -531,7 +526,5 @@ mod tests {
             !ymc_msg.contains("警告"),
             "ネイティブ形式は無損失なので警告は出ないはず: {ymc_msg}"
         );
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
