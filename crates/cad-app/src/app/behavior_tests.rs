@@ -1518,6 +1518,28 @@ mod panel_during_command {
         external(&mut h, op_cmd(Op::Lock, l1));
         assert_stopped(&h, "PSET");
     }
+
+    /// 図面を入れ替えたら（NEW）、前の図面の ID を覚えている実行中のツールと
+    /// コンポーネントの編集を終える。修正前は FILLET が 1 本目を覚えたまま続いていた。
+    #[test]
+    fn a_new_drawing_ends_the_running_command() {
+        let (mut h, _) = drawing(
+            &[],
+            &[
+                (egui::pos2(300.0, 300.0), egui::pos2(500.0, 300.0)),
+                (egui::pos2(520.0, 280.0), egui::pos2(520.0, 450.0)),
+            ],
+        );
+        type_text(&mut h, "F");
+        press(&mut h, egui::Key::Enter);
+        let first = on_line(&h, 0, 0.5);
+        click(&mut h, first);
+        h.state_mut().doc.mark_saved(None);
+        frame(&mut h, key_with(egui::Key::N, egui::Modifiers::CTRL));
+        settle(&mut h);
+        assert!(h.state().doc.entities().is_empty(), "前提: 新しい図面");
+        assert_eq!(h.state().session.active_command(), None, "FILLET は終わる");
+    }
 }
 
 // ---- 寸法入力（Issue #20 段階 B） -------------------------------------------

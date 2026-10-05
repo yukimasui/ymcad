@@ -195,6 +195,16 @@ impl Session {
         self.revalidate(doc, selected_before);
     }
 
+    /// 図面が入れ替わった（NEW / OPEN）。前の図面の ID を覚えている状態をすべて捨てる。
+    ///
+    /// 実行中のツール（FILLET の 1 本目など）・選択・コンポーネントの編集は前の図面の ID を
+    /// 持っている。残すと、新しい図面で同じ番号になった別の図形を指しうる（ID は図面ごとに
+    /// 振り直される）。ADR-0039。
+    pub fn document_replaced(&mut self) {
+        self.cancel();
+        self.editing = None;
+    }
+
     /// 実行中のコマンドの外で図面が変わった後に、選択と実行中のツールの前提を確かめる
     /// 唯一の場所（ADR-0039）。各ツールには散らさない。
     ///
