@@ -211,6 +211,9 @@ pub struct CommandLine {
     dynamic: DynamicInput,
     /// カーソル横に出す直近のエラー。
     recent_error: Option<RecentError>,
+    /// 直近に描いた入力欄の矩形。変換開始で入力欄が動かないことのテストに使う。
+    #[cfg(test)]
+    input_rect: Option<egui::Rect>,
 }
 
 /// カーソル横に出す直近のエラー。
@@ -268,6 +271,8 @@ impl CommandLine {
                 frozen: None,
             },
             recent_error: None,
+            #[cfg(test)]
+            input_rect: None,
         }
     }
 
@@ -437,11 +442,33 @@ impl CommandLine {
                 .desired_width(width)
                 .font(egui::TextStyle::Monospace),
         );
+        #[cfg(test)]
+        {
+            self.input_rect = Some(response.rect);
+        }
         // キー入力が常にコマンドラインへ流れるよう、他に入力先が無ければ
         // 毎フレーム自分にフォーカスを戻す。
         if ui.memory(|m| m.focused().is_none()) {
             response.request_focus();
         }
+    }
+
+    /// 直近に描いた入力欄の矩形（テスト用）。
+    #[cfg(test)]
+    pub fn input_rect(&self) -> Option<egui::Rect> {
+        self.input_rect
+    }
+
+    /// 入力欄の中身（テスト用）。
+    #[cfg(test)]
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+
+    /// コマンド候補が出ているか（テスト用）。
+    #[cfg(test)]
+    pub fn suggestions_visible(&self) -> bool {
+        self.suggestions.is_visible()
     }
 
     /// カーソル横に入力欄を描く（動的入力がオンのときだけ）。

@@ -639,6 +639,9 @@ impl eframe::App for CadApp {
 }
 
 #[cfg(test)]
+mod behavior_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
