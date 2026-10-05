@@ -192,6 +192,8 @@ impl CadApp {
                 None => ui.monospace(format!("X {:>14}   Y {:>14}", "-", "-")),
             };
             ui.separator();
+            // 切り替え部品（OSNAP / ORTHO / POLAR / DYN）は座標の直後に置く（Issue #38）。
+            self.status_toggles(ui);
             ui.monospace(format!("倍率 {:.6}", self.viewport.scale()));
             ui.separator();
             ui.monospace(format!("要素 {}", self.doc.entities().len()));
@@ -205,71 +207,14 @@ impl CadApp {
             ui.separator();
             ui.monospace(format!("選択 {}", self.session.selection.len()));
             ui.separator();
-            let osnap_text = if self.snap.is_enabled() {
-                // 吸着中はその種別を出す。マーカーの形と合わせて確認できるように。
-                let label = self.snap.held().map_or_else(
-                    || "OSNAP".to_owned(),
-                    |c| format!("OSNAP:{}", c.kind.label()),
-                );
-                egui::RichText::new(label)
-                    .monospace()
-                    .color(render::ON_COLOR)
-            } else {
-                egui::RichText::new("osnap")
-                    .monospace()
-                    .color(ui.visuals().weak_text_color())
-            };
-            // DYN と同じく、クリックで切り替える部品として見せる（選択を切って指のカーソル）。
-            let osnap_label = ui
-                .add(
-                    egui::Label::new(osnap_text)
-                        .selectable(false)
-                        .sense(egui::Sense::click()),
-                )
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text("オブジェクトスナップの ON/OFF  F3");
-            if osnap_label.clicked() {
-                self.toggle_osnap();
-            }
-            ui.separator();
-            if let Some(mode) = drafting::status_toggles(ui, self.drafting) {
-                self.toggle_drafting(mode);
-            }
-            // 動的入力。OSNAP と同じ見せ方にし、クリックでも切り替えられるようにする。
-            let dyn_text = if self.session.cmdline.is_dynamic() {
-                egui::RichText::new("DYN")
-                    .monospace()
-                    .color(render::ON_COLOR)
-            } else {
-                egui::RichText::new("dyn")
-                    .monospace()
-                    .color(ui.visuals().weak_text_color())
-            };
-            // ラベルは既定で文字を選べるので、そのままだとホバーで I ビームになる。
-            // クリックで切り替える部品なので、選択を切って指のカーソルにする。
-            let dyn_label = ui
-                .add(
-                    egui::Label::new(dyn_text)
-                        .selectable(false)
-                        .sense(egui::Sense::click()),
-                )
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text("動的入力（カーソル横の入力欄）の ON/OFF  F12");
-            if dyn_label.clicked() {
-                self.toggle_dynamic_input();
-            }
-            ui.separator();
-            if self.session.has_active_tool() {
-                ui.colored_label(
-                    egui::Color32::from_rgb(0xff, 0xc1, 0x07),
-                    egui::RichText::new("コマンド実行中").monospace(),
-                );
-                ui.separator();
-            }
 
             // 60fps の予算は 16.6ms。実測がそれを大きく下回っていることを見せる。
+            // 開発者向けの情報なので最後に置き、入り切らない幅では途中で切らずに省く。
             let (avg, max) = self.draw_timer.stats_ms();
-            ui.monospace(format!("描画 平均{avg:.2}ms 最大{max:.2}ms"));
+            let timing = format!("描画 平均{avg:.2}ms 最大{max:.2}ms");
+            if fits_in_row(ui, &timing) {
+                ui.monospace(timing);
+            }
 
             if self.font_status.is_none() {
                 ui.separator();
@@ -604,6 +549,91 @@ impl CadApp {
         }
         self.snap.release();
     }
+}
+
+impl CadApp {
+    /// ステータスバーの切り替え部品（OSNAP / ORTHO / POLAR / DYN）と「コマンド実行中」。
+    ///
+    /// 座標の直後に置く。幅が足りないとステータスバーは右端から切れるので、
+    /// クリックで操作する部品を情報表示より先にする（Issue #38。PR #35 で ORTHO / POLAR が
+    /// 増え、幅 800px で DYN が画面外になってクリックできなかった）。
+    fn status_toggles(&mut self, ui: &mut egui::Ui) {
+        let osnap_text = if self.snap.is_enabled() {
+            // 吸着中はその種別を出す。マーカーの形と合わせて確認できるように。
+            let label = self.snap.held().map_or_else(
+                || "OSNAP".to_owned(),
+                |c| format!("OSNAP:{}", c.kind.label()),
+            );
+            egui::RichText::new(label)
+                .monospace()
+                .color(render::ON_COLOR)
+        } else {
+            egui::RichText::new("osnap")
+                .monospace()
+                .color(ui.visuals().weak_text_color())
+        };
+        // DYN と同じく、クリックで切り替える部品として見せる（選択を切って指のカーソル）。
+        let osnap_label = ui
+            .add(
+                egui::Label::new(osnap_text)
+                    .selectable(false)
+                    .sense(egui::Sense::click()),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("オブジェクトスナップの ON/OFF  F3");
+        if osnap_label.clicked() {
+            self.toggle_osnap();
+        }
+        ui.separator();
+        if let Some(mode) = drafting::status_toggles(ui, self.drafting) {
+            self.toggle_drafting(mode);
+        }
+        // 動的入力。OSNAP と同じ見せ方にし、クリックでも切り替えられるようにする。
+        let dyn_text = if self.session.cmdline.is_dynamic() {
+            egui::RichText::new("DYN")
+                .monospace()
+                .color(render::ON_COLOR)
+        } else {
+            egui::RichText::new("dyn")
+                .monospace()
+                .color(ui.visuals().weak_text_color())
+        };
+        // ラベルは既定で文字を選べるので、そのままだとホバーで I ビームになる。
+        // クリックで切り替える部品なので、選択を切って指のカーソルにする。
+        let dyn_label = ui
+            .add(
+                egui::Label::new(dyn_text)
+                    .selectable(false)
+                    .sense(egui::Sense::click()),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("動的入力（カーソル横の入力欄）の ON/OFF  F12");
+        if dyn_label.clicked() {
+            self.toggle_dynamic_input();
+        }
+        ui.separator();
+        if self.session.has_active_tool() {
+            ui.colored_label(
+                egui::Color32::from_rgb(0xff, 0xc1, 0x07),
+                egui::RichText::new("コマンド実行中").monospace(),
+            );
+            ui.separator();
+        }
+    }
+}
+
+/// 等幅の `text` が、横並びの残りの幅（区切り線の分を含む）に入り切るか。
+fn fits_in_row(ui: &egui::Ui, text: &str) -> bool {
+    let width = ui
+        .painter()
+        .layout_no_wrap(
+            text.to_owned(),
+            egui::TextStyle::Monospace.resolve(ui.style()),
+            egui::Color32::PLACEHOLDER,
+        )
+        .size()
+        .x;
+    width <= ui.available_width()
 }
 
 impl CadApp {

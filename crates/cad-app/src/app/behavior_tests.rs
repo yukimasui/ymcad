@@ -701,6 +701,84 @@ fn osnap_in_the_status_bar_is_clickable_with_a_pointing_hand() {
     assert_eq!(toggled, 2);
 }
 
+// ---- 幅が狭いときのステータスバー（Issue #38） --------------------------------
+
+/// 切り替え部品の状態を読む関数。
+type ToggleState = fn(&CadApp) -> bool;
+
+/// 幅を指定したアプリ。文字の幅を実機に合わせるため、日本語フォントを読み込む
+/// （読み込まないと漢字が代替の □ になり、ステータスバーの幅が実機と違う）。
+fn app_with_width(width: f32) -> Harness<'static, CadApp> {
+    let mut h = Harness::builder()
+        .with_size(egui::vec2(width, SCREEN.y))
+        .build_eframe(|cc| {
+            let font = crate::jp_font::install(&cc.egui_ctx)
+                .map(|f| format!("{} (face {})", f.path.display(), f.index));
+            CadApp::new(font)
+        });
+    h.run_steps(SETTLE);
+    h
+}
+
+/// 幅 800px・640px でも、切り替え部品（OSNAP / ORTHO / POLAR / DYN）がすべて画面内にあり、
+/// クリックで切り替わる。PR #35 で ORTHO / POLAR が増え、800px で DYN が画面外になっていた。
+#[test]
+fn status_toggles_fit_and_click_in_a_narrow_window() {
+    use egui_kittest::kittest::Queryable as _;
+
+    for width in [800.0, 640.0] {
+        let mut h = app_with_width(width);
+        // (表示中のラベル, 切り替え後のラベル, 状態を読む関数)
+        let toggles: [(&str, &str, ToggleState); 4] = [
+            ("OSNAP", "osnap", |a| a.snap.is_enabled()),
+            ("ortho", "ORTHO", |a| {
+                a.drafting.is_on(crate::drafting::Mode::Ortho)
+            }),
+            ("polar", "POLAR", |a| {
+                a.drafting.is_on(crate::drafting::Mode::Polar)
+            }),
+            ("DYN", "dyn", |a| a.session.cmdline.is_dynamic()),
+        ];
+        for (label, after, state) in toggles {
+            let rect = h.get_by_label(label).rect();
+            assert!(
+                rect.min.x >= 0.0 && rect.max.x <= width,
+                "幅 {width}: {label} が画面内にある ({rect:?})"
+            );
+            let before = state(h.state());
+            click(&mut h, rect.center());
+            assert_ne!(
+                state(h.state()),
+                before,
+                "幅 {width}: {label} のクリックで切り替わる"
+            );
+            assert!(
+                h.query_by_label(after).is_some(),
+                "幅 {width}: {label} → {after}"
+            );
+        }
+        // 描画時間は入り切らなければ省く。出すなら途中で切らない。
+        if let Some(node) = h.query_by_label_contains("描画 平均") {
+            assert!(
+                node.rect().max.x <= width,
+                "幅 {width}: 描画時間が途中で切れない"
+            );
+        }
+    }
+}
+
+/// 十分な幅（1280px）では描画時間も画面内に出る。
+#[test]
+fn draw_timing_is_shown_in_a_wide_window() {
+    use egui_kittest::kittest::Queryable as _;
+
+    let h = app_with_width(SCREEN.x);
+    let node = h
+        .query_by_label_contains("描画 平均")
+        .expect("1280px では描画時間が出る");
+    assert!(node.rect().max.x <= SCREEN.x, "画面内: {:?}", node.rect());
+}
+
 // ---- 寸法入力（Issue #20 段階 B） -------------------------------------------
 
 use crate::cmdline::dimension::{DimValues, Field};

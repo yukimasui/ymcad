@@ -137,6 +137,31 @@ fn ui_snapshot_dyn_composing() {
     shot(&mut h, "dyn_g_composing");
 }
 
+// ---- 幅が狭いときのステータスバー（Issue #38） --------------------------------
+
+/// 幅 800px と 1280px のステータスバー。800px でも OSNAP / ORTHO / POLAR / DYN が見え、
+/// 描画時間は入り切らなければ省かれる。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_status_bar_widths() {
+    for (width, name) in [
+        (800.0, "status_a_width_800"),
+        (1280.0, "status_b_width_1280"),
+    ] {
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(width, 600.0))
+            .wgpu()
+            .build_eframe(|cc| {
+                let font = crate::jp_font::install(&cc.egui_ctx)
+                    .map(|f| format!("{} (face {})", f.path.display(), f.index));
+                CadApp::new(font)
+            });
+        h.run_steps(STEPS);
+        hover(&mut h, egui::pos2(width / 2.0, 250.0));
+        shot(&mut h, name);
+    }
+}
+
 // ---- 寸法入力（Issue #20 段階 B） -------------------------------------------
 
 fn press(harness: &mut Harness<'_, CadApp>, key: egui::Key) {
