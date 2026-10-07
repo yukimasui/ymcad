@@ -2,23 +2,17 @@
 # 作業ブランチごとの作業ツリーを、リポジトリ直下の .worktrees/<名前> にまとめて作る。
 #
 # 目的:
-#   兄弟ディレクトリに作業ツリーを散らかさず、依存クレートのコンパイルを
-#   全作業ツリーで 1 回に済ませる。
+#   兄弟ディレクトリに作業ツリーを散らかさず、リポジトリ 1 つのディレクトリの中で完結させる。
 #
-# ビルド先を共有する仕組み:
-#   <リポジトリ>/.worktrees/.cargo/config.toml に
-#       [build]
-#       target-dir = "../target"
-#   を置く（このスクリプトが無ければ自動で作る）。.worktrees/<名前> の中で走る cargo は
-#   親ディレクトリの .cargo/config.toml を読むので、ビルド先が <リポジトリ>/target
-#   1 つになる（相対パスは .cargo を含むディレクトリ .worktrees/ 基準）。
-#
-# 並行ビルド:
-#   複数の作業ツリーで同時に cargo を走らせると、cargo のロックで順番待ちになる。
-#   「Blocking waiting for file lock」と出るのは正常で、止まっているわけではない。
+# ビルド先は共有しない（作業ツリーごとに .worktrees/<名前>/target）:
+#   .worktrees/.cargo/config.toml で target-dir を <リポジトリ>/target に寄せると依存の
+#   コンパイルは 1 回で済むが、cargo はパスの違う作業ツリーの同じクレートを同じものとして扱い、
+#   新しさをファイルの更新時刻だけで判断する。そのため別の作業ツリーで作ったテストの
+#   バイナリがそのまま走り、検証の結果が黙って間違う（2026-10-07 にレビューで実際に起きた）。
+#   以前のスクリプトが作った .worktrees/.cargo/config.toml が残っていれば警告する。
 #
 # Claude Code の isolation: "worktree" は使わないこと:
-#   .claude/worktrees/ に作られるため共有の設定が効かず、基点も古くなりうる。
+#   .claude/worktrees/ に作られ、基点が origin/develop でなく古い main になることがある。
 #   代わりにこのスクリプトで作った作業ツリーを使う。
 #
 # 使い方:
@@ -54,9 +48,9 @@ root=$(dirname "$common")
 wtdir="$root/.worktrees"
 
 ensure_cargo_config() {
-    mkdir -p "$wtdir/.cargo"
-    if [ ! -e "$wtdir/.cargo/config.toml" ]; then
-        printf '[build]\ntarget-dir = "../target"\n' >"$wtdir/.cargo/config.toml"
+    mkdir -p "$wtdir"
+    if [ -e "$wtdir/.cargo/config.toml" ]; then
+        echo "警告: $wtdir/.cargo/config.toml がある。ビルド先の共有は古いバイナリが走るのでやめた。消すこと" >&2
     fi
     if ! git -C "$root" check-ignore -q .worktrees/; then
         echo "警告: .worktrees/ が .gitignore に無い" >&2

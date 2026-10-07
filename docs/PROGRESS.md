@@ -656,7 +656,7 @@ Geometry::Instance(_) => {}
 1. `git clone git@github.com:yukimasui/ymcad.git && cd ymcad && git switch develop`
 2. 依存: `README.md` のビルド手順（Rust stable、`fonts-noto-cjk`、Linux のウィンドウ系ライブラリ）。
    `python3`（`tools/` の検証・報告書）と `gh`（GitHub CLI、`gh auth login`）
-3. `cargo build --workspace --release` を 1 回流して依存を作る（以後は `target/` を全作業ツリーで共有）
+3. `cargo build --workspace --release` を 1 回流して、ビルドが通ることを確かめる
 4. **グローバルの `~/.claude/CLAUDE.md` を前のマシンから持ってくる**（ユーザーの私的な設定で、リポジトリには入っていない）。
    本リポジトリの `CLAUDE.md` は、その「委託するときの指示 1〜6」「実装の進め方」「ペルソナ」を前提にしている
 5. Claude Code のメモリは前のマシンに置いてきた。中身は `CLAUDE.md` に移してあるので、作り直さなくてよい
@@ -664,7 +664,7 @@ Geometry::Instance(_) => {}
 
 ### 作業のしかた（2026-10-07 に変えたこと）
 - 作業ツリーは **`tools/wt.sh`** でリポジトリ直下の `.worktrees/` に作る（`new <ブランチ>` / `review <PR 番号>` / `rm` / `list`）。
-  ビルド先は `target/` を共有する。**Agent の `isolation: "worktree"` は使わない**（`CLAUDE.md`「作業体制」）
+  ビルド先は作業ツリーごと（共有すると古いバイナリが走る）。**Agent の `isolation: "worktree"` は使わない**（`CLAUDE.md`「作業体制」）
 - 委譲の共通ルールは **`docs/agents/agent-rules.md`**、操作レビュアーの役割は **`docs/agents/ux-reviewer.md`**
 - コンパイルを伴う委譲・レビューの同時実行は 2 本まで
 - 作業報告書は **https://claude.ai/artifact/NeHX7p6Hy6jRaUqFBoNXtt**（非公開の Artifact）。更新のしかたは `tools/report/README.md`。
@@ -684,12 +684,12 @@ Geometry::Instance(_) => {}
 | #49 | #44 `SnapKind::all()` の入れ忘れ検査（末尾に足して `all()` を忘れる場合は検出できない。テストのコメントで促す） |
 | #50 | #46 リボンのアイコン 22 → 44px（中身の高さ 72 → 98px） |
 | #52 | `ReplaceGeometries`（同じ種類どうしの置き換えだけ、インスタンスは配置だけ、不正な値はエラー） |
+| #53 | #48 選択待ちで図形が選択から外れたら案内する（中断はしない） |
+| #54 | #51 ロック・非表示のレイヤにあるグループの一員は選択に入れない（案 A） |
+| #56 | clone で再開する準備（`tools/wt.sh`、`docs/agents/`、`tools/report/`、この節） |
 
 ### 残っている PR
-- **PR #53**（#48 選択待ちで図形が外れたときの案内）と **PR #54**（#51 グループのロックされた一員）: 実装済み・CI 待ち・**レビュー未実施**。
-  コードレビュアーの起動がツールの安全確認（Auto-Mode Bypass）で拒否され、ユーザーの判断待ちのまま引き継いだ。
-  2 本は同じテストファイルに足しているので、**合わせた木でも `cargo test -p cad-app` を流してから**マージする
-- **このブランチ `chore/clone-ready`**（`tools/wt.sh`、`docs/agents/`、`tools/report/`、`CLAUDE.md`、この節）
+- なし（PR #53・#54 も 10/7 にマージ済み。この引き継ぎの PR #56 もマージしてから移る）
 
 ### 作業ツリー（前のマシンの話。clone した先には無い）
 前のマシンの兄弟ディレクトリ（`ymcad-wt*`、`ymcad-check`）と `.claude/worktrees/` は片付ける予定。clone した先では気にしなくてよい
@@ -882,7 +882,10 @@ UI を変えたらこれで撮って目で見る。比較（差分で落とす�
 - **Agent の `isolation: "worktree"` は基点が古い `main` になることがある**（2026-10-07 に 2 回）。しかも変更が無いと
   作業ツリーが自動で消え、委譲先がメインの作業ツリーで `git reset --hard` しかけた。作業ツリーは `tools/wt.sh` で作る。
 - **作業ツリーごとに `target/` を持つと、依存（egui など）のコンパイルが作業ツリーの数だけ走る。** 8 コア・15GB で
-  release ビルドが 5 本重なって load average 30 前後、600 秒のタイムアウトで打ち切られた。`tools/wt.sh` で共有する。
+  release ビルドが 5 本重なって load average 30 前後、600 秒のタイムアウトで打ち切られた。同時実行を 2 本までにする。
+- **ただしビルド先を作業ツリー間で共有してはいけない。** cargo はパスの違う作業ツリーの同じクレートを同じものとして扱い、
+  新しさを更新時刻だけで判断するので、別の作業ツリーで作ったテストのバイナリが走る（PR #54 のレビューで、PR #53 の
+  わざと壊した版のバイナリが走った）。重さを減らすなら sccache などのコンパイルキャッシュを検討する（未検証）。
 - **`EntityStore` はスロットを再利用せず世代が常に 0。** `clear_history` で末尾の空きを詰めた後は、削除済みの ID と
   新しい図形の ID が一致しうる。`clear_history` はファイルの読み込みでしか呼ばれず、`Session::document_replaced` が
   選択を捨てるので今は起きない。ID を長く持つ機能（#30 グリップ・#31 プロパティ）を足すときは、この前提を崩さない。
