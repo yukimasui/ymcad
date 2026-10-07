@@ -2233,12 +2233,19 @@ fn ribbon_button_returns_the_keyboard_from_a_panel_field() {
     assert_eq!(layer_name_field_value(&h), "", "パネルの欄には入っていない");
 }
 
-/// リボンの高さは抑えてある（目安 80px 以下）。
+/// リボンが作図領域を取りすぎない。上限は実測 98px（アイコン 44px）に少し余裕を足した値。
+/// 「コンパクト」は小さいほど良いという意味ではなく、作図領域を取りすぎない上限のこと。
+/// 下限は、アイコンを 22px に戻すと（実測 76px 前後）落ちるための検査。
 #[test]
-fn ribbon_is_compact() {
+fn ribbon_does_not_take_too_much_height() {
     let h = app();
     let rect = h.state().ribbon.probe().rect.expect("リボンが描かれている");
-    assert!(rect.height() <= 80.0, "リボンの高さ {}", rect.height());
+    assert!(rect.height() <= 110.0, "リボンの高さ {}", rect.height());
+    assert!(
+        rect.height() >= 90.0,
+        "アイコンが小さい: 高さ {}",
+        rect.height()
+    );
 }
 
 /// 幅 800px では全部は見えないが、ホイールで横にスクロールすれば最後のボタンまで届く。

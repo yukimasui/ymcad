@@ -23,18 +23,18 @@ pub mod layout;
 use crate::tools::{self, CommandSpec};
 use layout::{GroupSpec, QUICK_ACCESS, TABS};
 
-/// アイコンの一辺 [px]。
-const ICON_PX: f32 = 22.0;
+/// アイコンの一辺 [px]。Issue #46 で 22 から倍にした（クイックアクセスは変えない）。
+const ICON_PX: f32 = 44.0;
 /// クイックアクセス（タブの行）のアイコンの一辺 [px]。タブの見出しの高さに収める。
 const QUICK_ICON_PX: f32 = 16.0;
 /// ボタンの内側の余白 [px]。
 const BUTTON_PAD: f32 = 2.0;
 /// ボタンの最小幅 [px]。
-const BUTTON_MIN_WIDTH: f32 = 30.0;
+const BUTTON_MIN_WIDTH: f32 = 52.0;
 /// ボタンの下に出すコマンド名の文字の大きさ [pt]。
-const LABEL_SIZE: f32 = 9.0;
+const LABEL_SIZE: f32 = 10.5;
 /// グループ名の文字の大きさ [pt]。
-const GROUP_TITLE_SIZE: f32 = 9.5;
+const GROUP_TITLE_SIZE: f32 = 11.0;
 /// ボタンの角の丸み [px]。
 const CORNER: u8 = 3;
 /// 実行中のコマンドがあるタブに引く下線の太さ [px] と、見出しの左右から詰める幅 [px]。
