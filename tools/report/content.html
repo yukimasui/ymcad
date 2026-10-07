@@ -1,0 +1,226 @@
+<section class="card">
+<h3 style="margin-top:0">いまの状況（まず読むところ）— 10/7、別のマシンへ移る準備</h3>
+<ul id="now">
+<li><b>✅ develop にマージ済み（10/7）</b>: PR #45（#37 パネル操作）/ #49（#44 入れ忘れ検査）/ #50（#46 リボン 44px）/ #52（汎用の書き換えコマンド <code>ReplaceGeometries</code>）</li>
+<li><b>✅ 続けてマージ</b>: PR #53（#48 選択待ちの案内）/ PR #54（#51 グループのロックされた一員、ご主人の判断 A）。2 本を合わせた木でもテスト通過</li>
+<li><b>引き継ぎの準備</b>（ブランチ <code>chore/clone-ready</code>）: 作業ツリーは <code>tools/wt.sh</code> で <code>.worktrees/</code> の中に作る（ビルド先の共有は古いバイナリが走るのでやめた） / 委譲のルールを <code>docs/agents/</code> に / メモリの中身を <code>CLAUDE.md</code> に / この報告書を Artifact に</li>
+<li><b>新しいマシンでの次の順番</b>: #55（書き換えコマンドの追いかけ）→ #31 プロパティ ＋ #34 選択プレビュー → #30 グリップ → #36 → #27</li>
+<li><b>お願い</b>: 下の「C3. 実機で確かめてほしいこと（10/7 追加）」</li>
+</ul>
+</section>
+
+<h2>A. 最終ジャッジ用メモ（レビュアーの意見で決めたこと・朝に直せる点）</h2>
+<p>レビュアーの意見を正として進めたうち、ご主人の好みで変えたくなりそうなものを残す。</p>
+<table id="judge">
+<tr><th>#</th><th>機能</th><th>レビュアーの意見で決めたこと</th><th>別の選択肢</th></tr>
+<tr><td>1</td><td>寸法入力（#28）</td><td>動的入力オフで Tab を押すと、押すたびに履歴へ案内を 1 行出す（抑止しない）</td><td>同じ基準点では 2 回目以降黙る</td></tr>
+<tr><td>2</td><td>寸法入力（#25）</td><td>打ちかけの座標（<code>@10</code> 等）があるときの Esc は 1 回目で入力を消すだけ（ご主人も同意済み）</td><td>—</td></tr>
+<tr><td>3</td><td>リボン（#32）</td><td>ボタン下の名前は<b>英語のコマンド名のまま</b></td><td>日本語名にして英語はツールチップへ / 設定で切り替え</td></tr>
+<tr><td>4</td><td>リボン（#32）</td><td><b>LAYER をホームタブへ移す</b>（AutoCAD 利用者がホームで探すため）</td><td>「表示・ファイル」タブに置く（当初案）</td></tr>
+<tr><td>5</td><td>リボン（#32）</td><td><b>UNDO / REDO / SAVE をタブの行の右端に常に表示</b>（AutoCAD のクイックアクセス相当。ホーム以外でも押せる）</td><td>ホームタブだけに置く</td></tr>
+<tr><td>6</td><td>リボン（#32）</td><td>分かりにくいと判定されたアイコン（STRETCH / REDEFINE / EXPLODE）と調整 6 個を<b>この PR で描き直し</b></td><td>別 Issue に分ける</td></tr>
+<tr><td>7</td><td>リボン（#32）</td><td>LAYER / COMPONENTS（パネルの開閉だけ）は実行中のコマンドを中断しない。それ以外のボタンは中断して始める</td><td>すべて中断（Issue の当初の文言）</td></tr>
+<tr><td>8</td><td>リボン（#32）</td><td>日本語の変換中にボタンを押しても何もせず、確定か取り消しを促す</td><td>変換を捨てて始める</td></tr>
+<tr><td>9</td><td>直交・極（#35）</td><td>直交と極は<b>排他にしない</b>。両方オンなら直交が優先（POLAR は控えめの色）</td><td>AutoCAD と同じく排他</td></tr>
+<tr><td>10</td><td>直交・極（#35）</td><td>極の刻みは 15°。吸い付きは<b>画面上 10px 以内かつ角度の差 ±3° 以内</b></td><td>刻み 45° / 90°（AutoCAD の既定）、角度の上限なし</td></tr>
+<tr><td>11</td><td>直交・極（#35）</td><td>RECTANGLE は直交・極の対象外（対角を直交にすると面積 0 になるため）</td><td>対象にする</td></tr>
+<tr><td>12</td><td>直交・極（#35）</td><td>日本語の変換中は F8 / F10 に反応しない（IME の半角カナ・半角英数キーと重なるため）</td><td>常に反応</td></tr>
+<tr><td>13</td><td>リボン（#32）</td><td>クイックアクセス（UNDO / REDO / SAVE）は<b>タブの直後</b>に区切り線を挟んで置く</td><td>タブ行の右端（当初の修正案）</td></tr>
+<tr><td>14</td><td>リボン（#32）</td><td>用語を<b>「レイヤ」に統一</b>（ステータスバーの「画層 0」も「レイヤ 0」に）</td><td>AutoCAD 日本語版と同じ「画層」に統一</td></tr>
+<tr><td>15a</td><td>リボン（#32）</td><td>リボンがはみ出す幅では、左右の「‹ ›」帯を常に置き、ボタン列の両端に 28px の余白を足す（端のボタンが帯に隠れないように。実装担当の追加判断をレビュアーが妥当と判定）</td><td>送れる側だけに帯を置く</td></tr>
+<tr><td>15</td><td>リボン（#32）</td><td>EXPLODE のアイコンは「切り離した 2 本の片 + 角からの火花」（操作レビュアーが 6 案を試作して選んだもの）</td><td>—</td></tr>
+<tr><td>18</td><td>ステータスバー（#39）</td><td>切り替え部品（OSNAP / ORTHO / POLAR / DYN）を<b>座標の直後</b>へ。情報表示は <b>レイヤ / 選択 / 要素 / 倍率</b> の順にし、入らない項目は右から丸ごと省く</td><td>元の並び（倍率・要素・画層・選択の後に切り替え）</td></tr>
+<tr><td>19a</td><td>ステータスバー（#39）</td><td>CI に日本語フォント（<code>fonts-noto-cjk</code>）を入れ、幅のテストはフォント必須（無ければ理由つきで落ちる）</td><td>フォントの有無でテストの期待値を変える</td></tr>
+<tr><td>19b</td><td>ステータスバー（#39）</td><td>座標の欄は一度広がったら縮めない（図面の入れ替えで戻す）。座標の固定幅は 12 文字。長いレイヤ名は 16 文字で「…」</td><td>毎フレーム桁数に合わせる</td></tr>
+<tr><td>19</td><td>ステータスバー（#39）</td><td>「コマンド実行中」と「OSNAP:端点」の欄は幅を固定して、表示が跳ねないようにする</td><td>幅を内容に合わせる</td></tr>
+<tr><td>16</td><td>未保存確認（#33）</td><td><b>Esc = キャンセル、Enter = 保存する</b>（「保存する (Enter)」「キャンセル (Esc)」と表示）。「保存しない」には 1 文字キーを割り当てない</td><td>キーでは閉じない（修正前）</td></tr>
+<tr><td>17</td><td>未保存確認（#33）</td><td>確認画面の外のクリックではキャンセルしない（誤クリック防止）</td><td>外のクリックでキャンセル</td></tr>
+<tr><td>17a</td><td>未保存確認（#33）</td><td><b>Enter はフォーカスの位置に関係なく必ず「保存する」</b>、Space は何もしない、「保存しない」はクリックでしか押せない（Tab → Enter で図面が捨てられる不具合を操作レビュアーが発見したため）</td><td>egui の既定（フォーカスのあるボタンが Enter / Space で押される）</td></tr>
+<tr><td>17c</td><td>未保存確認（#33）</td><td>確認画面の間は <b>Tab で枠を動かさない</b>（枠は常に「保存する」。Enter の結果と枠を必ず一致させる）</td><td>Tab で移動できるが Enter は常に保存（前回の修正。枠と結果が食い違った）</td></tr>
+<tr><td>17b</td><td>テスト（#33）</td><td>テストで保存ダイアログを開こうとしたら理由つきで落とす。CI のジョブに 30 分の制限時間</td><td>各テストが保存先を与える約束だけで守る</td></tr>
+<tr><td>20</td><td>保存（#42）</td><td>保存では選択・スナップ・座標の欄を変えない。<b>リボン・クイックアクセスの保存ボタンも実行中のコマンドを中断しない</b>（Ctrl+S とそろえる）</td><td>保存ボタンは他のボタンと同じく中断する</td></tr>
+<tr><td>21</td><td>リボン（#50）</td><td>アイコンは<b>全ボタン一律 44px</b>、クイックアクセスは 16px のまま。名前 10.5pt・グループ名 11pt。高さ 72→98px。<b>ホームタブが全部見える幅が約 830→1210px に増えた</b>（1024px では GROUP / UNGROUP / LAYER が「›」の先になる）のは受け入れた</td><td>LAYER・グループを左へ並べ替え / 頻度の低いボタンだけ小さくする（大小混在）</td></tr>
+<tr><td>22</td><td>書き換えコマンド（#52）</td><td><b>同じ種類どうしの置き換えだけ</b>許す（線分→円は不可）。インスタンスは配置だけ変えられる（定義と上書きは不可）。不正な値は黙って直さずエラー</td><td>種類の変更も許す / インスタンスは対象外</td></tr>
+<tr><td>23</td><td>案内（#48）</td><td>Issue の 2 番（「選び直すと対象に戻せます」を足す）は採らない（ロックを外すだけでは戻らないので誤解を招く）</td><td>文言を足す</td></tr>
+<tr><td>24</td><td>入れ忘れ検査（#49）</td><td>種別を末尾に足し、テストの match だけ直して <code>all()</code> を忘れた場合は検出できない（安定版の Rust に列挙子を数える手段が無い）。コンパイルエラーとコメントで促す</td><td>マクロで enum と <code>all()</code> を同じリストから作る</td></tr>
+</table>
+
+<h2>C3. 実機で確かめてほしいこと（10/7 追加）</h2>
+<ul>
+<li>[ ] リボンのアイコン 44px（PR #50 のマージ後）: 大きさ・文字の釣り合い、HiDPI（1.25 / 2.0）での鮮明さ、1024〜1200px 幅や画面を左右に分けたときに右端のグループが横スクロールの先になっても困らないか、クイックアクセス（16px のまま）が押しにくくないか</li>
+<li>[ ] パネルでレイヤをロック → 解除 → 図形を選ぶ → UNDO（ロックに戻る）で、選択から外れること（PR #45）</li>
+</ul>
+<h3>リボンのアイコン 44px（PR #50）</h3>
+<p>1280px 幅</p>
+<img src="img/ribbon44_a_home_1280.png" alt="44px のリボン、1280px 幅">
+<p>800px 幅（右端の「›」で送る）</p>
+<img src="img/ribbon44_d_home_800.png" alt="44px のリボン、800px 幅">
+
+<h2>B. 朝の判断待ち（自律では進めないもの）</h2>
+<table id="pending">
+<tr><th>項目</th><th>理由</th></tr>
+<tr><td>Issue #9 寸法作成 / #10 文字入力</td><td>CLAUDE.md の非スコープ（寸法記入・文字要素）。新しい図形の種類（エンティティモデルの変更）も要る</td></tr>
+<tr><td>OFFSET・ハッチング</td><td>非スコープ</td></tr>
+<tr><td><code>develop</code> → <code>main</code> のマージ</td><td>必ずご主人の確認後</td></tr>
+<tr><td>新しい機能の夜間着手（#31 プロパティ / #34 選択プレビュー / #30 グリップ / #27 ヒント ほか）</td><td>委譲の開始がツールの安全確認（Auto-Mode Bypass）で拒否された。進めてよいか、どう許可するかの判断</td></tr>
+<tr><td>#37 実行中のパネル操作で、ツールが持つ図形・選択が無効になる場合の確認</td><td>コードレビュアーの提案。新しい作業なので夜間は着手しない</td></tr>
+<tr><td>#36 Shift で直交を一時的に逆にする</td><td>操作レビュアーの提案。新しい機能なので夜間は着手しない</td></tr>
+<tr><td>#30 グリップ・#31 プロパティ</td><td><code>cad-core</code> に「既存の図形を書き換える汎用 Command」を足す必要がある。<code>cad-core</code> の中核への変更なので、ご主人の確認を取りたい</td></tr>
+</table>
+
+<h2>C. 今夜の作業リスト</h2>
+<table id="queue">
+<tr><th>Issue</th><th>内容</th><th>状況</th></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/26">#26</a></td><td>リボン（タブつき、SVG アイコン）</td><td class="ok">✅ マージ済み（PR #32、レビュー 4 往復）</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/24">#24</a></td><td>未保存確認の画面で Enter / Esc をコマンドラインが拾う（実際に起きていた）</td><td>改善の反映中（PR #33）</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/29">#29</a></td><td>直交（F8）・極トラッキング（F10）。AutoCAD の「F8 で極が切れて戻らない」不満を避け、排他にしない</td><td class="ok">✅ マージ済み（PR #35）</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/30">#30</a></td><td>グリップ編集。誤爆を避ける 2 クリック、ズームに左右されない大きさ</td><td>待ち</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/31">#31</a></td><td>プロパティパネル。カーソル横に勝手に出さない、種類ごとに要る項目だけ</td><td>待ち</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/27">#27</a></td><td>動的入力のそばのヒント（リボンの後）</td><td>待ち</td></tr>
+</table>
+<p>このあとも尽きたら、計測（DIST・LIST）、選択の改善（ホバーで強調・Shift で選択解除・全選択）、配列複写（ARRAY）などを、不満を調べて追加していく予定。</p>
+
+<h2>C2. 朝に実機で確かめてほしいこと</h2>
+<ul>
+<li><b>リボン</b>: アイコンが何のコマンドか分かるか（とくに EXPLODE・STRETCH・REDEFINE）、押してすぐ座標を打てるか、狭い幅での「‹ ›」、HiDPI での見え方</li>
+<li><b>直交（F8）・極（F10）</b>: 吸い付きの強さ（基準点の近くの短い線）、補助線と角度表示、F8 / F10 がデスクトップ環境やメディアキーに取られないか、<b>日本語の変換中に F8 / F10 が変換に使われて ORTHO / POLAR が変わらないこと</b></li>
+<li><b>ステータスバー</b>: 狭い幅で切り替え部品が押せるか、待機中の空欄や OSNAP の後ろの余白が間延びして見えないか</li>
+<li><b>未保存確認</b>: 変更ありで NEW / OPEN / ✕ → Enter で保存（保存先が無ければダイアログ、取り消すとモーダルに戻る）、Esc でキャンセル（✕ から出したときアプリが閉じない）、Tab で枠が動かない、Enter の長押しで勝手に保存しない</li>
+<li><b>保存</b>: コマンドの実行中にリボンの保存・SAVEAS を押しても、元のコマンドが続くこと</li>
+</ul>
+
+<h2>E. 今夜できたもの（スクリーンショット）</h2>
+<div class="grid">
+<figure><img src="img/ribbon_a_home_1280.png" alt=""><figcaption>リボン（ホーム）。タブの直後に UNDO / REDO / SAVE、右端に「レイヤ」グループ。押すとコマンド名を打ったのと同じ動き</figcaption></figure>
+<figure><img src="img/ribbon_icon_sheet.png" alt=""><figcaption>アイコン一覧（全 37 個、SVG）。操作レビュアーが「名前を隠して当てられるか」で判定し、STRETCH・REDEFINE・EXPLODE など 10 個を描き直した</figcaption></figure>
+<figure><img src="img/ribbon_d_home_800.png" alt=""><figcaption>幅が狭いとき: 右端に「›」（押すと送る）、左端に薄い「‹」（送れない側。押しても何も起きない）</figcaption></figure>
+<figure><img src="img/polar_b_snapped_45.png" alt=""><figcaption>極トラッキング（F10）: 45° に吸い付くと補助線と「45°」。吸い付きは画面上 10px 以内かつ角度差 ±3° 以内</figcaption></figure>
+<figure><img src="img/ortho_a_line_horizontal.png" alt=""><figcaption>直交（F8）: 斜めに指しても水平・垂直に拘束。寸法入力の角度欄も 0.00°</figcaption></figure>
+</div>
+
+<h2>D. これまで（10/5 日中）の記録</h2>
+<h2>1. 決まったこと</h2>
+<table>
+<tr><th>項目</th><th>決定</th><th>決めた人</th></tr>
+<tr><td>実装範囲</td><td>案 B: カーソル横のコマンド入力（段階 A）＋寸法入力（段階 B）。PR は段階ごとに 1 本</td><td>ご主人</td></tr>
+<tr><td>何も付けない座標の意味</td><td>絶対座標のまま（<code>@</code> で相対）。AutoCAD の「2 点目以降は相対」は採らない</td><td>ご主人</td></tr>
+<tr><td>入力欄の作り</td><td>本物の入力欄をカーソル横へ動かす（画面下に置いたまま絵だけ写す案は、変換候補が画面下に残るので退避先に回す）</td><td>オーケストレーター</td></tr>
+<tr><td>何もしていないとき</td><td>カーソル横には何も見せない（AutoCAD で「うるさい」と言われる点への対策）</td><td>オーケストレーター</td></tr>
+<tr><td>変換中</td><td>入力欄を動かさず固定する（候補ウィンドウが跳ねないように）</td><td>オーケストレーター（試作で要確認）</td></tr>
+</table>
+<p>詳細と受け入れ基準: <a href="https://github.com/yukimasui/ymcad/issues/20">Issue #20</a></p>
+
+<h2>2. 調査した世間の不満と対策</h2>
+<table>
+<tr><th>AutoCAD Dynamic Input への不満</th><th>ymcad での対策</th></tr>
+<tr><td>2 点目以降に打った座標が勝手に相対扱いになり、線が変な位置に引かれる（絶対には <code>#</code> が要る）</td><td>既定は絶対のまま。長さ・角度は名前つきの欄で入れる（段階 B）</td></tr>
+<tr><td>密集した図面で図形やスナップを覆う</td><td>カーソルの右下にずらし、半透明で出す。画面端では反対側へ回り込む</td></tr>
+<tr><td>案内やエラーを見逃す・履歴が追えない</td><td>エラーはカーソル横にも数秒出し、画面下の履歴にも必ず残す</td></tr>
+<tr><td>慣れた人にはうるさい</td><td>何もしていないときは出さない。F12 とステータスバーでオン/オフ</td></tr>
+<tr><td>Tab で長さ・角度を固定する操作が分かりにくい</td><td>入力中の欄を強調し、固定した欄には錠前マーク（段階 B）</td></tr>
+<tr><td>マルチモニタで表示が張り付く</td><td>位置は毎フレーム計算し、キャンバスの中に収める</td></tr>
+</table>
+
+<h2>3. 着手前の試作</h2>
+<h3>3-1. 画面を自動で撮る仕組み <span class="ok">✅ 成功</span></h3>
+<p><code>egui_kittest</code> をテスト用の依存として <code>cad-app</code> に追加。アプリを画面に出さずに、マウス移動とキー入力を流し込んで PNG に撮れることを確認した（環境変数の指定は不要、撮影 1 回あたり約 2〜5 秒）。<code>cad-core</code> には何も足していない。以後の見た目の確認はこれで行う。</p>
+<div class="grid">
+<figure><img src="img/before_typed_l.png" alt="変更前: L を打った状態"><figcaption>変更前: <code>L</code> を打つと、候補は画面下に出る（カーソルは中央）</figcaption></figure>
+<figure><img src="img/before_line_started.png" alt="変更前: LINE 実行中"><figcaption>変更前: LINE 実行中。プロンプト「線分の始点を指定:」は画面下</figcaption></figure>
+</div>
+
+<h3>3-2. 日本語入力の試作 <span class="warn">⏳ ご主人の確認待ち</span></h3>
+<p>マウスに追従する入力欄で ibus + mozc の変換が壊れないかを見るための小さなアプリ（<code>spikes/dyn-input-ime/</code>）。ビルドと lint は通過済み。変換は自動では試せないので手で確かめてほしい。</p>
+
+<h2>4. 段階 A: カーソル横のコマンド入力 <span class="ok">✅ develop にマージ済み</span></h2>
+<p>実装は Opus。オーケストレーターがテスト・lint・ビルドを手元で流し直し、スクリーンショットを目で確かめた。以下はすべてアプリを画面に出さずに自動で撮ったもの（マウスは画面中央、矢印がカーソル位置）。</p>
+<div class="grid">
+<figure><img src="img/a_dyn_a_idle_nothing_beside_cursor.png" alt=""><figcaption>① 何もしていないとき: カーソル横には何も出ない。ステータスバーに <code>DYN</code></figcaption></figure>
+<figure><img src="img/a_dyn_b_typed_l_suggestions_beside_cursor.png" alt=""><figcaption>② <code>L</code> を打った瞬間: 入力欄と候補がカーソルの右下に出る（変更前は画面下）</figcaption></figure>
+<figure><img src="img/a_dyn_c_line_running_prompt_beside_cursor.png" alt=""><figcaption>③ LINE 実行中: プロンプトがカーソル横に追従する</figcaption></figure>
+<figure><img src="img/a_dyn_d_corner_wraps_up_left.png" alt=""><figcaption>④ 右下の隅: 左上へ回り込み、キャンバスからはみ出さない</figcaption></figure>
+<figure><img src="img/a_dyn_e_off_bottom_cmdline.png" alt=""><figcaption>⑤ F12 でオフ: 従来どおり画面下のコマンドラインに戻る</figcaption></figure>
+<figure><img src="img/a_dyn_f_unknown_command_error.png" alt=""><figcaption>⑥ エラー: カーソル横に赤で数秒出し、画面下の履歴にも残す</figcaption></figure>
+<figure><img src="img/a_dyn_g_composing.png" alt=""><figcaption>⑦ 変換中: <code>[変換中]</code> と下線つきの未確定文字（入力は疑似イベント。実機の IME は未確認）</figcaption></figure>
+</div>
+<h3>受け入れ基準</h3>
+<table>
+<tr><th>基準</th><th>状況</th><th>根拠</th></tr>
+<tr><td>実行中・入力中はカーソル横に出て、何もしていないときは出ない</td><td class="ok">✅</td><td>単体テスト + ①②③</td></tr>
+<tr><td>キー入力は常に入力欄へ流れる（クリック不要）</td><td class="ok">✅</td><td>②（クリックせずに <code>L</code> が入る）</td></tr>
+<tr><td>F12 / ステータスバーでオン/オフ、オフで従来のコマンドライン</td><td class="ok">✅</td><td>⑤。<span class="warn">ステータスバーのクリックは未確認</span></td></tr>
+<tr><td>画面の端で回り込み、はみ出さない</td><td class="ok">✅</td><td>単体テスト 8 件 + ④</td></tr>
+<tr><td>変換中は位置が固定され、変換・確定が正しく入る</td><td class="warn">❓ 未確認</td><td>固定の判定は単体テスト 3 件。実機の ibus + mozc はご主人の確認待ち</td></tr>
+<tr><td>エラーがカーソル横に数秒出て、履歴に残る</td><td class="ok">✅</td><td>単体テスト + ⑥</td></tr>
+<tr><td>座標の解釈は従来どおり</td><td class="ok">✅</td><td>座標の解釈部分は無変更、既存テスト全通過</td></tr>
+</table>
+<p>自動検証: fmt / clippy（警告をエラー扱い）/ テスト 1,054 件（cad-app 286・cad-core 690 ほか）/ リリースビルド すべて通過。うち 8 本はアプリを実際に動かして「Enter の確定が 1 回だけ」「変換開始で入力欄が 1px も動かない」「カーソル横の欄の上をクリックしても点が入る」などを検査する振る舞いテスト。</p>
+<h3>実装で分かった落とし穴（記録済み）</h3>
+<ul>
+<li>egui の入力欄は「見えないように隠す」と日本語入力が始まらなくなる → 透明度 0 で消す方法を採った</li>
+<li>描かなかった入力欄はキー入力を受け取れなくなる → 何もしていないときも透明のまま描き続ける</li>
+</ul>
+
+<h2>5. お願い（戻ったら）</h2>
+<div class="card">
+<p style="margin-top:0"><b>日本語入力の試作を試す</b>（5 分ほど）</p>
+<pre><code>cd ~/projects/ymcad/spikes/dyn-input-ime && cargo run --release</code></pre>
+<ol>
+<li>マウスを動かしながら <code>nihongo</code> と打ち、Space で変換 → Enter で確定</li>
+<li>F2 で「常に追従」と「変換中は固定」を切り替え、変換中にマウスを動かして比べる</li>
+<li>変換候補のウィンドウがカーソル付近の入力欄の近くに出るか、ずれないか</li>
+<li>変換中の Enter で履歴に入らず、確定後の Enter で入るか</li>
+<li>画面の右端・下端で入力欄が左・上に回り込むか</li>
+</ol>
+<p>知りたいのは「どちらのモードなら問題なく使えるか」。両方とも駄目なら、入力欄を画面下に残す退避案へ切り替える。</p>
+</div>
+<div class="card">
+<p style="margin-top:0"><b>本体での確認</b>（<code>develop</code> にマージ済み。こちらが決め手）</p>
+<pre><code>cd ~/projects/ymcad && git switch develop && git pull && cargo run --release</code></pre>
+<p>※ 作業ツリーはこちらが修正ブランチで使っているので、試すときは一声かけてもらうか、別の場所に clone してもらえると安全にゃ。</p>
+<ol>
+<li>何もしていないとき、カーソル横に何も出ないか</li>
+<li><code>L</code> を打つとカーソル横に候補が出て、Enter で LINE が始まるか。マウスに滑らかに追従するか</li>
+<li>日本語を打ったとき、変換中に入力欄が動かず、候補ウィンドウがカーソル付近に出るか</li>
+<li>F12 とステータスバーの <code>DYN</code> クリックで切り替わるか</li>
+<li>カーソル横の「コマンド:」などの文字が読めるか</li>
+<li>LINE 実行中など、カーソル横の入力欄の右にある余白（約 60px。右端で変換を始めたとき入力欄が動かないよう常に確保している）が気にならないか</li>
+<li>レイヤ名やコンポーネント名に Space や日本語を入れられるか（以前は LINE 実行中に Space を打つと LINE が終わっていた）</li>
+</ol>
+</div>
+
+<h2>6. 作業ログ</h2>
+<table>
+<tr><th>時刻</th><th>内容</th></tr>
+<tr><td>—</td><td>PR #19: CLAUDE.md にオーケストレーター運用を追加。Opus レビュー NG → 修正 → OK で <code>develop</code> へマージ</td></tr>
+<tr><td>—</td><td>Dynamic Input の世間の不満を調査し、案 A/B/C を提示 → ご主人が B を選択</td></tr>
+<tr><td>—</td><td>Issue #20 作成、ブランチ <code>feature/dynamic-input-cursor</code> 作成</td></tr>
+<tr><td>—</td><td>試作 2 本（Sonnet に並行で委譲）。画面撮影は成功、日本語入力は確認待ち。両方コミット済み</td></tr>
+<tr><td>—</td><td>段階 A の実装を Opus に委譲 → 4 コミット。オーケストレーターが検証を再実行し、スクリーンショット 7 枚を確認</td></tr>
+<tr><td>—</td><td><code>docs/PROGRESS.md</code> に状況・目視確認項目・落とし穴を記録</td></tr>
+<tr><td>—</td><td>PR #21 を作成。Opus レビュー 1 回目は <span class="ok">OK</span>（非ブロッキング指摘 6 件）</td></tr>
+<tr><td>—</td><td>指摘を反映: 変換開始時に入力欄が動かないよう修正 / 振る舞いテスト 8 本を通常テスト化 / プロンプトの文字を通常サイズに / Esc で閉じた候補が戻ってしまう既存不具合を修正</td></tr>
+<tr><td>—</td><td>Tab 補完でフォーカスが外れる既存不具合を <a href="https://github.com/yukimasui/ymcad/issues/22">Issue #22</a> に切り出し</td></tr>
+<tr><td>—</td><td>再レビュー <span class="ok">OK</span>（わざと壊したコード 8 種がすべてテストで検出されることも確認）→ <code>develop</code> へマージ</td></tr>
+<tr><td>—</td><td>PR #23: Tab 補完でフォーカスが外れる不具合（#22）を修正。調べると<b>パネルの入力欄を編集中に Enter / Space / Esc をコマンドラインが横取りしていた</b>ことも判明し修正（LINE 実行中にレイヤ名で Space → LINE が終わる、など）。右端で変換を始めると入力欄がずれる件も修正。Opus レビュー OK → マージ</td></tr>
+<tr><td>—</td><td>レビューで見つかった「未保存確認の画面で Enter / Esc を拾う疑い」を <a href="https://github.com/yukimasui/ymcad/issues/24">Issue #24</a> に起票（段階 B の後に対応）</td></tr>
+<tr><td>—</td><td>段階 B（寸法入力）を実装。PR #25 Opus レビュー OK → マージ。ご主人の実機確認で出た 2 件（パネル変換で <code>[変換中]</code> / DYN の I ビーム）を修正</td></tr>
+<tr><td>—</td><td>PR #28: 追いかけ修正。錠前は SVG 3 案から「塗りの錠前」に決定し描画命令で再現、OSNAP もクリック切替・指カーソルに。レビュー OK → マージ</td></tr>
+<tr><td>21:08</td><td>夜間の自律作業を開始。Issue #29 / #30 / #31 を起票</td></tr>
+<tr><td>21:40</td><td>#31 プロパティ・#34 選択プレビューの着手がツールの安全確認で拒否（朝の判断待ちへ）</td></tr>
+<tr><td>—</td><td>PR #32 リボン: 1 回目 コード NG（白一色の検査に穴）/ 操作 OK → 2 回目 コード OK / 操作 NG（「›」を押すと下のボタンが押される）→ develop へリベース → 3 回目 コード OK / 操作 NG（端まで送った後の連打で押し抜け）→ 4 回目 両方 OK → <b>マージ</b>（a16a200）</td></tr>
+<tr><td>—</td><td>PR #39（#38 ステータスバー）: 切り替え部品を座標の直後へ・情報表示は項目ごとに省く・欄の幅を固定して跳ねない。2 回目のコードレビューで <b>CI（日本語フォント無し）で新しいテストが落ちていた</b>のが見つかり、CI に <code>fonts-noto-cjk</code> を入れてテストをフォント必須に（fail-closed）。両方 OK・CI 緑 → マージ（33b1d47）</td></tr>
+<tr><td>—</td><td>反省: それまで PR の CI 結果を確かめずにマージ判断していた。共通ルールに「レビュアーは <code>gh pr checks</code> も確かめ、赤なら NG」を追記</td></tr>
+<tr><td>00:10</td><td>PR #33 を develop へ載せ直したら、モーダルのテストが 1 本止まる（ハング）ことが分かった → 原因は「保存する」にフォーカスがありテストの Enter で保存ダイアログ（rfd）が開いていたこと。テストに保存先を与えて解消</td></tr>
+<tr><td>—</td><td>PR #33 再レビュー: コード OK / 操作 <span class="ng">NG</span>（Tab → Enter で「保存しない」が押され図面が捨てられる）→ 修正中</td></tr>
+<tr><td>—</td><td>PR #42（#41）: 保存ボタンも実行中のコマンドを中断しないように・テストの一時フォルダを必ず消す仕組み。コードレビューで「#33 と合わせるとテストが落ちる（ボタンの文言の完全一致）」を発見し 1 語修正 → 両方 OK・CI 緑 → <b>マージ</b>（932550e）</td></tr>
+<tr><td>—</td><td>PR #33 3 回目: コード OK / 操作 <span class="ng">NG</span>（Tab で枠を動かした後の Enter が「保存する」になり、枠と結果が食い違う）→ Tab で枠を動かさない・Enter のリピートを無視 → 4 回目 両方 OK・CI 緑 → <b>マージ</b>（6319f73）</td></tr>
+<tr><td>01:20</td><td>今夜始めていた作業がすべて develop に入った。#37（コマンド実行中のパネル操作）の確認と、PROGRESS のまとめ PR #43 を進行中</td></tr>
+<tr><td>—</td><td>PR #43 マージ。#37 の実測で「パネルでロック・非表示にした図形を FILLET / MOVE / COPY が書き換える」などの不具合が見つかり修正（PR #45）。レビュアーが利用上限（3:20 回復）で停止</td></tr>
+<tr><td>01:40</td><td>ご主人が戻り、判断を受領。新しい作業を止め、引き継ぎ（Issue コメント、#46、PR #47、記憶）を残した</td></tr>
+<tr><td>04:56</td><td>レビュアーを再開（PR #45・#47）</td></tr>
+<tr><td>—</td><td>PR #45: 操作 OK / コード NG（UNDO でロックに戻っても選択が残り MOVE で動く）→ 新しい修正はしない指示のため、直し方を記録して次のセッションへ（#48 も起票）</td></tr>
+<tr><td>—</td><td>PR #47（引き継ぎ）: 指摘を反映 → OK・CI 緑 → <b>マージ</b>（16edfec）。作業を終了</td></tr>
+<tr><td>—</td><td>PR #33（#24）: 実際に起きていた不具合（未保存確認の画面で Enter を押すと直前のコマンドが再実行）を修正。コード・操作レビュー OK。Esc でキャンセル・Enter で保存などの改善を反映中</td></tr>
+<tr><td>—</td><td>PR #35 直交・極トラッキング: 1 回目コード OK・操作 OK → 非ブロッキング 10 件を反映 → 2 回目も両方 OK → <b>develop へマージ</b>（eaa9db5）</td></tr>
+</table>

@@ -17,3 +17,10 @@ Cargo.lock.bak
 *.swp
 *~
 .DS_Store
+
+# 作業ツリー（tools/wt.sh で作る。ビルド先は target/ を共有）
+/.worktrees/
+
+# 作業報告書の生成物と画像（tools/report/README.md）
+/tools/report/img/
+/tools/report/report*.html
