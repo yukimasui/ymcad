@@ -138,20 +138,31 @@ pub fn pick_at(doc: &Document, pos: Point2, tolerance: f64) -> Option<EntityId> 
     best.map(|(id, _)| id)
 }
 
-/// `id` と同じグループに属する要素をすべて返す（自分自身を含む）。
+/// `id` と同じグループに属する要素のうち、**編集できるものだけ**を返す。
 ///
-/// グループに属していなければ自分だけ。
+/// グループに属していなければ `id` 自身だけ。
 ///
-/// AutoCAD の既定と同じく、**グループの一員を選ぶと全体が選ばれる**。
+/// AutoCAD の既定と同じく、**グループの一員を選ぶと全体が選ばれる**。ただし
+/// ロック・非表示のレイヤにある一員は入らない（Issue #51、ADR-0022）。
+/// 編集できるかは [`is_editable`] と同じ判定なので、クリック直後の選択と、
+/// パネル操作・UNDO / REDO 後の [`Selection::retain_editable`] の結果が一致する。
 /// 所属はエンティティ側が持っているので、走査して求める。
+///
+/// 前提: `id` は `pick_at` / `pick_in_rect` が返した、編集できる図形。
+/// 編集できない `id` を渡すと、`id` 自身は結果に含まれない
+/// （グループ所属なら他の編集できる一員だけ、所属なしなら空）。
 #[must_use]
 pub fn expand_to_group(doc: &Document, id: EntityId) -> Vec<EntityId> {
     let Some(group) = doc.entities().get(id).and_then(|e| e.group) else {
-        return vec![id];
+        return if is_editable(doc, id) {
+            vec![id]
+        } else {
+            Vec::new()
+        };
     };
     doc.entities()
         .iter()
-        .filter(|(_, e)| e.group == Some(group))
+        .filter(|(_, e)| e.group == Some(group) && doc.layers().is_entity_editable(e))
         .map(|(other, _)| other)
         .collect()
 }
@@ -324,6 +335,57 @@ mod tests {
             s.retain_editable(&d);
             assert!(s.is_empty(), "ロック {lock}: 外れる");
             assert!(!is_editable(&d, id));
+        }
+    }
+
+    /// グループの一員のうち、ロック・非表示のレイヤにあるものは展開結果に入らない（Issue #51）。
+    #[test]
+    fn expand_to_group_skips_locked_and_hidden_members() {
+        use cad_core::command::{AddLayer, CreateGroup, SetLayerProperties};
+        use cad_core::layer::AciColor;
+        for op in [None, Some(true), Some(false)] {
+            let mut d = Document::new();
+            d.apply(Box::new(AddLayer::new("L1", AciColor::WHITE)))
+                .unwrap();
+            let l1 = d.layers().by_name("L1").unwrap();
+            let ents = vec![
+                Entity::new(line(0.0, 0.0, 1.0, 0.0), LayerId::ZERO),
+                Entity::new(line(0.0, 1.0, 1.0, 1.0), l1),
+            ];
+            d.apply(Box::new(AddEntities::many("TEST", ents))).unwrap();
+            let ids: Vec<_> = d.entities().ids().collect();
+            d.apply(Box::new(CreateGroup::new("GROUP", "g", ids.clone())))
+                .unwrap();
+
+            match op {
+                None => {}
+                Some(lock) => {
+                    let cmd = if lock {
+                        SetLayerProperties::new(l1).locked(true)
+                    } else {
+                        SetLayerProperties::new(l1).visible(false)
+                    };
+                    d.apply(Box::new(cmd)).unwrap();
+                }
+            }
+            let got = expand_to_group(&d, ids[0]);
+            if op.is_none() {
+                assert_eq!(got.len(), 2, "両方編集できれば両方返る");
+                assert!(got.contains(&ids[0]) && got.contains(&ids[1]));
+            } else {
+                assert_eq!(got, vec![ids[0]], "{op:?}: 編集できない一員は含まれない");
+            }
+            // retain_editable と同じ結果になる。
+            let mut s = Selection::new();
+            for id in &ids {
+                s.insert(*id);
+            }
+            s.retain_editable(&d);
+            let mut a = got.clone();
+            a.sort();
+            let mut b = s.to_vec();
+            b.sort();
+            assert_eq!(a, b, "{op:?}: 後から確かめ直した選択と一致する");
         }
     }
 
