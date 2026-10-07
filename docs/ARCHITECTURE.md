@@ -41,7 +41,8 @@ src/
 │   ├── edit_ctx.rs   EditCtx — 変更できる唯一の経路
 │   ├── mod.rs        trait Command, MacroCommand
 │   ├── stack.rs      UndoStack
-│   └── basic.rs      AddEntities, DeleteEntities
+│   ├── basic.rs      AddEntities, DeleteEntities
+│   └── replace_geometry.rs  ReplaceGeometries — 既存の図形の形を ID を保って置き換える（ADR-0040）
 └── document.rs       Document
 ```
 
