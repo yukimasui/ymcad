@@ -215,6 +215,48 @@ mod tests {
         assert_eq!(kinds, sorted);
     }
 
+    /// `SnapKind::all()` に種別が入れ忘れられていないかを検査する（Issue #44）。
+    ///
+    /// ワイルドカード（`_`）を使わない match により、列挙子を足すとこのテストが
+    /// コンパイルエラーになる。**そうなったら、この match と `all()`（と戻り値の型の
+    /// 要素数）の両方に足すこと。** match だけ直して `all()` を忘れると、末尾に足した
+    /// 種別は検出できない（Rust の安定版には列挙子を数える手段が無いため、
+    /// コンパイルエラーを合図にしている）。途中に足した場合は priority がずれて落ちる。
+    #[test]
+    fn all_covers_all_kinds_via_exhaustive_match() {
+        // ワイルドカードを使わない match で全列挙子を網羅する。
+        // 列挙子が増えると、この match が非網羅になってコンパイルエラーになる。
+        fn index_by_exhaustive_match(k: SnapKind) -> usize {
+            match k {
+                SnapKind::Endpoint => 0,
+                SnapKind::Midpoint => 1,
+                SnapKind::Center => 2,
+                SnapKind::Intersection => 3,
+                SnapKind::Perpendicular => 4,
+                SnapKind::Nearest => 5,
+            }
+        }
+
+        let kinds = SnapKind::all();
+        // 各要素が正しいインデックスと priority を持つことを確認。
+        for (i, kind) in kinds.iter().enumerate() {
+            assert_eq!(
+                index_by_exhaustive_match(*kind),
+                i,
+                "{:?} はインデックス {} で all() に含まれるべき",
+                kind,
+                i
+            );
+            assert_eq!(
+                kind.priority() as usize,
+                i,
+                "{:?} の priority は {} であるべき",
+                kind,
+                i
+            );
+        }
+    }
+
     #[test]
     fn label_text_matches_spec() {
         assert_eq!(SnapKind::Endpoint.label(), "端点");
