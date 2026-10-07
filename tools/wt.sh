@@ -23,8 +23,11 @@
 #
 # 使い方:
 #   tools/wt.sh new <ブランチ名> [基点]   基点の既定は origin/develop。最後の行にパスを出す
+#                                          ローカルに無く origin にあるブランチ（clone 直後の PR のブランチなど）は
+#                                          origin/<ブランチ> から作る（基点は無視）。develop から作り直すと PR の中身が入らない
 #   tools/wt.sh review <ブランチ名|PR番号>  origin/<ブランチ> を detach で .worktrees/review-<名前> に出す
-#   tools/wt.sh rm <名前>                  作業ツリーを消す（未コミットの変更があれば git が拒否する）
+#   tools/wt.sh rm <名前>                  作業ツリーを消す（未コミットの変更があれば git が拒否する）。
+#                                          ローカルのブランチは残る（消すなら git branch -d <ブランチ>）
 #   tools/wt.sh list                       git worktree list
 #   tools/wt.sh path <名前>                絶対パスを出す
 set -euo pipefail
@@ -76,6 +79,9 @@ new)
     elif git -C "$root" show-ref --verify --quiet "refs/heads/$branch"; then
         echo "ブランチ $branch は既にあるので、それを出す（基点 $base は無視）" >&2
         git -C "$root" worktree add "$dest" "$branch" >&2
+    elif git -C "$root" show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+        echo "ブランチ $branch は origin にあるので、origin/$branch から作る（基点 $base は無視）" >&2
+        git -C "$root" worktree add --track -b "$branch" "$dest" "origin/$branch" >&2
     else
         git -C "$root" worktree add --no-track -b "$branch" "$dest" "$base" >&2
     fi

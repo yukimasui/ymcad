@@ -9,7 +9,7 @@
   - シェルのカレントディレクトリはコマンドごとに戻ることがあるので、コマンドは毎回 `cd <割り当てのパス> && ...` の形で実行する。**割り当てのパスが見つからないときは、メインの作業ツリーで代わりに作業せず、止まって報告する**
   - cargo のビルド先は全作業ツリーで `<リポジトリ>/target` を共有している（`.worktrees/.cargo/config.toml`）。他のエージェントのビルド中は「Blocking waiting for file lock」で待たされるが正常。`CARGO_TARGET_DIR` を勝手に変えない（依存の再コンパイルで重くなる）。タイムアウトは長め（`timeout 1800` 程度）に取る
 - 禁止: push、ブランチ切り替え、マージ、`git stash`（作業ツリー間で共有のため）、`git add -A`（未追跡の `.claude/` がある）、`git reset --hard`
-- コミットは実装担当だけ。`git -c user.name=Claude -c user.email=noreply@anthropic.com commit ...`。Conventional Commits、日本語、本文は「なぜそうしたか・採らなかった選択肢」。1 コミット = 1 つの意味のある変更。末尾に次の 2 行（モデル名は自分のもの）:
+- コミットは実装担当だけ。`git -c user.name=Claude -c user.email=noreply@anthropic.com commit ...`。Conventional Commits、日本語、本文は「なぜそうしたか・採らなかった選択肢」。1 コミット = 1 つの意味のある変更。末尾に次の 1 行（モデル名は自分のもの）:
   ```
   Co-Authored-By: Claude <モデル名> <noreply@anthropic.com>
   ```

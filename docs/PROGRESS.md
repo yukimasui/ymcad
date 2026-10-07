@@ -657,7 +657,10 @@ Geometry::Instance(_) => {}
 2. 依存: `README.md` のビルド手順（Rust stable、`fonts-noto-cjk`、Linux のウィンドウ系ライブラリ）。
    `python3`（`tools/` の検証・報告書）と `gh`（GitHub CLI、`gh auth login`）
 3. `cargo build --workspace --release` を 1 回流して依存を作る（以後は `target/` を全作業ツリーで共有）
-4. Claude Code のメモリは前のマシンに置いてきた。中身は `CLAUDE.md` に移してあるので、作り直さなくてよい
+4. **グローバルの `~/.claude/CLAUDE.md` を前のマシンから持ってくる**（ユーザーの私的な設定で、リポジトリには入っていない）。
+   本リポジトリの `CLAUDE.md` は、その「委託するときの指示 1〜6」「実装の進め方」「ペルソナ」を前提にしている
+5. Claude Code のメモリは前のマシンに置いてきた。中身は `CLAUDE.md` に移してあるので、作り直さなくてよい
+6. 残りの PR のブランチで作業するときは `tools/wt.sh new <ブランチ>`（origin にあるブランチはそこから作る）
 
 ### 作業のしかた（2026-10-07 に変えたこと）
 - 作業ツリーは **`tools/wt.sh`** でリポジトリ直下の `.worktrees/` に作る（`new <ブランチ>` / `review <PR 番号>` / `rm` / `list`）。
