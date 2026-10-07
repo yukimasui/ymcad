@@ -47,7 +47,7 @@ common=$(git rev-parse --path-format=absolute --git-common-dir)
 root=$(dirname "$common")
 wtdir="$root/.worktrees"
 
-ensure_cargo_config() {
+check_worktrees_dir() {
     mkdir -p "$wtdir"
     if [ -e "$wtdir/.cargo/config.toml" ]; then
         echo "警告: $wtdir/.cargo/config.toml がある。ビルド先の共有は古いバイナリが走るのでやめた。消すこと" >&2
@@ -65,7 +65,7 @@ new)
     [ $# -ge 1 ] && [ $# -le 2 ] || usage
     branch=$1
     base=${2:-origin/develop}
-    ensure_cargo_config
+    check_worktrees_dir
     dest="$wtdir/$(slug "$branch")"
     git -C "$root" fetch origin
     if [ -e "$dest" ]; then
@@ -84,7 +84,7 @@ new)
 review)
     [ $# -eq 1 ] || usage
     arg=$1
-    ensure_cargo_config
+    check_worktrees_dir
     if [[ "$arg" =~ ^[0-9]+$ ]]; then
         branch=$(gh pr view "$arg" --json headRefName -q .headRefName)
     else
@@ -101,7 +101,7 @@ review)
     ;;
 rm)
     [ $# -eq 1 ] || usage
-    ensure_cargo_config
+    check_worktrees_dir
     git -C "$root" worktree remove "$wtdir/$1"
     ;;
 list)
