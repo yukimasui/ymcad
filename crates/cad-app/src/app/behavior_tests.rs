@@ -1177,6 +1177,403 @@ fn status_info_labels_do_not_show_a_text_cursor() {
     }
 }
 
+// ---- コマンドの途中でパネルが図面を変えたとき（Issue #37、ADR-0039） ----------
+//
+// パネルの操作は `Session::apply_external` を通る（レイヤパネル・コンポーネントパネルとも）。
+// ここではその入口へ直接コマンドを渡して、パネルで押したのと同じ状態を作る。
+
+mod panel_during_command {
+    use super::*;
+    use cad_core::command::{AddLayer, DeleteLayer, SetCurrentLayer, SetLayerProperties};
+    use cad_core::layer::AciColor;
+
+    /// パネルからの変更と同じ入口で図面を変える。
+    fn external(h: &mut Harness<'_, CadApp>, cmd: Box<dyn cad_core::Command>) {
+        let app = h.state_mut();
+        app.session.apply_external(cmd, &mut app.doc);
+        settle(h);
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Op {
+        Delete,
+        Lock,
+        Hide,
+    }
+
+    const OPS: [Op; 3] = [Op::Delete, Op::Lock, Op::Hide];
+
+    fn op_cmd(op: Op, id: cad_core::LayerId) -> Box<dyn cad_core::Command> {
+        match op {
+            Op::Delete => Box::new(DeleteLayer::new(id)),
+            Op::Lock => Box::new(SetLayerProperties::new(id).locked(true)),
+            Op::Hide => Box::new(SetLayerProperties::new(id).visible(false)),
+        }
+    }
+
+    type Seg = (egui::Pos2, egui::Pos2);
+
+    /// レイヤ L1 に `on_l1`、レイヤ 0 に `on_0` の線分を描く（この順に図面へ入る）。
+    fn drawing(on_l1: &[Seg], on_0: &[Seg]) -> (Harness<'static, CadApp>, cad_core::LayerId) {
+        let mut h = app();
+        hover(&mut h, P1);
+        external(&mut h, Box::new(AddLayer::new("L1", AciColor::WHITE)));
+        let l1 = h.state().doc.layers().by_name("L1").expect("L1");
+        let zero = h.state().doc.layers().by_name("0").expect("0");
+        for (layer, segs) in [(l1, on_l1), (zero, on_0)] {
+            external(&mut h, Box::new(SetCurrentLayer::new(layer)));
+            for (a, b) in segs {
+                type_text(&mut h, "L");
+                press(&mut h, egui::Key::Enter);
+                click(&mut h, *a);
+                click(&mut h, *b);
+                press(&mut h, egui::Key::Escape);
+            }
+        }
+        (h, l1)
+    }
+
+    /// i 本目の線分上の点（画面座標）。履歴で作図領域が縮むので、毎回モデル座標から取る。
+    fn on_line(h: &Harness<'_, CadApp>, i: usize, t: f64) -> egui::Pos2 {
+        let l = lines(h)[i];
+        h.state().viewport.model_to_screen(l.a.lerp(l.b, t))
+    }
+
+    fn geometry(h: &Harness<'_, CadApp>) -> Vec<(cad_core::EntityId, cad_core::Geometry)> {
+        h.state()
+            .doc
+            .entities()
+            .iter()
+            .map(|(id, e)| (id, e.geom.clone()))
+            .collect()
+    }
+
+    fn errors(h: &Harness<'_, CadApp>) -> Vec<String> {
+        h.state()
+            .session
+            .cmdline
+            .history()
+            .filter(|l| l.kind == LineKind::Error)
+            .map(|l| l.text.clone())
+            .collect()
+    }
+
+    /// 中断の案内が出て、ツールが終わっている。
+    fn assert_stopped(h: &Harness<'_, CadApp>, what: &str) {
+        assert_eq!(h.state().session.active_command(), None, "{what}: 中断する");
+        assert!(
+            errors(h)
+                .iter()
+                .any(|e| e.contains("削除・ロック・非表示になったため中断")),
+            "{what}: 中断の理由を出す: {:?}",
+            errors(h)
+        );
+    }
+
+    /// FILLET で 1 本目を拾った後に、その線分のレイヤが削除・ロック・非表示になったら中断する。
+    /// 修正前: 削除では消えた ID を `Command` に渡して「エンティティが見つかりません」、
+    /// ロック・非表示ではロックされた線分を丸めていた。
+    #[test]
+    fn fillet_stops_when_its_first_line_becomes_uneditable() {
+        for op in OPS {
+            let (mut h, l1) = drawing(
+                &[(egui::pos2(300.0, 300.0), egui::pos2(500.0, 300.0))],
+                &[(egui::pos2(520.0, 280.0), egui::pos2(520.0, 450.0))],
+            );
+            type_text(&mut h, "F");
+            press(&mut h, egui::Key::Enter);
+            let first = on_line(&h, 0, 0.5);
+            click(&mut h, first);
+            let second = on_line(&h, 1, 0.7);
+            external(&mut h, op_cmd(op, l1));
+            let before = geometry(&h);
+            assert_stopped(&h, &format!("{op:?}"));
+
+            click(&mut h, second);
+            assert_eq!(geometry(&h), before, "{op:?}: 図形は変わらない");
+            assert!(
+                !errors(&h).iter().any(|e| e.contains("見つかりません")),
+                "{op:?}: 消えた ID を Command に渡さない: {:?}",
+                errors(&h)
+            );
+        }
+    }
+
+    /// MOVE / COPY / ROTATE の目的点待ちで、選んだ図形のレイヤが削除・ロック・非表示に
+    /// なったら中断し、図形を変えない。修正前は、ロック・非表示の図形をそのまま動かし
+    /// （COPY は複写を作り）、削除では案内なしに終わっていた。
+    #[test]
+    fn transforms_stop_when_all_targets_become_uneditable() {
+        for cmd in ["M", "CO", "RO"] {
+            for op in OPS {
+                let (mut h, l1) = drawing(
+                    &[(egui::pos2(300.0, 300.0), egui::pos2(400.0, 300.0))],
+                    &[(egui::pos2(300.0, 400.0), egui::pos2(400.0, 400.0))],
+                );
+                let target = on_line(&h, 0, 0.5);
+                click(&mut h, target);
+                type_text(&mut h, cmd);
+                press(&mut h, egui::Key::Enter);
+                click(&mut h, egui::pos2(500.0, 250.0)); // 基点
+                external(&mut h, op_cmd(op, l1));
+                let before = geometry(&h);
+                assert_stopped(&h, &format!("{cmd} {op:?}"));
+                assert!(h.state().session.selection.is_empty(), "{cmd} {op:?}");
+
+                click(&mut h, egui::pos2(600.0, 200.0));
+                assert_eq!(geometry(&h), before, "{cmd} {op:?}: 図形は変わらない");
+            }
+        }
+    }
+
+    /// 選んだ図形の一部だけが編集できなくなったら、残りで続けて、外した数を案内する。
+    #[test]
+    fn move_continues_with_the_remaining_targets() {
+        let (mut h, l1) = drawing(
+            &[(egui::pos2(300.0, 300.0), egui::pos2(400.0, 300.0))],
+            &[(egui::pos2(300.0, 400.0), egui::pos2(400.0, 400.0))],
+        );
+        let a = on_line(&h, 0, 0.5);
+        click(&mut h, a);
+        let b = on_line(&h, 1, 0.5);
+        click(&mut h, b);
+        assert_eq!(h.state().session.selection.len(), 2, "前提");
+        type_text(&mut h, "M");
+        press(&mut h, egui::Key::Enter);
+        click(&mut h, egui::pos2(500.0, 250.0));
+        external(&mut h, op_cmd(Op::Lock, l1));
+        assert_eq!(h.state().session.active_command(), Some("MOVE"), "続く");
+        assert!(
+            h.state()
+                .session
+                .cmdline
+                .history()
+                .any(|l| l.text.contains("1 個を対象から外しました")),
+            "外した数を案内する"
+        );
+        let locked_before = lines(&h)[0];
+        let other_before = lines(&h)[1];
+        click(&mut h, egui::pos2(600.0, 200.0));
+        assert_eq!(lines(&h)[0], locked_before, "ロックした線分は動かない");
+        assert_ne!(lines(&h)[1], other_before, "残りは動く");
+    }
+
+    /// UNDO でレイヤがロックに戻ったら、選択に残った図形を外す（MOVE で動かせてしまわない）。
+    /// レイヤのロックもコマンドなので、UNDO / REDO で戻る。修正前は存在確認だけで、残っていた。
+    #[test]
+    fn undo_that_relocks_a_layer_drops_the_entity_from_the_selection() {
+        let (mut h, _l1) = drawing(&[], &[(egui::pos2(300.0, 300.0), egui::pos2(400.0, 300.0))]);
+        let zero = h.state().doc.layers().by_name("0").expect("0");
+        external(&mut h, Box::new(SetLayerProperties::new(zero).locked(true)));
+        external(
+            &mut h,
+            Box::new(SetLayerProperties::new(zero).locked(false)),
+        );
+        let target = on_line(&h, 0, 0.5);
+        click(&mut h, target);
+        assert_eq!(h.state().session.selection.len(), 1, "前提: 選べた");
+
+        type_text(&mut h, "UNDO");
+        press(&mut h, egui::Key::Enter);
+        assert!(
+            h.state().session.selection.is_empty(),
+            "ロックに戻った図形は選択から外れる"
+        );
+
+        type_text(&mut h, "M");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(h.state().session.active_command(), Some("MOVE"));
+        assert!(
+            h.state().session.prompt().contains("オブジェクトを選択"),
+            "選択済みとして目的点待ちに飛ばない: {}",
+            h.state().session.prompt()
+        );
+    }
+
+    /// 拾わないこと: TRIM / EXTEND は図形を覚えずにクリックのたびに拾い直すので、
+    /// 対象のレイヤが削除・ロック・非表示になっても拾えないだけで、図形は変わらず続けられる。
+    #[test]
+    fn trim_and_extend_need_no_extra_handling() {
+        for cmd in ["TR", "EX"] {
+            for op in OPS {
+                let target: Seg = if cmd == "TR" {
+                    (egui::pos2(300.0, 300.0), egui::pos2(600.0, 300.0))
+                } else {
+                    (egui::pos2(300.0, 300.0), egui::pos2(400.0, 300.0))
+                };
+                let (mut h, l1) = drawing(
+                    &[target],
+                    &[(egui::pos2(450.0, 200.0), egui::pos2(450.0, 450.0))],
+                );
+                type_text(&mut h, cmd);
+                press(&mut h, egui::Key::Enter);
+                let pick = on_line(&h, 0, 0.85);
+                external(&mut h, op_cmd(op, l1));
+                assert_eq!(
+                    h.state().session.active_command(),
+                    Some(if cmd == "TR" { "TRIM" } else { "EXTEND" }),
+                    "{cmd} {op:?}: 中断しない"
+                );
+                let before = geometry(&h);
+                click(&mut h, pick);
+                assert_eq!(
+                    geometry(&h),
+                    before,
+                    "{cmd} {op:?}: 拾えず、図形は変わらない"
+                );
+            }
+        }
+    }
+
+    /// 拾わないこと: コンポーネントの編集中にパネルで中身のレイヤを変えても、
+    /// 削除なら ENDCOMP が分かる案内で断り（編集は続く）、ロック・非表示なら書き戻せる。
+    #[test]
+    fn component_edit_needs_no_extra_handling() {
+        use cad_core::command::{DefineComponent, InsertInstance};
+        use cad_core::component::Placement;
+        use cad_core::geom::Line;
+
+        for op in OPS {
+            let mut h = app();
+            hover(&mut h, P1);
+            external(&mut h, Box::new(AddLayer::new("L1", AciColor::WHITE)));
+            let l1 = h.state().doc.layers().by_name("L1").expect("L1");
+            external(
+                &mut h,
+                Box::new(DefineComponent::new(
+                    "COMPONENT",
+                    "窓",
+                    Point2::ORIGIN,
+                    vec![cad_core::Entity::new(
+                        cad_core::Geometry::Line(Line::new(
+                            Point2::ORIGIN,
+                            Point2::new(100.0, 0.0),
+                        )),
+                        l1,
+                    )],
+                )),
+            );
+            let def = h.state().doc.definitions().by_name("窓").expect("定義");
+            external(
+                &mut h,
+                Box::new(InsertInstance::new(
+                    "INSERT",
+                    def,
+                    Placement::at(Point2::new(50.0, 50.0)),
+                    cad_core::LayerId::ZERO,
+                )),
+            );
+            type_text(&mut h, "BE");
+            press(&mut h, egui::Key::Enter);
+            let p = h.state().viewport.model_to_screen(Point2::new(100.0, 50.0));
+            click(&mut h, p);
+            assert!(h.state().session.editing().is_some(), "前提: 編集中");
+
+            external(&mut h, op_cmd(op, l1));
+            type_text(&mut h, "BC");
+            press(&mut h, egui::Key::Enter);
+            match op {
+                Op::Delete => {
+                    assert!(h.state().session.editing().is_some(), "編集は続く");
+                    assert!(
+                        errors(&h)
+                            .iter()
+                            .any(|e| e.contains("中身がすべて消されています")),
+                        "{:?}",
+                        errors(&h)
+                    );
+                }
+                Op::Lock | Op::Hide => {
+                    assert!(h.state().session.editing().is_none(), "{op:?}: 書き戻せる");
+                    assert_eq!(
+                        h.state()
+                            .doc
+                            .definitions()
+                            .get(def)
+                            .map(|d| d.entities.len()),
+                        Some(1),
+                        "{op:?}: 中身は残る"
+                    );
+                }
+            }
+        }
+    }
+
+    /// PSET でインスタンスを指した後に、そのレイヤがロックされたら中断する
+    /// （ロックされたインスタンスのパラメータを変えない）。
+    #[test]
+    fn pset_stops_when_its_instance_becomes_uneditable() {
+        use cad_core::command::{DefineComponent, InsertInstance, SetDefinitionParams};
+        use cad_core::component::{ParamDecl, Placement};
+        use cad_core::geom::Line;
+
+        let mut h = app();
+        hover(&mut h, P1);
+        external(&mut h, Box::new(AddLayer::new("L1", AciColor::WHITE)));
+        let l1 = h.state().doc.layers().by_name("L1").expect("L1");
+        external(
+            &mut h,
+            Box::new(DefineComponent::new(
+                "COMPONENT",
+                "窓",
+                Point2::ORIGIN,
+                vec![cad_core::Entity::new(
+                    cad_core::Geometry::Line(Line::new(Point2::ORIGIN, Point2::new(100.0, 0.0))),
+                    cad_core::LayerId::ZERO,
+                )],
+            )),
+        );
+        let def = h.state().doc.definitions().by_name("窓").expect("定義");
+        external(
+            &mut h,
+            Box::new(SetDefinitionParams::new(
+                "PARAM",
+                def,
+                vec![ParamDecl::number("幅", 900.0)],
+            )),
+        );
+        external(
+            &mut h,
+            Box::new(InsertInstance::new(
+                "INSERT",
+                def,
+                Placement::at(Point2::new(50.0, 50.0)),
+                l1,
+            )),
+        );
+        type_text(&mut h, "PS");
+        press(&mut h, egui::Key::Enter);
+        let p = h.state().viewport.model_to_screen(Point2::new(100.0, 50.0));
+        click(&mut h, p);
+        assert_eq!(h.state().session.active_command(), Some("PSET"), "前提");
+
+        external(&mut h, op_cmd(Op::Lock, l1));
+        assert_stopped(&h, "PSET");
+    }
+
+    /// 図面を入れ替えたら（NEW）、前の図面の ID を覚えている実行中のツールと
+    /// コンポーネントの編集を終える。修正前は FILLET が 1 本目を覚えたまま続いていた。
+    #[test]
+    fn a_new_drawing_ends_the_running_command() {
+        let (mut h, _) = drawing(
+            &[],
+            &[
+                (egui::pos2(300.0, 300.0), egui::pos2(500.0, 300.0)),
+                (egui::pos2(520.0, 280.0), egui::pos2(520.0, 450.0)),
+            ],
+        );
+        type_text(&mut h, "F");
+        press(&mut h, egui::Key::Enter);
+        let first = on_line(&h, 0, 0.5);
+        click(&mut h, first);
+        h.state_mut().doc.mark_saved(None);
+        frame(&mut h, key_with(egui::Key::N, egui::Modifiers::CTRL));
+        settle(&mut h);
+        assert!(h.state().doc.entities().is_empty(), "前提: 新しい図面");
+        assert_eq!(h.state().session.active_command(), None, "FILLET は終わる");
+    }
+}
+
 // ---- 寸法入力（Issue #20 段階 B） -------------------------------------------
 
 use crate::cmdline::dimension::{DimValues, Field};

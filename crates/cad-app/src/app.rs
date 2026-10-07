@@ -764,10 +764,11 @@ impl CadApp {
             // 保存。図面はそのままなので、選択・スナップ・座標の欄は変えない（Issue #41）。
             FileOutcome::Ok(msg) => self.session.cmdline.info(msg),
             FileOutcome::Replaced(msg) => {
-                self.session.cmdline.info(msg);
-                // 図面が入れ替わったので、前の図面に結びついた選択とスナップの状態を捨てる。
+                // 図面が入れ替わったので、前の図面に結びついた状態（実行中のツール・選択・
+                // コンポーネントの編集）とスナップを捨てる（ADR-0039）。
                 // 座標の欄も最小の幅へ戻す（広がったままにしない）。
-                self.session.selection.clear();
+                self.session.document_replaced();
+                self.session.cmdline.info(msg);
                 self.snap.release();
                 self.coord_width = COORD_MIN_WIDTH;
             }
