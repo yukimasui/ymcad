@@ -2235,7 +2235,7 @@ fn ribbon_button_returns_the_keyboard_from_a_panel_field() {
 
 /// リボンが作図領域を取りすぎない。上限は実測 98px（アイコン 44px）に少し余裕を足した値。
 /// 「コンパクト」は小さいほど良いという意味ではなく、作図領域を取りすぎない上限のこと。
-/// 下限は、アイコンを 22px に戻すと（実測 76px 前後）落ちるための検査。
+/// 下限は、アイコンを 22px に戻すと（中身の実測 72px）落ちるための検査。
 #[test]
 fn ribbon_does_not_take_too_much_height() {
     let h = app();
