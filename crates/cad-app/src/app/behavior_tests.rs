@@ -1358,6 +1358,38 @@ mod panel_during_command {
         assert_ne!(lines(&h)[1], other_before, "残りは動く");
     }
 
+    /// UNDO でレイヤがロックに戻ったら、選択に残った図形を外す（MOVE で動かせてしまわない）。
+    /// レイヤのロックもコマンドなので、UNDO / REDO で戻る。修正前は存在確認だけで、残っていた。
+    #[test]
+    fn undo_that_relocks_a_layer_drops_the_entity_from_the_selection() {
+        let (mut h, _l1) = drawing(&[], &[(egui::pos2(300.0, 300.0), egui::pos2(400.0, 300.0))]);
+        let zero = h.state().doc.layers().by_name("0").expect("0");
+        external(&mut h, Box::new(SetLayerProperties::new(zero).locked(true)));
+        external(
+            &mut h,
+            Box::new(SetLayerProperties::new(zero).locked(false)),
+        );
+        let target = on_line(&h, 0, 0.5);
+        click(&mut h, target);
+        assert_eq!(h.state().session.selection.len(), 1, "前提: 選べた");
+
+        type_text(&mut h, "UNDO");
+        press(&mut h, egui::Key::Enter);
+        assert!(
+            h.state().session.selection.is_empty(),
+            "ロックに戻った図形は選択から外れる"
+        );
+
+        type_text(&mut h, "M");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(h.state().session.active_command(), Some("MOVE"));
+        assert!(
+            h.state().session.prompt().contains("オブジェクトを選択"),
+            "選択済みとして目的点待ちに飛ばない: {}",
+            h.state().session.prompt()
+        );
+    }
+
     /// 拾わないこと: TRIM / EXTEND は図形を覚えずにクリックのたびに拾い直すので、
     /// 対象のレイヤが削除・ロック・非表示になっても拾えないだけで、図形は変わらず続けられる。
     #[test]

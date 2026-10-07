@@ -582,7 +582,7 @@ impl Session {
             }),
             Err(e) => self.cmdline.error(format!("{}: {e}", cmd.name())),
         }
-        self.selection.retain_existing(doc);
+        self.selection.retain_editable(doc);
     }
 
     /// ツールへ 1 手渡し、結果を処理する。
