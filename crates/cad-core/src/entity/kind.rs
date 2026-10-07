@@ -93,6 +93,83 @@ impl Geometry {
         }
     }
 
+    /// 図形として成立しているかを確かめる。
+    ///
+    /// 既存の図形を書き換える経路（[`crate::command::ReplaceGeometries`]）が、
+    /// **図面へ入れる前に**不正な形を止めるために使う。`NaN` や無限大が座標へ流れると
+    /// 図形が消えて原因が追えなくなる（設計原則 6）ので、ここで `Err` にする。
+    ///
+    /// 判定はすべて [`crate::geom::tolerance`] を経由する（既存の `is_degenerate` を再利用）。
+    ///
+    /// | 種類 | 不正とみなすもの |
+    /// |---|---|
+    /// | 線分 | 端点が非有限、長さがトレランス内でゼロ |
+    /// | 円 | 中心・半径が非有限、半径が 0 以下またはトレランス内でゼロ |
+    /// | 円弧 | 円の条件に加えて、開始角・終了角が非有限、両者がトレランス内で一致（掃引 0 と 1 周の区別がつかない） |
+    /// | 作図線 | 通過点が非有限、方向が単位ベクトルでない（[`Xline::new`] で作ること） |
+    /// | ポリライン | 頂点が非有限、開いていて頂点 2 未満、閉じていて頂点 3 未満（PLINE の「閉じる」と同じ約束）、全頂点が同一点 |
+    /// | インスタンス | 配置が [`crate::component::Placement::new`] の検証に通らない（基点・回転が非有限、倍率が 0 以下） |
+    ///
+    /// インスタンスの**定義が存在するか**はここでは見ない（定義テーブルを引かない）。
+    /// それは書き換えるコマンドの側で、元の図形と同じ定義かどうかと一緒に確かめる。
+    ///
+    /// # Errors
+    ///
+    /// 上の表に当たる場合 [`crate::error::CadError::DegenerateGeometry`]。
+    pub fn validate(&self) -> crate::error::Result<()> {
+        use crate::error::CadError::DegenerateGeometry;
+        use crate::geom::tolerance::{eq_angle, eq_len};
+
+        match self {
+            Self::Line(l) => {
+                if !is_finite_point(l.a) || !is_finite_point(l.b) {
+                    return Err(DegenerateGeometry("線分の端点が有限ではありません"));
+                }
+                if l.is_degenerate() {
+                    return Err(DegenerateGeometry("線分の長さが 0 です"));
+                }
+            }
+            Self::Circle(c) => validate_center_radius(c.center, c.radius)?,
+            Self::Arc(a) => {
+                validate_center_radius(a.center, a.radius)?;
+                if !a.start_angle.is_finite() || !a.end_angle.is_finite() {
+                    return Err(DegenerateGeometry("円弧の角度が有限ではありません"));
+                }
+                if eq_angle(a.start_angle, a.end_angle) {
+                    return Err(DegenerateGeometry("円弧の開始角と終了角が同じです"));
+                }
+            }
+            Self::Xline(x) => {
+                if !is_finite_point(x.origin) {
+                    return Err(DegenerateGeometry("作図線の通過点が有限ではありません"));
+                }
+                let d = x.direction;
+                if !d.x.is_finite() || !d.y.is_finite() || !eq_len(d.len(), 1.0) {
+                    return Err(DegenerateGeometry(
+                        "作図線の方向が単位ベクトルではありません",
+                    ));
+                }
+            }
+            Self::Polyline(p) => {
+                if !p.vertices.iter().all(|v| is_finite_point(*v)) {
+                    return Err(DegenerateGeometry("ポリラインの頂点が有限ではありません"));
+                }
+                let min_vertices = if p.closed { 3 } else { 2 };
+                if p.vertices.len() < min_vertices {
+                    return Err(DegenerateGeometry("ポリラインの頂点が足りません"));
+                }
+                if p.is_degenerate() {
+                    return Err(DegenerateGeometry("ポリラインの長さが 0 です"));
+                }
+            }
+            Self::Instance(i) => {
+                let pl = i.placement;
+                component::Placement::new(pl.origin, pl.rotation, pl.scale, pl.flipped)?;
+            }
+        }
+        Ok(())
+    }
+
     /// 平行移動した複製を作る。
     #[must_use]
     pub fn translated(&self, v: Vec2) -> Self {
@@ -304,6 +381,26 @@ impl Geometry {
             }
         }
     }
+}
+
+/// 座標が両方とも有限か。
+fn is_finite_point(p: Point2) -> bool {
+    p.x.is_finite() && p.y.is_finite()
+}
+
+/// 円・円弧に共通する「中心と半径」の検証。
+fn validate_center_radius(center: Point2, radius: f64) -> crate::error::Result<()> {
+    use crate::error::CadError::DegenerateGeometry;
+    if !is_finite_point(center) {
+        return Err(DegenerateGeometry("中心が有限ではありません"));
+    }
+    // `is_zero_len` だけでは負の半径を弾けないので `<= 0.0` も見る。NaN は `is_finite` で弾く。
+    if !radius.is_finite() || radius <= 0.0 || crate::geom::tolerance::is_zero_len(radius) {
+        return Err(DegenerateGeometry(
+            "半径は 0 より大きい有限の値でなければなりません",
+        ));
+    }
+    Ok(())
 }
 
 /// 点 `p` を `axis`（非退化前提）に関して反射する。
