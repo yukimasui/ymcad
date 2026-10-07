@@ -3352,3 +3352,80 @@ fn space_does_nothing_and_only_a_click_discards() {
     assert!(lines(&h).is_empty(), "クリックでは捨てる");
     assert!(!path.exists(), "保存はされない");
 }
+
+/// グループの一員をクリックしても、ロックされたレイヤの一員は選択に入らず、MOVE でも動かない
+/// （Issue #51）。修正前は全員が選択に入り、ロックされた一員まで動いていた。
+#[test]
+fn clicking_a_group_member_leaves_its_locked_member_out_of_the_selection() {
+    use cad_core::command::{AddLayer, CreateGroup, SetCurrentLayer, SetLayerProperties};
+    use cad_core::layer::AciColor;
+
+    let mut h = app();
+    hover(&mut h, P1);
+    // レイヤ 0 に 1 本、L1 に 1 本を作図する。
+    let draw = |h: &mut Harness<'_, CadApp>, a: egui::Pos2, b: egui::Pos2| {
+        type_text(h, "L");
+        press(h, egui::Key::Enter);
+        click(h, a);
+        click(h, b);
+        press(h, egui::Key::Escape);
+    };
+    let app_mut = |h: &mut Harness<'_, CadApp>, cmd: Box<dyn cad_core::Command>| {
+        let app = h.state_mut();
+        app.session.apply_external(cmd, &mut app.doc);
+        settle(h);
+    };
+    draw(&mut h, egui::pos2(300.0, 300.0), egui::pos2(500.0, 300.0));
+    app_mut(&mut h, Box::new(AddLayer::new("L1", AciColor::WHITE)));
+    let l1 = h.state().doc.layers().by_name("L1").expect("L1");
+    app_mut(&mut h, Box::new(SetCurrentLayer::new(l1)));
+    draw(&mut h, egui::pos2(300.0, 400.0), egui::pos2(500.0, 400.0));
+    let ids: Vec<_> = h.state().doc.entities().ids().collect();
+    assert_eq!(ids.len(), 2, "前提");
+    let locked_id = ids[1];
+    let free_id = ids[0];
+    app_mut(
+        &mut h,
+        Box::new(CreateGroup::new("GROUP", "g", ids.clone())),
+    );
+    app_mut(&mut h, Box::new(SetLayerProperties::new(l1).locked(true)));
+
+    let on = |h: &Harness<'_, CadApp>, id| {
+        let e = h.state().doc.entities().get(id).unwrap();
+        let cad_core::Geometry::Line(l) = &e.geom else {
+            panic!("線分のはず")
+        };
+        h.state().viewport.model_to_screen(l.a.lerp(l.b, 0.5))
+    };
+    let before = h
+        .state()
+        .doc
+        .entities()
+        .get(locked_id)
+        .unwrap()
+        .geom
+        .clone();
+    let free_before = h.state().doc.entities().get(free_id).unwrap().geom.clone();
+    let p = on(&h, free_id);
+    click(&mut h, p);
+    let sel = &h.state().session.selection;
+    assert!(sel.contains(free_id), "クリックした一員は選ばれる");
+    assert!(!sel.contains(locked_id), "ロックされた一員は選択に入らない");
+
+    type_text(&mut h, "M");
+    press(&mut h, egui::Key::Enter);
+    let base = egui::pos2(600.0, 500.0);
+    click(&mut h, base);
+    click(&mut h, base + egui::vec2(60.0, 40.0));
+    let doc = &h.state().doc;
+    assert_eq!(
+        doc.entities().get(locked_id).unwrap().geom,
+        before,
+        "ロックされた一員は動かない"
+    );
+    assert_ne!(
+        doc.entities().get(free_id).unwrap().geom,
+        free_before,
+        "選ばれた一員は動く"
+    );
+}
