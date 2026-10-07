@@ -234,6 +234,11 @@ impl Session {
             self.cmdline.info(format!(
                 "{name}: 削除・ロック・非表示になった {dropped} 個を対象から外しました"
             ));
+        } else if self.awaiting_selection && dropped > 0 {
+            // 選択待ちは選び直せるので中断しない（全部外れても）。外れたことだけ案内する。
+            self.cmdline.info(format!(
+                "{name}: 削除・ロック・非表示になった {dropped} 個を選択から外しました"
+            ));
         }
     }
 

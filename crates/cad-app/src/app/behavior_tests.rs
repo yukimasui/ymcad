@@ -1358,6 +1358,62 @@ mod panel_during_command {
         assert_ne!(lines(&h)[1], other_before, "残りは動く");
     }
 
+    /// 選択待ち（ERASE の「オブジェクトを選択」）で選択から図形が外れたら、中断せず案内する。
+    /// 全部外れても中断しない（選び直せる）。修正前は案内が出なかった。
+    #[test]
+    fn selection_stage_announces_dropped_entities_without_stopping() {
+        for (both, dropped) in [(false, 1_usize), (true, 2)] {
+            let (mut h, l1) = drawing(
+                &[(egui::pos2(300.0, 300.0), egui::pos2(400.0, 300.0))],
+                &[(egui::pos2(300.0, 400.0), egui::pos2(400.0, 400.0))],
+            );
+            type_text(&mut h, "E");
+            press(&mut h, egui::Key::Enter);
+            let a = on_line(&h, 0, 0.5);
+            click(&mut h, a);
+            let b = on_line(&h, 1, 0.5);
+            click(&mut h, b);
+            assert_eq!(h.state().session.selection.len(), 2, "前提");
+            assert_eq!(h.state().session.active_command(), Some("ERASE"), "前提");
+            if both {
+                let zero = h.state().doc.layers().by_name("0").expect("0");
+                external(&mut h, Box::new(SetLayerProperties::new(zero).locked(true)));
+            }
+            external(&mut h, op_cmd(Op::Lock, l1));
+            assert_eq!(h.state().session.active_command(), Some("ERASE"), "続く");
+            assert_eq!(h.state().session.selection.len(), 2 - dropped);
+            // ロックは 1 レイヤずつなので、外れるたびに「1 個」の案内が出る。
+            let msg = "ERASE: 削除・ロック・非表示になった 1 個を選択から外しました";
+            let n = h
+                .state()
+                .session
+                .cmdline
+                .history()
+                .filter(|l| l.text == msg)
+                .count();
+            assert_eq!(n, dropped, "案内が出る");
+        }
+    }
+
+    /// 何も実行していないときに選択から外れても案内は出さない。
+    #[test]
+    fn no_notice_when_idle_selection_drops() {
+        let (mut h, l1) = drawing(&[(egui::pos2(300.0, 300.0), egui::pos2(400.0, 300.0))], &[]);
+        let a = on_line(&h, 0, 0.5);
+        click(&mut h, a);
+        assert_eq!(h.state().session.selection.len(), 1, "前提");
+        external(&mut h, op_cmd(Op::Lock, l1));
+        assert!(h.state().session.selection.is_empty());
+        assert!(
+            !h.state()
+                .session
+                .cmdline
+                .history()
+                .any(|l| l.text.contains("から外しました")),
+            "案内なし"
+        );
+    }
+
     /// UNDO でレイヤがロックに戻ったら、選択に残った図形を外す（MOVE で動かせてしまわない）。
     /// レイヤのロックもコマンドなので、UNDO / REDO で戻る。修正前は存在確認だけで、残っていた。
     #[test]
