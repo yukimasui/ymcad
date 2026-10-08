@@ -813,7 +813,8 @@ fn bound_items_show_their_expression_and_the_rest_stay_editable() {
     hover(&mut h, P1);
     assert!(has(&h, BOUND_NOTE), "表示だけの項目がある旨の案内");
     assert!(!editable(&h, "終点 X"), "束縛された項目は表示だけ");
-    assert!(has(&h, "← 式「幅」"), "横に式が出る");
+    // 案内は「← 式」と式（入り切らなければ省略される側）の 2 つのラベルに分かれている。
+    assert!(has(&h, "← 式") && has(&h, "「幅」"), "横に式が出る");
     for label in ["始点 X", "始点 Y", "終点 Y"] {
         assert!(editable(&h, label), "{label}: 束縛の無い項目は編集できる");
     }
@@ -823,12 +824,12 @@ fn bound_items_show_their_expression_and_the_rest_stay_editable() {
             "{label}: 端点が束縛されているので表示だけ"
         );
     }
-    assert!(has(&h, "← 端点の式から"), "長さ・角度には元が式である旨");
+    assert!(has(&h, "端点の式から"), "長さ・角度には元が式である旨");
 
     // 束縛を持たない中身は、すべて編集できる。
     select(&mut h, &[free]);
     assert!(!has(&h, BOUND_NOTE));
-    assert!(!has(&h, "← 式「幅」"));
+    assert!(!has(&h, "← 式") && !has(&h, "「幅」"));
     for label in ["始点 X", "始点 Y", "終点 X", "終点 Y", "長さ", "角度"] {
         assert!(editable(&h, label), "{label}");
     }
@@ -882,7 +883,7 @@ fn a_rotated_component_edit_locks_the_item_on_the_turned_axis() {
     hover(&mut h, P1);
     assert!(!editable(&h, "終点 Y"), "定義の終点 X は図面の Y");
     assert!(editable(&h, "終点 X"), "定義の終点 Y（束縛なし）は図面の X");
-    assert!(has(&h, "← 式「幅」"));
+    assert!(has(&h, "← 式") && has(&h, "「幅」"));
 }
 
 /// 編集中でなければ従来どおり。束縛を持つ定義のインスタンスも、ただの図形も、すべて編集できる。

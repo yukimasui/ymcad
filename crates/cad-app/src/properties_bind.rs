@@ -252,7 +252,9 @@ impl Lock {
         }
     }
 
-    /// 値の横に出す短い案内（`← 式「幅」`、`← 端点の式から`）。[`Lock::badge_parts`] をつないだもの。
+    /// 値の横に出す短い案内（`← 式「幅」`、`← 端点の式から`）。[`Lock::badge_parts`] をつないだもの
+    /// （パネルは 2 つに分けて出すので、テストで全体を見るときだけ使う）。
+    #[cfg(test)]
     #[must_use]
     pub fn badge(&self) -> String {
         let (head, rest) = self.badge_parts();
