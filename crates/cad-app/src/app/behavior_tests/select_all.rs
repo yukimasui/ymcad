@@ -13,6 +13,7 @@ use cad_core::{Entity, EntityId, Geometry, LayerId};
 use egui_kittest::kittest::Queryable as _;
 use egui_kittest::Harness;
 
+use super::rename::{double_click_layer_name, name_of, with_layer};
 use super::{
     app, app_with_dynamic, focus_layer_name_field, frame, hover, input_lines, key_with,
     layer_name_field_value, preedit, press, press_ribbon, settle, type_text, CadApp, LineKind, P1,
@@ -276,6 +277,43 @@ fn ctrl_a_with_shift_or_alt_does_not_select_everything() {
 
         press_ctrl_a(&mut h);
         assert_eq!(selected(&h), free, "素の Ctrl+A なら選ぶ（動的入力 {on}）");
+    }
+}
+
+/// 改名欄で Ctrl+A を押すと、欄の文字の全選択になり、図形は選ばれない（PR #71・Issue #68 の穴が
+/// 戻ったら、全選択の側でも気づけるように。Issue #74 の 6）。続けて打った文字で名前が置き換わる。
+#[test]
+fn ctrl_a_in_the_rename_field_selects_its_text_not_the_drawing() {
+    for on in [false, true] {
+        let (mut h, id) = with_layer(on);
+        add_lines(&mut h, LayerId::ZERO, 2);
+        double_click_layer_name(&mut h, "L1");
+        assert_eq!(
+            h.state().layer_panel.renaming(),
+            Some(id),
+            "前提: 改名中（動的入力 {on}）"
+        );
+        type_text(&mut h, "AB");
+
+        press_ctrl_a(&mut h);
+        assert!(
+            h.state().session.selection.is_empty(),
+            "図形は選ばない（動的入力 {on}）"
+        );
+        assert_eq!(
+            h.state().layer_panel.renaming(),
+            Some(id),
+            "改名は続く（動的入力 {on}）"
+        );
+        type_text(&mut h, "Z");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(
+            name_of(&h, id),
+            "Z",
+            "欄の文字が全選択されていて置き換わる（動的入力 {on}）"
+        );
+        assert!(h.state().session.selection.is_empty(), "動的入力 {on}");
+        assert_eq!(h.state().session.cmdline.input(), "", "動的入力 {on}");
     }
 }
 
