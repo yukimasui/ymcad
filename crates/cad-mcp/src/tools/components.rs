@@ -1939,4 +1939,32 @@ mod tests {
         );
         assert!(msg.contains("ロック中"), "{msg}");
     }
+
+    // ---- render ---------------------------------------------------------------------
+
+    /// 中身の多いインスタンスを多数置くと、SVG は返す大きさの上限で isError（範囲を絞るよう促す。図面は変わらない）。
+    #[test]
+    fn render_of_many_dense_instances_is_bounded() {
+        let dir = TempDir::new("comp-render-bound");
+        let mut s = server(&dir);
+        let lines: Vec<Value> = (0..1000_u32)
+            .map(|i| json!({"type": "line", "start": [0, i % 50], "end": [100, (i * 7) % 50]}))
+            .collect();
+        ok(
+            &mut s,
+            "define_component",
+            json!({"name": "密", "origin": [0, 0], "entities": lines}),
+        );
+        for _ in 0..8 {
+            ok(
+                &mut s,
+                "insert_component",
+                json!({"component": "密", "origin": [0, 0]}),
+            );
+        }
+        let before = write_to_bytes(&s.doc);
+        let msg = err(&mut s, "render", json!({"format": "svg"}));
+        assert!(msg.contains("上限") && msg.contains("region"), "{msg}");
+        assert_eq!(write_to_bytes(&s.doc), before);
+    }
 }
