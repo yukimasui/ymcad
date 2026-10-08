@@ -15,6 +15,7 @@ use egui_kittest::Harness;
 use super::CadApp;
 use crate::cmdline::LineKind;
 
+mod hover;
 mod properties;
 
 /// 画面の大きさ [px]。

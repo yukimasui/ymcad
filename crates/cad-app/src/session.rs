@@ -6,12 +6,12 @@
 
 use cad_core::command::ExitDefinitionEdit;
 use cad_core::geom::{Aabb, Point2};
-use cad_core::{Document, Geometry};
+use cad_core::{Document, EntityId, Geometry};
 
 use crate::cmdline::{coord, dimension, CommandLine, LineKind, Submission};
 use crate::editing::EditSession;
 use crate::input::ViewAction;
-use crate::selection::{self, Selection, WindowMode};
+use crate::selection::{self, Picker, Selection, WindowMode};
 use crate::tools::{self, Immediate, StepInput, StepOutcome, Tool, ToolCtx, ToolSettings};
 
 /// UI に対する要求。図面の変更ではないのでコマンドにはしない。
@@ -25,6 +25,53 @@ pub enum UiAction {
     TogglePropertiesPanel,
     /// ファイル操作。
     File(crate::file_ops::FileAction),
+}
+
+/// キャンバスのクリックが何を意味するかの段階。
+///
+/// [`Session::click_target`] の分岐そのもの。ホバーの結果を使い回すかの判断
+/// （`hover::Hover`）にも使う。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickStage {
+    /// 待機中、または選択待ち（「オブジェクトを選択」）。拾った図形を選択に足す・外す。
+    Select,
+    /// 図形を指す段階（TRIM / EXTEND / FILLET / CHAMFER など。`Tool::wants_entity`）。
+    Entity,
+    /// 点や値の入力待ち。クリックは点としてツールへ渡る。
+    Point,
+}
+
+/// キャンバスをクリックしたら何が起きるか（[`Session::click_target`]）。
+///
+/// クリック（[`Session::handle_click`]）もホバーの強調もこれを通すので、
+/// **強調される図形とクリックで拾われる図形は構造上一致する**（ADR-0042）。
+#[derive(Clone, Debug, PartialEq)]
+pub enum ClickTarget {
+    /// 点として実行中のツールへ渡る（点の入力待ち、または図形を指す段階で何も拾えなかった）。
+    Point(Point2),
+    /// 図形を指す段階で拾えた図形。グループには広げない（指したのはその 1 つ）。
+    Entity {
+        /// 拾った図形。
+        id: EntityId,
+        /// クリック位置（TRIM はどちら側を切るか、FILLET はどちら側を残すかに使う）。
+        at: Point2,
+    },
+    /// 待機中・選択待ちで拾えた図形。グループの一員なら、編集できる一員すべて（Issue #51 案 A）。
+    Select(Vec<EntityId>),
+    /// 待機中・選択待ちで何も拾えなかった。
+    Nothing,
+}
+
+impl ClickTarget {
+    /// ホバーで強調する図形。点として渡る・何も拾えないときは空。
+    #[must_use]
+    pub fn highlighted(&self) -> &[EntityId] {
+        match self {
+            Self::Entity { id, .. } => std::slice::from_ref(id),
+            Self::Select(ids) => ids,
+            Self::Point(_) | Self::Nothing => &[],
+        }
+    }
 }
 
 /// 実行中コマンドが無いときのプロンプト。
@@ -677,43 +724,72 @@ impl Session {
 
     // ---- キャンバスからの入力 ---------------------------------------------
 
+    /// いまキャンバスをクリックしたら何として扱われるか。
+    #[must_use]
+    pub fn pick_stage(&self) -> PickStage {
+        if !self.wants_point() {
+            PickStage::Select
+        } else if self.wants_entity() {
+            PickStage::Entity
+        } else {
+            PickStage::Point
+        }
+    }
+
+    /// `model` をクリックしたら何が起きるか。図面も状態も変えない。
+    ///
+    /// [`Self::handle_click`] とホバーの強調（`hover::Hover`）の両方がここを通る。
+    /// `pick_tolerance` はモデル空間での拾い半径。
+    pub fn click_target(
+        &self,
+        model: Point2,
+        pick_tolerance: f64,
+        doc: &Document,
+        picker: &mut dyn Picker,
+    ) -> ClickTarget {
+        match self.pick_stage() {
+            // 拾えなかったクリックは点のまま渡し、ツール側で案内させる（ADR-0024）。
+            PickStage::Entity => match picker.pick(doc, model, pick_tolerance) {
+                Some(id) => ClickTarget::Entity { id, at: model },
+                None => ClickTarget::Point(model),
+            },
+            PickStage::Point => ClickTarget::Point(model),
+            // グループの一員を選んだらグループ全体を対象にする（AutoCAD の既定）。
+            // ロック・非表示のレイヤにある一員は入らない（Issue #51）。
+            PickStage::Select => match picker.pick(doc, model, pick_tolerance) {
+                Some(id) => ClickTarget::Select(selection::expand_to_group(doc, id)),
+                None => ClickTarget::Nothing,
+            },
+        }
+    }
+
     /// キャンバスがクリックされた。
     ///
-    /// `pick_tolerance` はモデル空間での拾い半径。
+    /// `pick_tolerance` はモデル空間での拾い半径。何が起きるかは [`Self::click_target`] が決める。
     pub fn handle_click(
         &mut self,
         model: Point2,
         shift: bool,
         pick_tolerance: f64,
         doc: &mut Document,
+        picker: &mut dyn Picker,
     ) {
-        if self.wants_point() {
-            // 図形を要求しているツールには、拾えたら図形として渡す。
-            // 拾えなかったクリックは点のまま渡し、ツール側で案内させる。
-            if self.wants_entity() {
-                if let Some(id) = selection::pick_at(doc, model, pick_tolerance) {
-                    self.feed_tool(StepInput::Entity { id, at: model }, doc);
-                    return;
+        match self.click_target(model, pick_tolerance, doc, picker) {
+            ClickTarget::Point(p) => self.feed_tool(StepInput::Point(p), doc),
+            ClickTarget::Entity { id, at } => self.feed_tool(StepInput::Entity { id, at }, doc),
+            ClickTarget::Nothing => {
+                if !shift && !self.awaiting_selection {
+                    self.selection.clear();
                 }
             }
-            self.feed_tool(StepInput::Point(model), doc);
-            return;
-        }
-
-        // 選択待ち、あるいはコマンド無しの状態ではピック選択。
-        let Some(id) = selection::pick_at(doc, model, pick_tolerance) else {
-            if !shift && !self.awaiting_selection {
-                self.selection.clear();
-            }
-            return;
-        };
-
-        // グループの一員を選んだらグループ全体を対象にする（AutoCAD の既定）。
-        for member in selection::expand_to_group(doc, id) {
-            if shift {
-                self.selection.remove(member);
-            } else {
-                self.selection.insert(member);
+            ClickTarget::Select(members) => {
+                for member in members {
+                    if shift {
+                        self.selection.remove(member);
+                    } else {
+                        self.selection.insert(member);
+                    }
+                }
             }
         }
     }
@@ -1348,7 +1424,13 @@ mod flow_tests {
         let id = doc.entities().ids().next().unwrap();
 
         // クリック相当。範囲は記録されない。
-        s.handle_click(Point2::new(50.0, 0.0), false, 1.0, &mut doc);
+        s.handle_click(
+            Point2::new(50.0, 0.0),
+            false,
+            1.0,
+            &mut doc,
+            &mut selection::ScanAll,
+        );
         assert_eq!(s.selection.len(), 1);
         assert!(s.crossing_rects.is_empty());
 
@@ -1743,7 +1825,13 @@ mod flow_tests {
 
         s.selection.clear();
         // 1 本目の線の上をクリックする。
-        s.handle_click(Point2::new(5.0, 0.0), false, 1.0, &mut doc);
+        s.handle_click(
+            Point2::new(5.0, 0.0),
+            false,
+            1.0,
+            &mut doc,
+            &mut selection::ScanAll,
+        );
 
         assert_eq!(s.selection.len(), 2, "グループ全体が選ばれるはず");
         for id in &ids {
@@ -1856,7 +1944,7 @@ mod flow_tests {
 
     /// キャンバスのクリックを模す。
     fn click(s: &mut Session, doc: &mut Document, x: f64, y: f64) {
-        s.handle_click(Point2::new(x, y), false, PICK, doc);
+        s.handle_click(Point2::new(x, y), false, PICK, doc, &mut selection::ScanAll);
     }
 
     /// 2 点を結ぶ線分を 1 本引く。

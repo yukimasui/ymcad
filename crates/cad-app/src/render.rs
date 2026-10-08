@@ -13,7 +13,7 @@ use cad_core::component::{self, DefinitionTable};
 use cad_core::geom::{Line, Point2};
 use cad_core::layer::LineType;
 use cad_core::snap::{SnapCandidate, SnapKind};
-use cad_core::{Document, Geometry};
+use cad_core::{Document, EntityId, Geometry};
 
 /// 細グリッドの目標間隔 [px]。この値に最も近い 1/2/5 系列の刻みを選ぶ。
 const MINOR_GRID_TARGET_PX: f32 = 12.0;
@@ -293,6 +293,62 @@ pub fn draw_entities(
                 }
             }
             geom => draw_geometry(painter, vp, doc.definitions(), geom, stroke, linetype),
+        }
+    }
+}
+
+/// ホバーの強調の線幅 [px]。選択中の線（[`SELECTED_STROKE_PX`]）より太くして、縁取りに見せる。
+const HOVER_STROKE_PX: f32 = 7.0;
+/// ホバーの強調の色。図形の下に敷くので、線そのものの色（選択色・レイヤ色）は変わらない。
+///
+/// 選択色（水色）・ラバーバンド（琥珀）・スナップ（黄緑）のどれとも違う紫系にする。
+/// 「乗せている（まだ選んでいない）」と「選んである」を色で見分けられるように。
+fn hover_color() -> egui::Color32 {
+    egui::Color32::from_rgba_unmultiplied(0xe0, 0x40, 0xfb, 0x90)
+}
+
+/// クリックしたら拾われる図形（ホバーの強調、Issue #34）に、半透明の太い縁取りを敷く。
+///
+/// [`draw_entities`] の**前**に呼ぶ（縁取りを線の下に敷き、線の色を変えない）。
+/// `ids` は `hover::Hover::highlighted` で、非表示レイヤの図形は含まない（拾われないので）。インスタンスは展開結果を描く。
+/// 線種は問わず実線で縁取る（破線の隙間で強調が途切れると、どれを指しているか読みにくい）。
+pub fn draw_hover(
+    painter: &egui::Painter,
+    doc: &Document,
+    vp: &Viewport,
+    ids: &[EntityId],
+    resolved: &mut ResolvedInstances,
+) {
+    if ids.is_empty() {
+        return;
+    }
+    resolved.refresh(doc);
+    let stroke = egui::Stroke::new(HOVER_STROKE_PX, hover_color());
+    for &id in ids {
+        let Some(entity) = doc.entities().get(id) else {
+            continue;
+        };
+        match &entity.geom {
+            Geometry::Instance(_) => {
+                for g in resolved.get(id).unwrap_or(&[]) {
+                    draw_geometry(
+                        painter,
+                        vp,
+                        doc.definitions(),
+                        g,
+                        stroke,
+                        LineType::Continuous,
+                    );
+                }
+            }
+            geom => draw_geometry(
+                painter,
+                vp,
+                doc.definitions(),
+                geom,
+                stroke,
+                LineType::Continuous,
+            ),
         }
     }
 }

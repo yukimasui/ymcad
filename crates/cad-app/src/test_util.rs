@@ -37,6 +37,36 @@ impl Drop for TempDir {
     }
 }
 
+/// 決定的な疑似乱数生成器（32bit LCG、Numerical Recipes の定数）。
+///
+/// `cad_core::snap::test_util::Lcg` と同じもの。あちらは `cad-core` のテスト専用で
+/// 外から使えず、`rand` にも依存できないので写した。
+pub struct Lcg(u32);
+
+impl Lcg {
+    /// シード値から作る。`0` だと停留するため奇数に補正する。
+    pub fn new(seed: u32) -> Self {
+        Self(seed | 1)
+    }
+
+    /// 次の疑似乱数値 `[0, 2^32)`。
+    pub fn next_u32(&mut self) -> u32 {
+        self.0 = self.0.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        self.0
+    }
+
+    /// `[lo, hi)` の `f64`。`u32 -> f64` は無損失なので `cast_precision_loss` に触れない。
+    pub fn next_f64(&mut self, lo: f64, hi: f64) -> f64 {
+        let unit = f64::from(self.next_u32()) / f64::from(u32::MAX);
+        lo + unit * (hi - lo)
+    }
+
+    /// `[0, n)` の整数。
+    pub fn below(&mut self, n: u32) -> u32 {
+        self.next_u32() % n
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
