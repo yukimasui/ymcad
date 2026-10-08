@@ -25,6 +25,9 @@ path = "src/main.rs"
 [dependencies]
 cad-core.workspace = true
 serde_json = "1"
+# PNG にするため（render）。default-features なし = 文字・システムフォント・画像の読み込みを入れない。
+# 描くのは自前の SVG だけで、文字は描かない（ADR-0046 決定 7）。
+resvg = { version = "0.45", default-features = false }
 
 [lints.rust]
 missing_debug_implementations = "warn"

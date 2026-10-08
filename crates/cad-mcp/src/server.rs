@@ -26,6 +26,9 @@ pub struct Server {
     pub(crate) protocol_version: Option<&'static str>,
     /// `notifications/initialized` を受け取ったか（記録だけ。動作は変えない）。
     pub(crate) initialized_notified: bool,
+    /// 道具が結果の `content` に足す追加のブロック（画像・SVG の本文など）。
+    /// 道具を動かす前に空にし、成功したときだけ結果へ移す（`tools::run_tool`）。
+    pub(crate) attachments: Vec<Value>,
 }
 
 /// 図面を読み書きしたファイル。
@@ -79,6 +82,7 @@ impl Server {
             file: None,
             protocol_version: None,
             initialized_notified: false,
+            attachments: Vec::new(),
         })
     }
 
