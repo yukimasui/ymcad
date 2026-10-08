@@ -944,20 +944,44 @@ mod tests {
         assert!(!inked(&pm, 20, 50, DARK_BG) && !inked(&pm, 80, 50, DARK_BG));
     }
 
-    /// 巨大な円弧でも、円弧の範囲の外は描かない。
+    /// 巨大な円弧でも、円弧の範囲の外は描かない（見える窓と円弧の重なりだけを書く）。
     #[test]
     fn huge_arc_respects_its_own_range() {
         let r = 1.0e7;
-        // 中心 (5 - 1e7, 5)。0° 付近が (5, 5) を通る。0°..90° の弧は通る、180°..270° の弧は通らない。
+        // 中心 (5 - 1e7, 5)。0° 付近で (5, 5) を通り、1e-3° は約 174 単位（画像の外まで）。
         let center = Point2::new(5.0 - r, 5.0);
-        let pass = Geometry::Arc(Arc::new(
-            center,
-            r,
-            (-0.001_f64).to_radians(),
-            0.001_f64.to_radians(),
-        ));
-        let (svg, stats) = svg_of(&doc_with(vec![on_zero(pass)]), &fit10(), Background::Dark);
-        assert_eq!(stats.drawn, 1, "{svg}");
+        let huge = |start_deg: f64, end_deg: f64| {
+            let g = Geometry::Arc(Arc::new(
+                center,
+                r,
+                start_deg.to_radians(),
+                end_deg.to_radians(),
+            ));
+            let (svg, stats) = svg_of(&doc_with(vec![on_zero(g)]), &fit10(), Background::Dark);
+            (raster::svg_to_pixmap(&svg), stats)
+        };
+        // 画像の上半分（モデルの y が 5 より上）は px y = 10..40、下半分は 60..90。
+        let upper = |pm: &resvg::tiny_skia::Pixmap| (1..5).all(|k| inked(pm, 50, 10 * k, DARK_BG));
+        let lower = |pm: &resvg::tiny_skia::Pixmap| (6..10).all(|k| inked(pm, 50, 10 * k, DARK_BG));
+        let none = |pm: &resvg::tiny_skia::Pixmap, rows: std::ops::Range<i64>| {
+            rows.map(|k| 10 * k).all(|y| !inked(pm, 50, y, DARK_BG))
+        };
+
+        // (5, 5) を通って上下に伸びる弧。
+        let (pm, stats) = huge(-0.001, 0.001);
+        assert_eq!(stats.drawn, 1);
+        assert!(upper(&pm) && lower(&pm));
+        // 0 をまたぐ書き方（359.999° → 0.001°）でも同じ。
+        let (pm, _) = huge(359.999, 0.001);
+        assert!(upper(&pm) && lower(&pm));
+        // (5, 5) で終わる弧: 上半分には描かない。
+        let (pm, _) = huge(-0.001, 0.0);
+        assert!(lower(&pm) && none(&pm, 1..5), "終点を越えて描いている");
+        // (5, 5) から始まる弧: 下半分には描かない。
+        let (pm, _) = huge(0.0, 0.001);
+        assert!(upper(&pm) && none(&pm, 6..10), "始点より前に描いている");
+
+        // 範囲の外の弧は、書かない。
         let away = Geometry::Arc(Arc::new(
             center,
             r,
