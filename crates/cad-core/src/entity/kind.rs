@@ -105,10 +105,13 @@ impl Geometry {
     /// |---|---|
     /// | 線分 | 端点が非有限、長さがトレランス内でゼロ |
     /// | 円 | 中心・半径が非有限、半径が 0 以下またはトレランス内でゼロ |
-    /// | 円弧 | 円の条件に加えて、開始角・終了角が非有限、両者がトレランス内で一致（掃引 0 と 1 周の区別がつかない） |
+    /// | 円弧 | 円の条件に加えて、開始角・終了角が非有限 |
     /// | 作図線 | 通過点が非有限、方向が単位ベクトルでない（[`Xline::new`] で作ること） |
     /// | ポリライン | 頂点が非有限、開いていて頂点 2 未満、閉じていて頂点 3 未満（PLINE の「閉じる」と同じ約束）、全頂点が同一点 |
     /// | インスタンス | 配置が [`crate::component::Placement::new`] の検証に通らない（基点・回転が非有限、倍率が 0 以下） |
+    ///
+    /// 開始角と終了角がトレランス内で一致する円弧は**拒まない**。[`Arc::sweep`] の約束どおり
+    /// 1 周の円弧として扱う（DXF から読んだ 0°→360° の円弧がこの形になる。ADR-0040）。
     ///
     /// インスタンスの**定義が存在するか**はここでは見ない（定義テーブルを引かない）。
     /// それは書き換えるコマンドの側で、元の図形と同じ定義かどうかと一緒に確かめる。
@@ -118,7 +121,7 @@ impl Geometry {
     /// 上の表に当たる場合 [`crate::error::CadError::DegenerateGeometry`]。
     pub fn validate(&self) -> crate::error::Result<()> {
         use crate::error::CadError::DegenerateGeometry;
-        use crate::geom::tolerance::{eq_angle, eq_len};
+        use crate::geom::tolerance::eq_len;
 
         match self {
             Self::Line(l) => {
@@ -134,9 +137,6 @@ impl Geometry {
                 validate_center_radius(a.center, a.radius)?;
                 if !a.start_angle.is_finite() || !a.end_angle.is_finite() {
                     return Err(DegenerateGeometry("円弧の角度が有限ではありません"));
-                }
-                if eq_angle(a.start_angle, a.end_angle) {
-                    return Err(DegenerateGeometry("円弧の開始角と終了角が同じです"));
                 }
             }
             Self::Xline(x) => {

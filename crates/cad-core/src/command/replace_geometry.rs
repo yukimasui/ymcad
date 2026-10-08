@@ -162,12 +162,12 @@ mod tests {
     };
     use crate::component::{DefinitionId, Placement};
     use crate::entity::Entity;
-    use crate::geom::tolerance::EPS_LEN;
+    use crate::geom::tolerance::{eq_angle, EPS_LEN};
     use crate::geom::{Arc, Circle, Line, Point2, Polyline, Vec2, Xline};
     use crate::layer::{AciColor, ColorSpec, LayerId};
     use crate::native::{read, write};
     use crate::Document;
-    use std::f64::consts::{FRAC_PI_2, PI};
+    use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
     fn p(x: f64, y: f64) -> Point2 {
         Point2::new(x, y)
@@ -524,7 +524,6 @@ mod tests {
             (a, arc(0.0, 0.0, PI)),
             (a, arc(1.0, f64::NAN, PI)),
             (a, arc(1.0, 0.0, f64::INFINITY)),
-            (a, arc(1.0, 1.0, 1.0)),
             (
                 x,
                 Geometry::Xline(Xline {
@@ -595,6 +594,44 @@ mod tests {
             ReplaceGeometries::one("TEST", id, circle(0.0, 0.0, 1.0)),
         );
         assert!(matches!(err, CadError::NotEditable(_)), "{err:?}");
+    }
+
+    // ---- 1 周の円弧（Issue #55） -------------------------------------------
+
+    /// **開始角と終了角が一致する円弧（1 周）も置き換えられること。**
+    ///
+    /// DXF から読んだ 0°→360° の円弧はこの形になる。`Arc::sweep` は一致を 1 周と
+    /// 約束しているので、中心を動かす・半径を変えるだけの置き換えを拒んではいけない。
+    #[test]
+    fn full_turn_arc_can_be_moved_and_resized() {
+        let mut doc = Document::new();
+        // DXF の 0°→360° と、開始角 = 終了角そのものの 2 通り。
+        for (start, end) in [(0.0, TAU), (1.0, 1.0)] {
+            let full = Geometry::Arc(Arc::new(Point2::ORIGIN, 2.0, start, end));
+            let id = add(&mut doc, Entity::new(full.clone(), LayerId::ZERO));
+
+            let moved = Geometry::Arc(Arc::new(p(5.0, -3.0), 2.0, start, end));
+            doc.apply(Box::new(ReplaceGeometries::one("GRIP", id, moved.clone())))
+                .unwrap_or_else(|e| panic!("中心の移動を受け付けること: {e}"));
+            assert_eq!(geom_of(&doc, id), moved);
+
+            let resized = Geometry::Arc(Arc::new(p(5.0, -3.0), 7.0, start, end));
+            doc.apply(Box::new(ReplaceGeometries::one(
+                "PROPERTIES",
+                id,
+                resized.clone(),
+            )))
+            .unwrap_or_else(|e| panic!("半径の変更を受け付けること: {e}"));
+            assert_eq!(geom_of(&doc, id), resized);
+            let Geometry::Arc(a) = geom_of(&doc, id) else {
+                unreachable!()
+            };
+            assert!(eq_angle(a.sweep(), TAU), "1 周のまま: {}", a.sweep());
+
+            doc.undo().unwrap();
+            doc.undo().unwrap();
+            assert_eq!(geom_of(&doc, id), full, "Undo で元の 1 周の円弧に戻る");
+        }
     }
 
     #[test]
