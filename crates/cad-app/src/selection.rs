@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 
 use cad_core::component::{self, DefinitionTable};
 use cad_core::geom::{intersect, Aabb, Line, Point2};
-use cad_core::{Document, EntityId, Geometry};
+use cad_core::{Document, Entity, EntityId, Geometry};
 
 /// 選択中のエンティティ。
 ///
@@ -92,7 +92,7 @@ impl Selection {
     }
 
     /// 編集できなくなったエンティティ（削除・ロック・非表示のレイヤ）を選択から外す。
-    /// 選ぶときと同じ判定（`is_entity_editable`）を使う。
+    /// 選ぶときと同じ判定（`is_selectable`）を使う。
     ///
     /// パネルの操作など、実行中のコマンドの外で図面が変わった後に呼ぶ（ADR-0039）。
     pub fn retain_editable(&mut self, doc: &Document) {
@@ -109,12 +109,35 @@ impl Selection {
     }
 }
 
+/// 図形が選ぶ・拾う対象になるか（表示中でロックされていないレイヤにある）。
+///
+/// クリック（[`pick_among`]）・矩形選択（[`pick_in_rect`]）・グループの展開（[`expand_to_group`]）・
+/// 全選択（[`selectable_ids`]）・選択の見直し（[`is_editable`]）が**すべてここを通る**。
+/// 判定を 1 つにしておけば、「クリックで拾える図形」と「全選択で選ばれる図形」がずれない。
+///
+/// インプレース編集（ADR-0033）中かどうかは見ない。編集の外の図形は薄く表示されるが、
+/// クリックで拾えるので、全選択にも入る（Issue #34 ユーザー判断 6、ADR-0044）。
+fn is_selectable(doc: &Document, entity: &Entity) -> bool {
+    doc.layers().is_entity_editable(entity)
+}
+
 /// エンティティがあり、編集できるレイヤ（表示中でロックされていない）にあるか。
 #[must_use]
 pub fn is_editable(doc: &Document, id: EntityId) -> bool {
     doc.entities()
         .get(id)
-        .is_some_and(|e| doc.layers().is_entity_editable(e))
+        .is_some_and(|e| is_selectable(doc, e))
+}
+
+/// 選べる図形すべて（`EntityId` 昇順）。全選択（`Session::select_all`）が使う。
+///
+/// 判定はクリック・矩形選択と同じ `is_selectable`。グループは展開しなくてよい
+/// （全部を選ぶので、選べる一員はすべて入り、ロック・非表示の一員は入らない。Issue #51 案 A）。
+pub fn selectable_ids(doc: &Document) -> impl Iterator<Item = EntityId> + '_ {
+    doc.entities()
+        .iter()
+        .filter(|(_, e)| is_selectable(doc, e))
+        .map(|(id, _)| id)
 }
 
 /// 窓選択の種類。
@@ -171,7 +194,7 @@ pub fn pick_among(
         let Some(entity) = doc.entities().get(id) else {
             continue;
         };
-        if !doc.layers().is_entity_editable(entity) {
+        if !is_selectable(doc, entity) {
             continue;
         }
         let d = entity.geom.dist_to(doc.definitions(), pos);
@@ -234,7 +257,7 @@ pub fn expand_to_group(doc: &Document, id: EntityId) -> Vec<EntityId> {
     };
     doc.entities()
         .iter()
-        .filter(|(_, e)| e.group == Some(group) && doc.layers().is_entity_editable(e))
+        .filter(|(_, e)| e.group == Some(group) && is_selectable(doc, e))
         .map(|(other, _)| other)
         .collect()
 }
@@ -244,7 +267,7 @@ pub fn expand_to_group(doc: &Document, id: EntityId) -> Vec<EntityId> {
 pub fn pick_in_rect(doc: &Document, rect: Aabb, mode: WindowMode) -> Vec<EntityId> {
     doc.entities()
         .iter()
-        .filter(|(_, e)| doc.layers().is_entity_editable(e))
+        .filter(|(_, e)| is_selectable(doc, e))
         .filter(|(_, e)| match mode {
             WindowMode::Window => rect.contains_aabb(&e.bbox(doc.definitions())),
             WindowMode::Crossing => crosses_rect(&e.geom, rect, doc.definitions()),

@@ -20,6 +20,8 @@ use crate::app::CadApp;
 
 mod hover;
 mod properties;
+mod rename;
+mod select_all;
 mod trim_preview;
 
 /// 画面の大きさ [px]。

@@ -499,6 +499,12 @@ pub static COMMANDS: &[CommandSpec] = &[
         kind: CommandKind::Immediate(Immediate::PropertiesPanel),
     },
     CommandSpec {
+        name: "SELECTALL",
+        aliases: &[],
+        summary: "選べる図形をすべて選ぶ（非表示・ロック中のレイヤは除く）  Ctrl+A",
+        kind: CommandKind::Immediate(Immediate::SelectAll),
+    },
+    CommandSpec {
         name: "NEW",
         aliases: &[],
         summary: "新規図面",
@@ -606,6 +612,8 @@ pub enum Immediate {
     ComponentPanel,
     /// プロパティパネルの開閉。
     PropertiesPanel,
+    /// 選べる図形をすべて選ぶ（`Session::select_all`。Ctrl+A と同じ）。
+    SelectAll,
     /// コンポーネントの編集を終える。
     EndComponentEdit,
     /// ファイル操作。
@@ -622,6 +630,7 @@ impl Immediate {
             Self::LayerPanel => "LAYER",
             Self::ComponentPanel => "COMPONENTS",
             Self::PropertiesPanel => "PROPERTIES",
+            Self::SelectAll => "SELECTALL",
             Self::EndComponentEdit => "ENDCOMP",
             Self::File(a) => a.command_name(),
         }
@@ -639,7 +648,10 @@ impl Immediate {
     ///   （打っている途中のポリラインなど）は図面に入っていないので、保存されないのは `Ctrl+S` と同じ
     ///
     /// UNDO / REDO は図面を変え、ENDCOMP は編集を終え、NEW / OPEN / 終了は図面を入れ替える
-    /// （捨てる）ので中断する。`_` を書かずに全部の種類を並べて、種類を足したときにここで決めさせる。
+    /// （捨てる）ので中断する。SELECTALL は選択を変える（実行中のツールが前提にしている選択を
+    /// 横から変えない）ので中断する。ただし選択待ちの間だけは中断せずに選び足す
+    /// （`Session::start_command_from_ui`。Ctrl+A と同じ。ADR-0044）。
+    /// `_` を書かずに全部の種類を並べて、種類を足したときにここで決めさせる。
     #[must_use]
     pub fn keeps_running_command(self) -> bool {
         match self {
@@ -649,6 +661,7 @@ impl Immediate {
             | Self::File(FileAction::Save | FileAction::SaveAs) => true,
             Self::Undo
             | Self::Redo
+            | Self::SelectAll
             | Self::EndComponentEdit
             | Self::File(FileAction::New | FileAction::Open | FileAction::Quit) => false,
         }

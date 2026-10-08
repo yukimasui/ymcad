@@ -273,6 +273,8 @@ pub struct CommandLine {
     recent_error: Option<RecentError>,
     /// 寸法入力（長さ・角度の欄）の状態。
     dim: DimensionInput,
+    /// [`Self::begin_frame`] で Ctrl+A を全選択として消費したか（[`Self::take_select_all`]）。
+    select_all_requested: bool,
     /// 直近に描いた入力欄の矩形。変換開始で入力欄が動かないことのテストに使う。
     #[cfg(test)]
     input_rect: Option<egui::Rect>,
@@ -354,6 +356,7 @@ impl CommandLine {
             },
             recent_error: None,
             dim: DimensionInput::default(),
+            select_all_requested: false,
             #[cfg(test)]
             input_rect: None,
         }
@@ -431,6 +434,16 @@ impl CommandLine {
             self.dim.state.reset();
         }
         self.dim.base = base;
+    }
+
+    /// このフレームで Ctrl+A が全選択として押されたか。読んだら落とす。
+    ///
+    /// 全選択そのものは `Session::select_all` がする。コマンドラインはキーを消費して印を立てるだけ。
+    /// 効く段階か（待機中・選択待ちか）も `Session::select_all` が決める。点や値の入力中に
+    /// 空の入力欄で押された Ctrl+A はここで消費されるが、入力欄が受け取っても空の文字列の
+    /// 全選択で何も起きないので、奪って困ることは無い。
+    pub fn take_select_all(&mut self) -> bool {
+        std::mem::take(&mut self.select_all_requested)
     }
 
     /// 寸法入力の固定を外し、長さの欄へ戻す。
@@ -535,7 +548,8 @@ impl CommandLine {
 
         // 変換中はキーを一切奪わない。IME に確定させるのが先。
         // 候補の操作キーもこのブロックの中にあるので、変換中は自動的に無効になる。
-        // パネルの入力欄を編集している間も奪わない（Issue #22）。
+        // パネルの入力欄を編集している間も奪わない（Issue #22）。Ctrl+A（全選択）も同じ。
+        self.select_all_requested = false;
         let pending = if self.composing || !owns_keys {
             None
         } else {
@@ -930,6 +944,15 @@ impl CommandLine {
     /// あとから処理すると `TextEdit` にカーソル移動として取られてしまう。
     fn consume_keys(&mut self, i: &mut egui::InputState) -> Option<Submission> {
         const NONE: egui::Modifiers = egui::Modifiers::NONE;
+
+        // Ctrl+A（全選択、Issue #34 段階 3、ADR-0044）。ここへ来るのはキーの持ち主がコマンドラインで、
+        // 変換中でないときだけ（パネルの入力欄・モーダル・IME では奪わない）。
+        // 打ちかけの文字があるときは奪わない。入力欄（`TextEdit`）が受け取り、文字の全選択になる
+        // （ユーザー判断 5）。効く段階か（点や値の入力中は効かない）は `Session::select_all` が決める。
+        // 印を立てるだけで return はしない（同じフレームの Enter を取りこぼさない）。
+        if self.input.is_empty() && i.consume_key(egui::Modifiers::COMMAND, egui::Key::A) {
+            self.select_all_requested = true;
+        }
 
         if i.consume_key(NONE, egui::Key::Escape) {
             // 候補が出ていれば、まず候補だけを閉じる。
