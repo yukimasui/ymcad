@@ -52,6 +52,12 @@ Claude Code 2.1.294 から `--mcp-config` でつなぎ、`sample.ymc`（`write_s
 半径 `"25*1.5"`（式の文字列）の円を 1 回の `add_entities` で描き、円を `move_entities` の `copy: true` で複製して
 `house.ymc` へ保存させた。保存したファイルは `validate_ymc.py --expect polyline=1,circle=2` に通った。
 
+段階 1d（2026-10-09）: 同じく Claude Code 2.1.294（haiku）から、`define_component`（線分と円の「窓」）→
+`set_component_params`（幅: number・既定 100・範囲 10〜500）→ `bind`（線分の `end.x` = `幅`）→
+`insert_component`（`params: {幅: 200}`）→ `set_instance_params`（幅 300）→ `render`（PNG）で線分が約 300 に伸びたことを
+読み取らせ、`window.ymc` へ保存させた。保存したファイルは `validate_ymc.py --expect line=1,circle=1,instance=1` に通った
+（定義 1 件・パラメータ 1 件・束縛 1 件）。
+
 ## 約束ごと
 
 | 項目 | 約束 |
