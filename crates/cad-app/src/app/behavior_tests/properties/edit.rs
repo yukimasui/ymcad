@@ -22,7 +22,9 @@ fn field_rect(h: &Harness<'_, CadApp>, label: &str) -> egui::Rect {
     h.query_all_by_role(egui::accesskit::Role::SpinButton)
         .chain(h.query_all_by_role(egui::accesskit::Role::TextInput))
         .map(|n| n.rect())
-        .find(|r| *r != cmdline && r.min.y <= y && y <= r.max.y && r.min.x > row.min.x)
+        .filter(|r| *r != cmdline && r.min.y <= y && y <= r.max.y && r.min.x > row.min.x)
+        // 同じ高さに隣のパネルの欄があることもあるので、項目名にいちばん近いものを取る。
+        .min_by(|a, b| a.min.x.total_cmp(&b.min.x))
         .unwrap_or_else(|| panic!("項目 {label} の欄が無い（表示だけ？）"))
 }
 
