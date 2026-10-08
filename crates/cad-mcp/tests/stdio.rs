@@ -125,7 +125,11 @@ fn session_over_stdio_saves_a_drawing() {
     );
 
     let r = mcp.call(3, "open_drawing", json!({"path": "empty.ymc"}));
-    assert_eq!(r["structuredContent"]["drawing"], "d2");
+    let name = r["structuredContent"]["drawing"].as_str().unwrap();
+    assert!(
+        name.starts_with('d') && name.ends_with("-2"),
+        "2 枚目の図面: {name}"
+    );
     let r = mcp.call(4, "drawing_info", json!({}));
     assert_eq!(r["structuredContent"]["format"], "ymc");
     assert_eq!(r["structuredContent"]["dirty"], false);
@@ -144,6 +148,43 @@ fn session_over_stdio_saves_a_drawing() {
     );
     assert_eq!(rest, "", "返事の無いものは stdout に出ない");
     assert!(err.contains("起動しました"), "ログは stderr: {err}");
+}
+
+/// つなぎ直した（別のプロセスの）サーバーは、前のプロセスの ID を受け付けない。
+/// 図面の通し番号はどちらも 1 なので、起動の印が無ければ一致してしまう（PR #84 のレビュー）。
+#[test]
+fn ids_do_not_survive_a_restart() {
+    let dir = work_dir("restart");
+    let line = json!({"entities": [{"type": "line", "start": [0, 0], "end": [10, 0]}]});
+
+    let mut first = Mcp::start(&["--root", dir.to_str().unwrap()]);
+    first.initialize();
+    let r = first.call(1, "add_entities", line.clone());
+    assert_eq!(r["isError"], false, "{r}");
+    let old_id = r["structuredContent"]["ids"][0].clone();
+    let (status, _, _) = first.finish();
+    assert!(status.success());
+
+    let mut second = Mcp::start(&["--root", dir.to_str().unwrap()]);
+    second.initialize();
+    let r = second.call(1, "add_entities", line);
+    assert_eq!(r["isError"], false, "{r}");
+    let new_id = r["structuredContent"]["ids"][0].clone();
+    assert_ne!(old_id, new_id, "起動ごとに ID が違う");
+    let r = second.call(2, "delete_entities", json!({ "ids": [old_id] }));
+    assert_eq!(
+        r["isError"], true,
+        "前のプロセスの ID で消せてしまった: {r}"
+    );
+    let text = r["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("つなぎ直す前"), "{text}");
+    let r = second.call(3, "drawing_info", json!({}));
+    assert_eq!(
+        r["structuredContent"]["entity_count"], 1,
+        "何も消えていない"
+    );
+    let (status, _, _) = second.finish();
+    assert!(status.success());
 }
 
 #[test]

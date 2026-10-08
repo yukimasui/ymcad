@@ -107,14 +107,14 @@ pub struct Stats {
 
 /// 図面を描く SVG と、描いた数。
 ///
-/// `serial` は図面の通し番号（各要素に `data-id`（図形 ID）を付けるため）。
+/// `tag` は図面の印（各要素に `data-id`（図形 ID）を付けるため）。
 ///
 /// # Errors
 ///
 /// 出力が [`MAX_SVG_BYTES`] を超えたとき（範囲を絞らせる）。
 pub fn draw(
     doc: &Document,
-    serial: u64,
+    tag: crate::ids::DrawingTag,
     fit: &Fit,
     background: Background,
 ) -> Result<(String, Stats), String> {
@@ -149,7 +149,7 @@ pub fn draw(
             fit,
             cull,
             style: &style,
-            data_id: format_id(serial, id),
+            data_id: format_id(tag, id),
             defs,
         };
         ctx.geometry(&entity.geom);
@@ -422,6 +422,12 @@ mod tests {
     use super::super::raster;
     use super::*;
 
+    /// テストの図面の印。
+    const TAG: crate::ids::DrawingTag = crate::ids::DrawingTag {
+        session: 0,
+        serial: 1,
+    };
+
     fn region(x0: f64, y0: f64, x1: f64, y1: f64) -> Aabb {
         Aabb::new(Point2::new(x0, y0), Point2::new(x1, y1))
     }
@@ -462,7 +468,7 @@ mod tests {
     }
 
     fn svg_of(doc: &Document, fit: &Fit, bg: Background) -> (String, Stats) {
-        let (svg, stats) = draw(doc, 1, fit, bg).unwrap();
+        let (svg, stats) = draw(doc, TAG, fit, bg).unwrap();
         raster::parse(&svg).unwrap_or_else(|e| panic!("SVG を読めない: {e}\n{svg}"));
         (svg, stats)
     }

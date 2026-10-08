@@ -130,11 +130,15 @@ pub fn default_region(doc: &Document) -> Aabb {
 /// # Errors
 ///
 /// 大きさ・範囲の不正、SVG が大きすぎる、PNG にできない場合（日本語の説明）。
-pub fn render(doc: &Document, serial: u64, req: &Request) -> Result<Output, String> {
+pub fn render(
+    doc: &Document,
+    tag: crate::ids::DrawingTag,
+    req: &Request,
+) -> Result<Output, String> {
     let auto_region = req.region.is_none();
     let region = req.region.unwrap_or_else(|| default_region(doc));
     let fit = Fit::new(region, req.width, req.height)?;
-    let (svg_text, stats) = svg::draw(doc, serial, &fit, req.background)?;
+    let (svg_text, stats) = svg::draw(doc, tag, &fit, req.background)?;
     let png = if req.format.wants_png() {
         Some(raster::svg_to_png(&svg_text)?)
     } else {
@@ -157,6 +161,12 @@ mod tests {
     use cad_core::{Entity, Geometry, LayerId};
 
     use super::*;
+
+    /// テストの図面の印。
+    const TAG: crate::ids::DrawingTag = crate::ids::DrawingTag {
+        session: 0,
+        serial: 1,
+    };
 
     const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
 
@@ -201,7 +211,7 @@ mod tests {
     fn png_has_the_requested_size() {
         let doc = drawing();
         for (w, h) in [(1024, 768), (16, 16), (333, 77), (4096, 64)] {
-            let out = render(&doc, 1, &request(Format::Png, w, h)).unwrap();
+            let out = render(&doc, TAG, &request(Format::Png, w, h)).unwrap();
             let png = out.png.expect("PNG を要求した");
             assert_eq!(ihdr_size(&png), (w, h));
             assert!(out.svg.is_none());
@@ -210,7 +220,7 @@ mod tests {
 
     #[test]
     fn largest_png_is_allowed() {
-        let out = render(&drawing(), 1, &request(Format::Png, 4096, 4096)).unwrap();
+        let out = render(&drawing(), TAG, &request(Format::Png, 4096, 4096)).unwrap();
         assert_eq!(ihdr_size(&out.png.unwrap()), (4096, 4096));
     }
 
@@ -224,7 +234,7 @@ mod tests {
             (0, 100),
             (15, 100),
         ] {
-            let e = render(&doc, 1, &request(Format::Png, w, h)).unwrap_err();
+            let e = render(&doc, TAG, &request(Format::Png, w, h)).unwrap_err();
             assert!(e.contains("4096") || e.contains("16"), "{e}");
         }
     }
@@ -232,9 +242,9 @@ mod tests {
     #[test]
     fn format_selects_what_is_returned() {
         let doc = drawing();
-        let svg = render(&doc, 1, &request(Format::Svg, 200, 100)).unwrap();
+        let svg = render(&doc, TAG, &request(Format::Svg, 200, 100)).unwrap();
         assert!(svg.png.is_none() && svg.svg.is_some());
-        let both = render(&doc, 1, &request(Format::Both, 200, 100)).unwrap();
+        let both = render(&doc, TAG, &request(Format::Both, 200, 100)).unwrap();
         assert!(both.png.is_some() && both.svg.is_some());
         assert!(Format::parse("jpeg").is_err());
     }
@@ -243,7 +253,7 @@ mod tests {
     #[test]
     fn png_pixels_show_the_drawing_on_the_background() {
         let doc = drawing();
-        let out = render(&doc, 1, &request(Format::Both, 200, 100)).unwrap();
+        let out = render(&doc, TAG, &request(Format::Both, 200, 100)).unwrap();
         let pm = raster::svg_to_pixmap(&out.svg.unwrap());
         let corner = pm.pixel(0, 0).unwrap();
         assert_eq!((corner.red(), corner.green(), corner.blue()), (10, 10, 10));
@@ -268,7 +278,7 @@ mod tests {
     fn empty_drawing_gets_a_fixed_default_view() {
         let region = default_region(&Document::new());
         assert!(region.width() > 0.0 && region.height() > 0.0);
-        let out = render(&Document::new(), 1, &request(Format::Png, 100, 100)).unwrap();
+        let out = render(&Document::new(), TAG, &request(Format::Png, 100, 100)).unwrap();
         assert_eq!(out.stats, Stats::default());
         assert!(out.auto_region);
     }
@@ -285,7 +295,7 @@ mod tests {
             ),
         )))
         .unwrap();
-        let out = render(&doc, 1, &request(Format::Png, 200, 100)).unwrap();
+        let out = render(&doc, TAG, &request(Format::Png, 200, 100)).unwrap();
         assert_eq!(ihdr_size(&out.png.unwrap()), (200, 100));
     }
 
@@ -295,7 +305,7 @@ mod tests {
         let region = Aabb::new(Point2::new(0.0, 0.0), Point2::new(4.0, 2.0));
         let out = render(
             &doc,
-            1,
+            TAG,
             &Request {
                 region: Some(region),
                 ..request(Format::Svg, 400, 200)

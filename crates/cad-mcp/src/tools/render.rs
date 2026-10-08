@@ -7,7 +7,6 @@ use serde_json::{json, Value};
 
 use super::{Args, Tool, ToolResult};
 use crate::convert::{aabb_from_json, aabb_to_json};
-use crate::ids::drawing_name;
 use crate::render::fit::{MAX_SIDE_PX, MIN_SIDE_PX};
 use crate::render::{self, base64, Background, Format, Request};
 use crate::server::Server;
@@ -91,7 +90,7 @@ fn render_drawing(s: &mut Server, a: &Args) -> ToolResult {
 
     let out = render::render(
         &s.doc,
-        s.serial,
+        s.tag(),
         &Request {
             format,
             width,
@@ -103,7 +102,7 @@ fn render_drawing(s: &mut Server, a: &Args) -> ToolResult {
 
     // 失敗しないところまで来てから追加のブロックを積む（失敗した呼び出しに画像を残さない）。
     let mut structured = json!({
-        "drawing": drawing_name(s.serial),
+        "drawing": s.tag().name(),
         "format": match format {
             Format::Png => "png",
             Format::Svg => "svg",
@@ -137,7 +136,7 @@ fn render_drawing(s: &mut Server, a: &Args) -> ToolResult {
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{call_raw, err, ok, server};
+    use super::super::test_support::{call_raw, eid, err, ok, server};
     use super::super::tests::cad_core_add_line;
     use super::*;
     use crate::test_util::TempDir;
@@ -166,14 +165,10 @@ mod tests {
         assert!(data.starts_with("iVBORw0KGgo"), "{}", &data[..20]);
         let bytes = r["structuredContent"]["png_bytes"].as_u64().unwrap();
         assert_eq!(data.len() as u64, bytes.div_ceil(3) * 4);
-        // text は structuredContent と同じ JSON。serde_json は既定では小数を最後の桁まで正確には
-        // 読み戻さないので、座標を含む view は除いて比べる（文字列としては同じ）。
-        let mut text: Value =
-            serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
-        let mut structured = r["structuredContent"].clone();
-        text["view"] = Value::Null;
-        structured["view"] = Value::Null;
-        assert_eq!(text, structured);
+        // text は structuredContent と同じ JSON。小数も最後のビットまで読み戻せる
+        // （serde_json の float_roundtrip。ADR-0046 決定 16）ので、座標を含む view ごと比べる。
+        let text: Value = serde_json::from_str(r["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(text, r["structuredContent"]);
         assert_eq!(
             r["content"][0]["text"].as_str().unwrap(),
             r["structuredContent"].to_string()
@@ -199,7 +194,7 @@ mod tests {
         assert_eq!(content_types(&r), ["text", "text"]);
         let svg = r["content"][1]["text"].as_str().unwrap();
         assert!(
-            svg.starts_with("<svg ") && svg.contains("data-id=\"d1e0g0\""),
+            svg.starts_with("<svg ") && svg.contains(&format!("data-id=\"{}\"", eid(&s, 0))),
             "{svg}"
         );
         assert_eq!(

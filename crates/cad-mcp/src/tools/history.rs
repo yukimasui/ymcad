@@ -7,7 +7,6 @@
 use serde_json::json;
 
 use super::{Args, Tool, ToolResult};
-use crate::ids::drawing_name;
 use crate::limits::MAX_HISTORY_STEPS;
 use crate::server::Server;
 
@@ -85,7 +84,7 @@ fn step(s: &mut Server, a: &Args, dir: Direction) -> ToolResult {
     }
     let history = s.doc.history();
     Ok(json!({
-        "drawing": drawing_name(s.serial),
+        "drawing": s.tag().name(),
         key: names,
         "count": names.len(),
         "can_undo": history.can_undo(),

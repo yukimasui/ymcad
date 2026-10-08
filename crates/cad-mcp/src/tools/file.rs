@@ -22,7 +22,6 @@ use serde_json::json;
 
 use super::{Args, Tool, ToolResult};
 use crate::convert::aabb_to_json;
-use crate::ids::drawing_name;
 use crate::limits::MAX_FILE_BYTES;
 use crate::paths::Format;
 use crate::server::{FileStamp, OpenedFile, Server};
@@ -71,7 +70,8 @@ pub(super) const OPEN_DRAWING: Tool = Tool {
 pub(super) const SAVE_DRAWING: Tool = Tool {
     name: "save_drawing",
     title: "図面を保存",
-    description: "図面を保存する（アトミックに書き換える）。path を省くと開いた・前に保存したファイルへ上書き保存する。\
+    description: "図面を保存する（アトミックに書き換える）。path を省くと開いた・前に保存した .ymc ファイルへ上書き保存する\
+（開いたのが .dxf なら path を省けない。.ymc のパスか、DXF へ書くなら .dxf のパスを明示する）。\
 形式は拡張子だけで決まる: .ymc（無損失・保存形式）/ .dxf（R12・交換用。作図線・グループ・パラメータなどが失われ、警告が返る）。\
 拡張子が無ければ .ymc を付ける。開いている図面のファイル以外の既存ファイルや、開いた後に他のプログラムが書き換えたファイルへ\
 保存するには overwrite: true が要る。保存先は root の配下だけ（ディレクトリは作らない）。",
@@ -93,8 +93,9 @@ pub(super) const SAVE_DRAWING: Tool = Tool {
 pub(super) const DRAWING_INFO: Tool = Tool {
     name: "drawing_info",
     title: "図面の情報",
-    description: "いまの図面の情報: 図面名（ID の頭の d<番号>）、ファイルのパスと形式、未保存の変更の有無、図形・レイヤ・コンポーネントの数、\
-図面範囲（作図線を除く。度・f64）、取り消し・やり直しができるか、開いた後にファイルが他から書き換えられたか、読み書きできる root。",
+    description: "いまの図面の情報: 図面名（ID の頭の d<起動の印>-<番号>）、ファイルのパスと形式、未保存の変更の有無、図形・レイヤ・コンポーネントの数、\
+図面範囲（作図線を除く。度・f64）、取り消し・やり直しができるか、開いた後にファイルが他から書き換えられたか、読み書きできる root、\
+内部エラーで図面が書きかけかもしれないか（poisoned。true なら保存できないので開き直す）。",
     schema: || (json!({}), &[]),
     read_only: true,
     destructive: false,
@@ -108,7 +109,7 @@ fn ensure_can_discard(s: &Server, discard: bool, action: &str) -> Result<(), Str
         return Err(format!(
             "いまの図面（{}）に未保存の変更があります。{action}と変更は失われます。\
              残すなら先に save_drawing で保存し、捨ててよければ discard_changes: true を付けて呼び直してください。",
-            drawing_name(s.serial)
+            s.tag().name()
         ));
     }
     Ok(())
@@ -120,7 +121,7 @@ fn new_drawing(s: &mut Server, a: &Args) -> ToolResult {
     let discarded = s.doc.is_dirty();
     s.replace_document(Document::new(), None);
     Ok(json!({
-        "drawing": drawing_name(s.serial),
+        "drawing": s.tag().name(),
         "discarded_changes": discarded,
     }))
 }
@@ -149,7 +150,7 @@ fn open_drawing(s: &mut Server, a: &Args) -> ToolResult {
         }),
     );
     Ok(json!({
-        "drawing": drawing_name(s.serial),
+        "drawing": s.tag().name(),
         "path": path.display().to_string(),
         "format": format.name(),
         "entity_count": s.doc.entities().len(),
@@ -203,8 +204,27 @@ fn save_drawing(s: &mut Server, a: &Args) -> ToolResult {
     let raw = a.opt_str("path")?;
     let overwrite = a.bool_or("overwrite", false)?;
 
+    if let Some(tool) = s.poisoned {
+        return Err(format!(
+            "図面を変える道具（{tool}）の途中で内部エラーが起きたため、図面が書きかけの状態かもしれません。\
+             壊れた図面でファイルを上書きしないよう、この図面は保存できません。\
+             open_drawing で開き直すか new_drawing で新規にしてください。"
+        ));
+    }
+
     let (target, format) = match (raw, &s.file) {
         (Some(raw), _) => s.roots.resolve_for_write(raw)?,
+        // 設計原則 9: DXF は交換用。開いた .dxf へ黙って上書きすると、作図線・グループ・パラメータなどが
+        // 確認なしに失われる（警告は保存の後にしか返らず、LLM は読み流しやすい）。path を省いた保存は
+        // .ymc へ限り、DXF へ書くなら path に .dxf を明示させる。
+        (None, Some(f)) if f.format == Format::Dxf => {
+            return Err(format!(
+                "開いた（前に保存した）ファイル {} は DXF（交換用・非可逆）です。path を省いた保存は .ymc のときだけ行います。\
+                 ymcad の図面として残すなら path に .ymc のパスを指定してください。\
+                 DXF へ書き出すなら path に .dxf のパスを明示してください（作図線・グループ・パラメータなどが失われます）。",
+                f.path.display()
+            ))
+        }
         (None, Some(f)) => s.roots.recheck_for_write(&f.path)?,
         (None, None) => {
             return Err(
@@ -258,7 +278,7 @@ fn save_drawing(s: &mut Server, a: &Args) -> ToolResult {
         stamp: FileStamp::of(&target),
     });
     Ok(json!({
-        "drawing": drawing_name(s.serial),
+        "drawing": s.tag().name(),
         "path": target.display().to_string(),
         "format": format.name(),
         "overwrote": existed,
@@ -272,7 +292,7 @@ fn drawing_info(s: &mut Server, _: &Args) -> ToolResult {
     let history = doc.history();
     let file_changed = s.file.as_ref().map(|f| f.stamp != FileStamp::of(&f.path));
     Ok(json!({
-        "drawing": drawing_name(s.serial),
+        "drawing": s.tag().name(),
         "path": s.file.as_ref().map(|f| f.path.display().to_string()),
         "format": s.file.as_ref().map(|f| f.format.name()),
         "dirty": doc.is_dirty(),
@@ -287,6 +307,8 @@ fn drawing_info(s: &mut Server, _: &Args) -> ToolResult {
         "undo_name": history.undo_name(),
         "redo_name": history.redo_name(),
         "file_changed_on_disk": file_changed,
+        "poisoned": s.poisoned.is_some(),
+        "poisoned_by": s.poisoned,
         "roots": s.roots.dirs().iter().map(|r| r.display().to_string()).collect::<Vec<_>>(),
         "angle_unit": "degree",
     }))
@@ -330,8 +352,11 @@ mod tests {
     fn new_drawing_advances_the_serial() {
         let dir = TempDir::new("file-new");
         let mut s = server(&dir);
+        let first = s.tag().name();
         let r = ok(&mut s, "new_drawing", json!({}));
-        assert_eq!(r["drawing"], "d2");
+        assert_eq!(r["drawing"], s.tag().name());
+        assert_eq!(s.serial, 2);
+        assert_ne!(r["drawing"], first.as_str());
         assert_eq!(r["discarded_changes"], false);
     }
 
@@ -355,7 +380,8 @@ mod tests {
             json!({"path": "a.ymc", "discard_changes": true}),
         );
         assert_eq!(r["discarded_changes"], true);
-        assert_eq!(r["drawing"], "d2");
+        assert_eq!(s.serial, 2);
+        assert_eq!(r["drawing"], s.tag().name());
     }
 
     #[test]
@@ -512,6 +538,66 @@ mod tests {
         );
     }
 
+    /// 開いた .dxf へ path なしで保存すると、確認なしに非可逆の DXF で上書きしてしまうので拒む（設計原則 9）。
+    /// .ymc のパスか、.dxf のパスの明示を求める。
+    #[test]
+    fn save_without_a_path_does_not_overwrite_an_opened_dxf() {
+        let dir = TempDir::new("file-save-dxf-nopath");
+        let dxf = write_sample(&dir, "a.dxf");
+        let before = std::fs::read(&dxf).unwrap();
+        let mut s = server(&dir);
+        ok(&mut s, "open_drawing", json!({"path": "a.dxf"}));
+        cad_core_add_line(&mut s);
+
+        let msg = err(&mut s, "save_drawing", json!({}));
+        assert!(msg.contains(".ymc") && msg.contains("DXF"), "{msg}");
+        let msg = err(&mut s, "save_drawing", json!({"overwrite": true}));
+        assert!(
+            msg.contains(".ymc"),
+            "overwrite でも path なしは拒む: {msg}"
+        );
+        assert_eq!(std::fs::read(&dxf).unwrap(), before, "書き換えていない");
+
+        // 明示の .dxf は許す（開いたファイルなので overwrite は要らない）。
+        let r = ok(&mut s, "save_drawing", json!({"path": "a.dxf"}));
+        assert_eq!(r["format"], "dxf");
+        assert_ne!(std::fs::read(&dxf).unwrap(), before);
+        // .ymc へ保存した後は、path なしで .ymc へ上書きできる。
+        ok(&mut s, "save_drawing", json!({"path": "a.ymc"}));
+        cad_core_add_line(&mut s);
+        let r = ok(&mut s, "save_drawing", json!({}));
+        assert_eq!(r["format"], "ymc");
+    }
+
+    /// path を省いた保存は、前に開いた・保存したパスを書く前に検査し直す。開いた後に親ディレクトリを
+    /// root の外を指すシンボリックリンクへ差し替えられたら拒む（PR #84 レビューの非ブロッキング 4）。
+    #[cfg(unix)]
+    #[test]
+    fn save_without_a_path_rechecks_the_directory() {
+        let dir = TempDir::new("file-save-recheck");
+        let outside = TempDir::new("file-save-recheck-outside");
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        write_sample(&dir, "sub/a.ymc");
+        let mut s = server(&dir);
+        ok(&mut s, "open_drawing", json!({"path": "sub/a.ymc"}));
+
+        // sub を root の外を指すリンクへ差し替える（外にも同じ名前のファイルを置く）。
+        std::fs::rename(dir.path().join("sub"), dir.path().join("sub-moved")).unwrap();
+        write_sample(&outside, "a.ymc");
+        let outside_before = std::fs::read(outside.path().join("a.ymc")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("sub")).unwrap();
+
+        for args in [json!({}), json!({"overwrite": true})] {
+            let msg = err(&mut s, "save_drawing", args);
+            assert!(msg.contains("root"), "{msg}");
+        }
+        assert_eq!(
+            std::fs::read(outside.path().join("a.ymc")).unwrap(),
+            outside_before,
+            "root の外へ書いていない"
+        );
+    }
+
     #[test]
     fn save_rejects_paths_outside_the_rules() {
         let dir = TempDir::new("file-save-bad");
@@ -591,7 +677,8 @@ mod tests {
         let dir = TempDir::new("file-info");
         let mut s = server(&dir);
         let r = ok(&mut s, "drawing_info", json!({}));
-        assert_eq!(r["drawing"], "d1");
+        assert_eq!(r["drawing"], s.tag().name());
+        assert!(r["drawing"].as_str().unwrap().ends_with("-1"));
         assert_eq!(r["path"], Value::Null);
         assert_eq!(r["dirty"], false);
         assert_eq!(r["bbox"], Value::Null);
