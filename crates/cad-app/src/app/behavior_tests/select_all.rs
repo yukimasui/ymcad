@@ -13,11 +13,13 @@ use cad_core::{Entity, EntityId, Geometry, LayerId};
 use egui_kittest::kittest::Queryable as _;
 use egui_kittest::Harness;
 
+use super::rename::{double_click_layer_name, name_of, with_layer};
 use super::{
     app, app_with_dynamic, focus_layer_name_field, frame, hover, input_lines, key_with,
     layer_name_field_value, preedit, press, press_ribbon, settle, type_text, CadApp, LineKind, P1,
     P2, RIBBON_FITS_WIDTH, SCREEN,
 };
+use crate::session::SELECT_ALL_UNAVAILABLE;
 
 /// Ctrl+A を押して離す。
 ///
@@ -33,6 +35,28 @@ fn ctrl_a() -> [egui::Event; 2] {
 fn press_ctrl_a(h: &mut Harness<'_, CadApp>) {
     frame(h, ctrl_a());
     settle(h);
+}
+
+/// Ctrl+A に `extra`（Shift・Alt）を足して押して離す。
+fn press_ctrl_a_with(h: &mut Harness<'_, CadApp>, extra: egui::Modifiers) {
+    frame(
+        h,
+        key_with(
+            egui::Key::A,
+            egui::Modifiers::CTRL | egui::Modifiers::COMMAND | extra,
+        ),
+    );
+    settle(h);
+}
+
+/// 履歴に `text` の行がいくつあるか。
+fn count_lines(h: &Harness<'_, CadApp>, text: &str) -> usize {
+    h.state()
+        .session
+        .cmdline
+        .history()
+        .filter(|l| l.text == text)
+        .count()
 }
 
 /// パネルからの変更と同じ入口で図面を変える。
@@ -231,11 +255,205 @@ fn ctrl_a_does_nothing_while_a_point_is_wanted() {
         assert!(h.state().session.selection.is_empty(), "動的入力 {on}");
         assert_eq!(h.state().session.active_command(), Some("LINE"));
         assert_eq!(h.state().session.last_point(), first, "1 点目が残る");
+        // 効かなかったことが分かるよう、灰色の案内を 1 行（Issue #74 の 1）。
+        assert_eq!(
+            last_info(&h).as_deref(),
+            Some(SELECT_ALL_UNAVAILABLE),
+            "使える段階を案内する（動的入力 {on}）"
+        );
+        // 連打しても積まない。
+        press_ctrl_a(&mut h);
+        press_ctrl_a(&mut h);
+        assert_eq!(
+            count_lines(&h, SELECT_ALL_UNAVAILABLE),
+            1,
+            "連打で履歴が増えない（動的入力 {on}）"
+        );
 
         // 続きを描ける（キーもクリックも奪われていない）。
         super::click(&mut h, P2);
         press(&mut h, egui::Key::Enter);
         assert_eq!(h.state().doc.entities().len(), 5, "線が 1 本増える");
+    }
+}
+
+/// TRIM の図形を指す段階でも効かず、同じ案内が出る。TRIM は続く。
+#[test]
+fn ctrl_a_explains_itself_while_trim_wants_an_entity() {
+    let mut h = app();
+    drawing(&mut h);
+    hover(&mut h, P1);
+    type_text(&mut h, "TRIM");
+    press(&mut h, egui::Key::Enter);
+    assert!(h.state().session.wants_entity(), "前提: 図形を指す段階");
+
+    press_ctrl_a(&mut h);
+    assert!(h.state().session.selection.is_empty());
+    assert_eq!(h.state().session.active_command(), Some("TRIM"));
+    assert_eq!(last_info(&h).as_deref(), Some(SELECT_ALL_UNAVAILABLE));
+}
+
+/// Ctrl+Shift+A・Ctrl+Alt+A では全選択しない（修飾キーを厳密に比べる。Issue #74 の 5）。
+/// 待機中なので、緩く比べていれば全部が選ばれる。素の Ctrl+A なら選ぶ（キーは奪われていない）。
+#[test]
+fn ctrl_a_with_shift_or_alt_does_not_select_everything() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        let free = drawing(&mut h);
+        hover(&mut h, P1);
+        let lines = h.state().session.cmdline.history().count();
+        for extra in [egui::Modifiers::SHIFT, egui::Modifiers::ALT] {
+            press_ctrl_a_with(&mut h, extra);
+            assert!(
+                h.state().session.selection.is_empty(),
+                "{extra:?} つきでは選ばない（動的入力 {on}）"
+            );
+        }
+        assert_eq!(
+            h.state().session.cmdline.history().count(),
+            lines,
+            "案内も出ない（動的入力 {on}）"
+        );
+        assert_eq!(h.state().session.cmdline.input(), "", "入力欄も空のまま");
+
+        press_ctrl_a(&mut h);
+        assert_eq!(selected(&h), free, "素の Ctrl+A なら選ぶ（動的入力 {on}）");
+    }
+}
+
+/// 選択待ちで `ALL` と打って Enter でも全選択（AutoCAD の習慣。Issue #74 の 2）。続けて Enter で全部消える。
+#[test]
+fn erase_then_typing_all_erases_everything() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        let free = drawing(&mut h);
+        hover(&mut h, P1);
+        type_text(&mut h, "E");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(h.state().session.active_command(), Some("ERASE"));
+
+        type_text(&mut h, "all");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(selected(&h), free, "選べる 3 本を選ぶ（動的入力 {on}）");
+        assert_eq!(
+            h.state().session.active_command(),
+            Some("ERASE"),
+            "選択待ちのまま"
+        );
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(
+            h.state().doc.entities().len(),
+            1,
+            "ロックされた 1 本だけが残る（動的入力 {on}）"
+        );
+    }
+}
+
+/// 待機中の `ALL` は今までどおり不明なコマンド（選択待ちの間だけの読み替え）。
+#[test]
+fn typing_all_when_idle_is_still_an_unknown_command() {
+    let mut h = app();
+    drawing(&mut h);
+    hover(&mut h, P1);
+    type_text(&mut h, "ALL");
+    press(&mut h, egui::Key::Enter);
+    assert!(h.state().session.selection.is_empty(), "選ばない");
+    assert!(
+        h.state()
+            .session
+            .cmdline
+            .history()
+            .any(|l| l.kind == LineKind::Error && l.text.contains("ALL")),
+        "不明なコマンドのエラー"
+    );
+}
+
+/// インプレース編集中の全選択は編集の外の図形も含む（ユーザー判断 6）。続けて ERASE すると外も
+/// 消えることが読めるよう、案内に外の数を添える（Issue #74 の 3）。
+#[test]
+fn ctrl_a_while_editing_in_place_counts_the_entities_outside() {
+    use cad_core::command::{DefineComponent, InsertInstance};
+    use cad_core::component::Placement;
+
+    let mut h = app();
+    hover(&mut h, P1);
+    external(
+        &mut h,
+        Box::new(DefineComponent::new(
+            "COMPONENT",
+            "窓",
+            Point2::ORIGIN,
+            vec![Entity::new(
+                Geometry::Line(Line::new(Point2::ORIGIN, Point2::new(100.0, 0.0))),
+                LayerId::ZERO,
+            )],
+        )),
+    );
+    let def = h.state().doc.definitions().by_name("窓").expect("定義");
+    external(
+        &mut h,
+        Box::new(InsertInstance::new(
+            "INSERT",
+            def,
+            Placement::at(Point2::new(50.0, 50.0)),
+            LayerId::ZERO,
+        )),
+    );
+    // 編集の外の線分 2 本（y = 0, 5）。
+    let outside = add_lines(&mut h, LayerId::ZERO, 2);
+    type_text(&mut h, "BE");
+    press(&mut h, egui::Key::Enter);
+    let p = h.state().viewport.model_to_screen(Point2::new(100.0, 50.0));
+    super::click(&mut h, p);
+    let editing = h.state().session.editing().expect("前提: 編集中").clone();
+    assert!(
+        outside.iter().all(|id| !editing.contains(*id)),
+        "前提: 2 本は編集の外"
+    );
+    let all = h.state().doc.entities().len();
+
+    press_ctrl_a(&mut h);
+    assert_eq!(h.state().session.selection.len(), all, "外も含めて全部");
+    assert_eq!(
+        last_info(&h).as_deref(),
+        Some(format!("全選択: {all} 個のオブジェクトを選択（編集の外の 2 個を含む）").as_str()),
+    );
+}
+
+/// 改名欄で Ctrl+A を押すと、欄の文字の全選択になり、図形は選ばれない（PR #71・Issue #68 の穴が
+/// 戻ったら、全選択の側でも気づけるように。Issue #74 の 6）。続けて打った文字で名前が置き換わる。
+#[test]
+fn ctrl_a_in_the_rename_field_selects_its_text_not_the_drawing() {
+    for on in [false, true] {
+        let (mut h, id) = with_layer(on);
+        add_lines(&mut h, LayerId::ZERO, 2);
+        double_click_layer_name(&mut h, "L1");
+        assert_eq!(
+            h.state().layer_panel.renaming(),
+            Some(id),
+            "前提: 改名中（動的入力 {on}）"
+        );
+        type_text(&mut h, "AB");
+
+        press_ctrl_a(&mut h);
+        assert!(
+            h.state().session.selection.is_empty(),
+            "図形は選ばない（動的入力 {on}）"
+        );
+        assert_eq!(
+            h.state().layer_panel.renaming(),
+            Some(id),
+            "改名は続く（動的入力 {on}）"
+        );
+        type_text(&mut h, "Z");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(
+            name_of(&h, id),
+            "Z",
+            "欄の文字が全選択されていて置き換わる（動的入力 {on}）"
+        );
+        assert!(h.state().session.selection.is_empty(), "動的入力 {on}");
+        assert_eq!(h.state().session.cmdline.input(), "", "動的入力 {on}");
     }
 }
 
