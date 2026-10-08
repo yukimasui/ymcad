@@ -23,6 +23,10 @@ use crate::error::{CadError, Result};
 /// - **同じ種類どうしだけ**。線分を円にするような置き換えは
 ///   [`CadError::NotEditable`]。#30・#31 の用途では要らず、許すと
 ///   インプレース編集中の束縛（種類ごとのスロットを指す）が黙って外れる
+/// - **ポリラインは頂点の数が同じものどうしだけ**。数が違えば
+///   [`CadError::NotEditable`]。束縛は頂点を添字で指す（`PolylineVx(i)` など）ので、
+///   減らすと指す先の無い束縛が黙って消え、途中に足すと別の頂点を指すようになる。
+///   開いている・閉じている（`closed`）の切り替えは許す（頂点の添字は変わらない）
 /// - **インスタンスは配置（基点・回転・倍率・反転）だけ**。参照する定義と
 ///   パラメータの上書きが元と違えば [`CadError::NotEditable`]。
 ///   上書きは [`SetInstanceOverride`](super::SetInstanceOverride) の経路で
@@ -95,6 +99,13 @@ impl ReplaceGeometries {
             if discriminant(old_geom) != discriminant(new_geom) {
                 return Err(CadError::NotEditable("図形の種類は変えられません"));
             }
+            if let (Geometry::Polyline(old), Geometry::Polyline(new)) = (old_geom, new_geom) {
+                if old.vertices.len() != new.vertices.len() {
+                    return Err(CadError::NotEditable(
+                        "ポリラインの頂点の数は変えられません",
+                    ));
+                }
+            }
             if let (Geometry::Instance(old), Geometry::Instance(new)) = (old_geom, new_geom) {
                 if old.definition != new.definition {
                     return Err(CadError::NotEditable(
@@ -158,16 +169,18 @@ impl Command for ReplaceGeometries {
 mod tests {
     use super::*;
     use crate::command::{
-        AddEntities, CreateGroup, DefineComponent, DeleteEntities, InsertInstance,
+        AddEntities, CreateGroup, DefineComponent, DeleteEntities, EnterDefinitionEdit,
+        ExitDefinitionEdit, InsertInstance, SetBinding, SetDefinitionParams,
     };
-    use crate::component::{DefinitionId, Placement};
+    use crate::component::{Binding, DefinitionId, ParamDecl, Placement, Slot};
     use crate::entity::Entity;
-    use crate::geom::tolerance::EPS_LEN;
+    use crate::expr::parse;
+    use crate::geom::tolerance::{eq_angle, EPS_LEN};
     use crate::geom::{Arc, Circle, Line, Point2, Polyline, Vec2, Xline};
     use crate::layer::{AciColor, ColorSpec, LayerId};
     use crate::native::{read, write};
     use crate::Document;
-    use std::f64::consts::{FRAC_PI_2, PI};
+    use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
     fn p(x: f64, y: f64) -> Point2 {
         Point2::new(x, y)
@@ -384,7 +397,16 @@ mod tests {
             ),
             (
                 poly(vec![p(0.0, 0.0), p(1.0, 0.0)], false),
+                poly(vec![p(0.0, 0.0), p(1.0, 5.0)], false),
+            ),
+            // 頂点の数が同じなら、開閉の切り替えも受け付ける（両方向）。
+            (
+                poly(vec![p(0.0, 0.0), p(1.0, 0.0), p(1.0, 1.0)], false),
+                poly(vec![p(0.0, 0.0), p(2.0, 0.0), p(2.0, 2.0)], true),
+            ),
+            (
                 poly(vec![p(0.0, 0.0), p(1.0, 0.0), p(1.0, 1.0)], true),
+                poly(vec![p(0.0, 0.0), p(1.0, 0.0), p(1.0, 1.0)], false),
             ),
         ];
         for (before, after) in cases {
@@ -510,6 +532,14 @@ mod tests {
             &mut doc,
             Entity::new(poly(vec![p(0.0, 0.0), p(1.0, 0.0)], false), LayerId::ZERO),
         );
+        // 頂点の数は変えられない（`NotEditable`）ので、3 頂点の形の不正は 3 頂点の元で見る。
+        let pl3 = add(
+            &mut doc,
+            Entity::new(
+                poly(vec![p(0.0, 0.0), p(1.0, 0.0), p(1.0, 1.0)], false),
+                LayerId::ZERO,
+            ),
+        );
 
         let bad: Vec<(EntityId, Geometry)> = vec![
             (l, line(f64::NAN, 0.0, 1.0, 0.0)),
@@ -524,7 +554,6 @@ mod tests {
             (a, arc(0.0, 0.0, PI)),
             (a, arc(1.0, f64::NAN, PI)),
             (a, arc(1.0, 0.0, f64::INFINITY)),
-            (a, arc(1.0, 1.0, 1.0)),
             (
                 x,
                 Geometry::Xline(Xline {
@@ -546,10 +575,12 @@ mod tests {
                     direction: Vec2::X,
                 }),
             ),
-            (pl, poly(vec![p(0.0, 0.0)], false)),
             (pl, poly(vec![p(0.0, 0.0), p(1.0, 0.0)], true)),
-            (pl, poly(vec![p(1.0, 1.0), p(1.0, 1.0), p(1.0, 1.0)], false)),
             (pl, poly(vec![p(0.0, 0.0), p(f64::NAN, 0.0)], false)),
+            (
+                pl3,
+                poly(vec![p(1.0, 1.0), p(1.0, 1.0), p(1.0, 1.0)], false),
+            ),
         ];
         for (id, geom) in bad {
             let err = assert_rejected(&mut doc, ReplaceGeometries::one("TEST", id, geom.clone()));
@@ -558,6 +589,13 @@ mod tests {
                 "{geom:?} は形の不正として拒むこと: {err:?}"
             );
         }
+
+        // 頂点が 1 つのポリラインは、元と数が違うので上の経路では `NotEditable` が先に出る。
+        // 形の判定そのものが拒むことは直接確かめる。
+        assert!(matches!(
+            poly(vec![p(0.0, 0.0)], false).validate(),
+            Err(CadError::DegenerateGeometry(_))
+        ));
     }
 
     #[test]
@@ -595,6 +633,189 @@ mod tests {
             ReplaceGeometries::one("TEST", id, circle(0.0, 0.0, 1.0)),
         );
         assert!(matches!(err, CadError::NotEditable(_)), "{err:?}");
+    }
+
+    // ---- 1 周の円弧（Issue #55） -------------------------------------------
+
+    /// **開始角と終了角が一致する円弧（1 周）も置き換えられること。**
+    ///
+    /// DXF から読んだ 0°→360° の円弧はこの形になる。`Arc::sweep` は一致を 1 周と
+    /// 約束しているので、中心を動かす・半径を変えるだけの置き換えを拒んではいけない。
+    #[test]
+    fn full_turn_arc_can_be_moved_and_resized() {
+        let mut doc = Document::new();
+        // DXF の 0°→360° と、開始角 = 終了角そのものの 2 通り。
+        for (start, end) in [(0.0, TAU), (1.0, 1.0)] {
+            let full = Geometry::Arc(Arc::new(Point2::ORIGIN, 2.0, start, end));
+            let id = add(&mut doc, Entity::new(full.clone(), LayerId::ZERO));
+
+            let moved = Geometry::Arc(Arc::new(p(5.0, -3.0), 2.0, start, end));
+            doc.apply(Box::new(ReplaceGeometries::one("GRIP", id, moved.clone())))
+                .unwrap_or_else(|e| panic!("中心の移動を受け付けること: {e}"));
+            assert_eq!(geom_of(&doc, id), moved);
+
+            let resized = Geometry::Arc(Arc::new(p(5.0, -3.0), 7.0, start, end));
+            doc.apply(Box::new(ReplaceGeometries::one(
+                "PROPERTIES",
+                id,
+                resized.clone(),
+            )))
+            .unwrap_or_else(|e| panic!("半径の変更を受け付けること: {e}"));
+            assert_eq!(geom_of(&doc, id), resized);
+            let Geometry::Arc(a) = geom_of(&doc, id) else {
+                unreachable!()
+            };
+            assert!(eq_angle(a.sweep(), TAU), "1 周のまま: {}", a.sweep());
+
+            doc.undo().unwrap();
+            doc.undo().unwrap();
+            assert_eq!(geom_of(&doc, id), full, "Undo で元の 1 周の円弧に戻る");
+        }
+    }
+
+    // ---- ポリラインの頂点の数（Issue #55） ---------------------------------
+
+    #[test]
+    fn polyline_vertex_count_change_is_rejected() {
+        let mut doc = Document::new();
+        let id = add(
+            &mut doc,
+            Entity::new(
+                poly(vec![p(0.0, 0.0), p(1.0, 0.0), p(1.0, 1.0)], false),
+                LayerId::ZERO,
+            ),
+        );
+        for (geom, what) in [
+            (poly(vec![p(0.0, 0.0), p(1.0, 0.0)], false), "減らす"),
+            (
+                poly(
+                    vec![p(0.0, 0.0), p(1.0, 0.0), p(1.0, 1.0), p(0.0, 1.0)],
+                    false,
+                ),
+                "増やす",
+            ),
+            (
+                poly(
+                    vec![p(0.0, 0.0), p(1.0, 0.0), p(1.0, 1.0), p(0.0, 1.0)],
+                    true,
+                ),
+                "増やして閉じる",
+            ),
+        ] {
+            let err = assert_rejected(&mut doc, ReplaceGeometries::one("TEST", id, geom));
+            assert!(matches!(err, CadError::NotEditable(_)), "{what}: {err:?}");
+        }
+    }
+
+    /// 定義 1 つ（3 頂点のポリライン、頂点 2 の X に束縛）を置き、インプレース編集に入った図面。
+    ///
+    /// 返すのは（図面, 定義, 編集に入ったときの配置, 図面に出たポリラインの ID）。
+    fn doc_editing_bound_polyline() -> (Document, DefinitionId, Placement, EntityId) {
+        let mut doc = Document::new();
+        let contents = vec![Entity::new(
+            poly(vec![p(0.0, 0.0), p(4.0, 0.0), p(4.0, 3.0)], false),
+            LayerId::ZERO,
+        )];
+        doc.apply(Box::new(DefineComponent::new(
+            "DEF",
+            "枠",
+            Point2::ORIGIN,
+            contents,
+        )))
+        .unwrap();
+        let def = doc.definitions().iter().next().unwrap().0;
+        doc.apply(Box::new(SetDefinitionParams::new(
+            "PARAM",
+            def,
+            vec![ParamDecl::number("幅", 4.0)],
+        )))
+        .unwrap();
+        doc.apply(Box::new(SetBinding::new(
+            "BIND",
+            def,
+            Binding::new(0, Slot::PolylineVx(2), parse("幅").unwrap()),
+        )))
+        .unwrap();
+        let placement = Placement::at(p(10.0, 20.0));
+        doc.apply(Box::new(InsertInstance::new(
+            "INSERT",
+            def,
+            placement,
+            LayerId::ZERO,
+        )))
+        .unwrap();
+        let inst = doc.entities().ids().next().unwrap();
+
+        doc.apply(Box::new(EnterDefinitionEdit::new("EDITCOMP", inst)))
+            .unwrap();
+        let member = doc
+            .entities()
+            .iter()
+            .find(|(_, e)| matches!(e.geom, Geometry::Polyline(_)))
+            .expect("中身が図面に出ていること")
+            .0;
+        (doc, def, placement, member)
+    }
+
+    /// 編集を抜けて、定義に残った束縛を返す。
+    fn exit_and_bindings(
+        doc: &mut Document,
+        def: DefinitionId,
+        placement: Placement,
+        member: EntityId,
+    ) -> Vec<Binding> {
+        doc.apply(Box::new(ExitDefinitionEdit::new(
+            "EDITCOMP",
+            def,
+            placement,
+            vec![member],
+            vec![Some(0)],
+        )))
+        .unwrap();
+        doc.definitions().get(def).unwrap().bindings.clone()
+    }
+
+    /// **インプレース編集中に頂点を減らす置き換えは拒まれ、束縛も形も残ること**（Issue #55 の再現）。
+    ///
+    /// 通してしまうと、編集を抜けたときに `Binding::fits` に落ちて束縛が黙って消える。
+    #[test]
+    fn in_place_edit_rejects_dropping_a_bound_polyline_vertex() {
+        let (mut doc, def, placement, member) = doc_editing_bound_polyline();
+        let before = geom_of(&doc, member);
+
+        let err = assert_rejected(
+            &mut doc,
+            ReplaceGeometries::one(
+                "GRIP",
+                member,
+                poly(vec![p(10.0, 20.0), p(14.0, 20.0)], false),
+            ),
+        );
+        assert!(matches!(err, CadError::NotEditable(_)), "{err:?}");
+        assert_eq!(geom_of(&doc, member), before, "形は変わらない");
+
+        let bindings = exit_and_bindings(&mut doc, def, placement, member);
+        assert_eq!(bindings.len(), 1, "**束縛が残る**");
+        assert_eq!(bindings[0].slot, Slot::PolylineVx(2));
+    }
+
+    /// 頂点の数が同じなら、インプレース編集中でも今までどおり置き換えられ、束縛も残ること。
+    #[test]
+    fn in_place_edit_accepts_same_vertex_count_and_keeps_the_binding() {
+        let (mut doc, def, placement, member) = doc_editing_bound_polyline();
+        let moved = poly(vec![p(10.0, 20.0), p(14.0, 20.0), p(14.0, 25.0)], true);
+
+        doc.apply(Box::new(ReplaceGeometries::one(
+            "GRIP",
+            member,
+            moved.clone(),
+        )))
+        .unwrap();
+        assert_eq!(geom_of(&doc, member), moved);
+
+        let bindings = exit_and_bindings(&mut doc, def, placement, member);
+        assert_eq!(bindings.len(), 1, "束縛が残る");
+        assert_eq!(bindings[0].slot, Slot::PolylineVx(2));
     }
 
     #[test]
