@@ -1,13 +1,14 @@
 //! 全選択（Ctrl+A / SELECTALL、Issue #34 段階 3）の見た目。
 //!
-//! 全選択した状態（ロックされたレイヤの図形は選ばれない）と、リボンのホームの「選択」グループを
+//! 全選択した状態（ロックされたレイヤの図形は選ばれない）、効かない段階の案内（Issue #74）と、
+//! リボンのホームの「選択」グループを
 //! `target/ui-snapshots/select_all_*.png` / `ribbon_j_*.png` に撮る。
 
 use cad_core::command::{AddEntities, AddLayer, SetLayerProperties};
 use cad_core::geom::{Circle, Line, Point2, Polyline};
 use cad_core::{AciColor, Document, Entity, Geometry, LayerId};
 
-use super::{harness, hover, ribbon_button_rect, shot, CANVAS_CENTER, STEPS};
+use super::{harness, hover, line_second_point, ribbon_button_rect, shot, CANVAS_CENTER, STEPS};
 
 /// レイヤ 0 に線分・円・ポリライン、レイヤ `ロック済み`（ロック）に線分と円を並べる。
 fn draw(doc: &mut Document) {
@@ -73,6 +74,22 @@ fn ui_snapshot_select_all() {
     );
     h.run_steps(STEPS);
     shot(&mut h, "select_all_a_ctrl_a_with_locked_layer");
+}
+
+/// LINE の 2 点目を待っている間に Ctrl+A を 3 回。選択は変わらず、履歴に灰色の案内が 1 行だけ出る
+/// （Issue #74 の 1。連打で積まない）。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_select_all_unavailable() {
+    let mut h = line_second_point();
+    for _ in 0..3 {
+        h.key_press_modifiers(
+            egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
+            egui::Key::A,
+        );
+        h.run_steps(STEPS);
+    }
+    shot(&mut h, "select_all_b_unavailable_while_line");
 }
 
 /// リボンのホームの末尾の「選択」グループ。ホームが収まる幅（1400px）で撮り、

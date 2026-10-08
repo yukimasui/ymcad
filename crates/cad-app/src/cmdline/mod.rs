@@ -952,7 +952,8 @@ impl CommandLine {
         // 打ちかけの文字があるときは奪わない。入力欄（`TextEdit`）が受け取り、文字の全選択になる
         // （ユーザー判断 5）。効く段階か（点や値の入力中は効かない）は `Session::select_all` が決める。
         // 印を立てるだけで return はしない（同じフレームの Enter を取りこぼさない）。
-        if self.input.is_empty() && i.consume_key(egui::Modifiers::COMMAND, egui::Key::A) {
+        // 修飾キーは厳密に比べる（Ctrl+Shift+A・Ctrl+Alt+A では全選択しない。Issue #74 の 5）。
+        if self.input.is_empty() && consume_key_exact(i, egui::Modifiers::COMMAND, egui::Key::A) {
             self.select_all_requested = true;
         }
 
@@ -1177,6 +1178,31 @@ fn lock_icon(ui: &mut egui::Ui, visible: bool) {
         [at(8.0, 10.8), at(8.0, 12.8)],
         egui::Stroke::new(1.3 * unit, hole),
     );
+}
+
+/// `modifiers` と**ちょうど同じ**修飾キーで押された `key` を消費し、あったかを返す。
+///
+/// egui の `consume_key` は `Modifiers::matches_logically` で比べるので、余分な Shift・Alt が
+/// 付いていても一致する（Ctrl+Shift+A も Ctrl+A になる）。こちらは `matches_exact` で比べる。
+/// Ctrl と Command の違いは `matches_exact` が吸収する（Linux の Ctrl は `ctrl` と `command` の
+/// 両方が立つが、`COMMAND` と一致する）。同じフレームに複数あれば（キーリピート）全部を消費する
+/// （`consume_key` と同じ。残すと入力欄へ流れる）。
+fn consume_key_exact(i: &mut egui::InputState, modifiers: egui::Modifiers, key: egui::Key) -> bool {
+    let mut found = false;
+    i.events.retain(|event| {
+        let hit = matches!(
+            event,
+            egui::Event::Key {
+                key: k,
+                modifiers: m,
+                pressed: true,
+                ..
+            } if *k == key && m.matches_exact(modifiers)
+        );
+        found |= hit;
+        !hit
+    });
+    found
 }
 
 #[cfg(test)]
