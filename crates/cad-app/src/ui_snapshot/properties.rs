@@ -180,3 +180,35 @@ fn ui_snapshot_properties_three_panels() {
     hover(&mut h, CANVAS_CENTER);
     shot(&mut h, "properties_k_three_panels");
 }
+
+/// ロック中のレイヤへ移して選択から外れた直後（レイヤとプロパティの 2 枚）。案内が両方のパネルに出る。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_properties_moved_out_note() {
+    let (mut h, _) = opened(|d| vec![d.line, d.circle]);
+    type_text(&mut h, "LA");
+    press(&mut h, egui::Key::Enter);
+    let (doc, session) = h.state_mut().parts_mut();
+    let locked = doc.layers().by_name("ロック済み").expect("ロック済み");
+    let ids = session.selection.to_vec();
+    session.apply_external(
+        Box::new(cad_core::command::MoveEntitiesToLayer::new(ids, locked)),
+        doc,
+    );
+    h.run_steps(STEPS);
+    hover(&mut h, CANVAS_CENTER);
+    shot(&mut h, "properties_l_moved_out_note");
+}
+
+/// コマンド実行中は、レイヤパネルの「移動」の行もグレーで、同じ案内が出る。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_properties_busy_with_the_layer_panel() {
+    let (mut h, _) = opened(|d| vec![d.circle]);
+    type_text(&mut h, "LA");
+    press(&mut h, egui::Key::Enter);
+    type_text(&mut h, "L");
+    press(&mut h, egui::Key::Enter);
+    hover(&mut h, egui::pos2(500.0, 300.0));
+    shot(&mut h, "properties_m_busy_with_layers");
+}

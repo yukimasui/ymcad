@@ -15,6 +15,8 @@ use cad_core::command::{
 use cad_core::layer::LineType;
 use cad_core::{AciColor, Command, Document, LayerId};
 
+use crate::properties::BUSY_NOTE;
+use crate::properties_panel::{BUSY_COLOR, DROP_NOTE_COLOR};
 use crate::selection::Selection;
 
 /// レイヤパネルの色見本で選べる ACI 色。
@@ -73,12 +75,18 @@ impl LayerPanel {
     /// パネルを描画し、実行すべきコマンドを返す。
     ///
     /// 返り値が空でなければ、呼び出し側が `Document::apply` で適用する。
+    ///
+    /// `busy` … コマンド（選択待ちを含む）を実行中か。真の間は「移動」の行を押せなくする
+    /// （プロパティパネルと同じ規則。実行中のツールが覚えている図形を横から動かさない）。
+    /// `drop_note` … 図形をロック・非表示のレイヤへ移して選択から外れたときの案内。
     #[must_use]
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         doc: &Document,
         selection: &Selection,
+        busy: bool,
+        drop_note: Option<&str>,
     ) -> Vec<Box<dyn Command>> {
         let mut commands: Vec<Box<dyn Command>> = Vec::new();
         if !self.open {
@@ -103,7 +111,7 @@ impl LayerPanel {
             });
 
         ui.separator();
-        self.show_move_row(ui, doc, selection, &mut commands);
+        self.show_move_row(ui, doc, selection, busy, drop_note, &mut commands);
 
         commands
     }
@@ -276,25 +284,35 @@ impl LayerPanel {
         }
     }
 
-    /// 選択中の要素を別レイヤへ移す行。
+    /// 選択中の図形を別レイヤへ移す行。
     fn show_move_row(
         &self,
         ui: &mut egui::Ui,
         doc: &Document,
         selection: &Selection,
+        busy: bool,
+        drop_note: Option<&str>,
         commands: &mut Vec<Box<dyn Command>>,
     ) {
+        if let Some(note) = drop_note {
+            ui.colored_label(DROP_NOTE_COLOR, note);
+        }
+        if busy {
+            ui.colored_label(BUSY_COLOR, BUSY_NOTE);
+        }
         ui.horizontal_wrapped(|ui| {
             if selection.is_empty() {
-                ui.weak("選択中の要素を別のレイヤへ移すには、先に要素を選択してください");
+                ui.weak("選択中の図形を別のレイヤへ移すには、先に図形を選択してください");
                 return;
             }
-            ui.label(format!("選択中の {} 要素を移動:", selection.len()));
-            for (id, layer) in doc.layers().iter() {
-                if ui.button(&layer.name).clicked() {
-                    commands.push(Box::new(MoveEntitiesToLayer::new(selection.to_vec(), id)));
+            ui.label(format!("選択中の {} 個を移動:", selection.len()));
+            ui.add_enabled_ui(!busy, |ui| {
+                for (id, layer) in doc.layers().iter() {
+                    if ui.button(&layer.name).clicked() {
+                        commands.push(Box::new(MoveEntitiesToLayer::new(selection.to_vec(), id)));
+                    }
                 }
-            }
+            });
         });
     }
 }

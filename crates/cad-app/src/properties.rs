@@ -25,7 +25,13 @@ use crate::selection::Selection;
 /// 何も選んでいないときの案内。
 pub const EMPTY_NOTE: &str = "図形を選ぶと、ここに値が出ます";
 /// コマンド実行中（選択待ちを含む）の案内。パネルは表示だけになる。
-pub const BUSY_NOTE: &str = "コマンド実行中は変更できません（Esc で中断）";
+///
+/// Esc で中断すると選択も外れる（`Session::cancel`）。「Esc を押せば変えられる」と読んで
+/// 選び直しになる人が出ないよう、そう書いておく。
+pub const BUSY_NOTE: &str =
+    "コマンド実行中は変更できません（終えるか Esc で中断。中断すると選択も外れます）";
+/// レイヤへの移動（`MoveEntitiesToLayer`）の名前。パネルから返るコマンドを見分けるのに使う。
+pub const MOVE_TO_LAYER_COMMAND: &str = "LAYER_MOVE_ENTITIES";
 /// 選択がまたぐレイヤが 1 つに決まらないときの、ドロップダウンの表示。
 pub const MIXED_LAYER: &str = "（混在）";
 /// 複数選択のとき、個々の値は出さない旨の案内。
@@ -187,6 +193,25 @@ pub fn layer_label(layer: &Layer) -> String {
         (false, true) => format!("{}（非表示）", layer.name),
         (true, true) => format!("{}（ロック中・非表示）", layer.name),
     }
+}
+
+/// 図形を `layer` へ移した結果、選択から外れたときの案内。
+///
+/// ロック・非表示のレイヤにある図形は選べない（選択の規則）ので、移すと選択が空になる。
+/// パネルが黙って空の表示に戻ると、移せたのか取り消されたのか分からない。移し先の名前と、
+/// 外れる理由（ロックなら編集できない、非表示なら画面から消える）を言う。
+#[must_use]
+pub fn moved_out_note(count: usize, layer: &Layer) -> String {
+    let why = match (layer.locked, !layer.visible) {
+        (true, false) => "ロック中のレイヤなので",
+        (false, true) => "非表示のレイヤなので画面から消え、",
+        (true, true) => "ロック中かつ非表示のレイヤなので画面から消え、",
+        (false, false) => "",
+    };
+    format!(
+        "{count} 個を「{}」へ移しました。{why}選択から外れます（U で戻せます）",
+        layer.name
+    )
 }
 
 /// 選択した図形のレイヤ。
@@ -526,6 +551,42 @@ mod tests {
             assert!(labels.insert(kind_of(g).label()));
             assert!(!items(g, &defs).is_empty());
         }
+    }
+
+    /// `Session::apply_external` はこの名前で「レイヤへの移動」を見分ける。cad-core 側の名前が
+    /// 変わったら、案内が黙って出なくなる前にここで落とす。
+    #[test]
+    fn the_move_to_layer_command_name_matches_cad_core() {
+        use cad_core::command::MoveEntitiesToLayer;
+        use cad_core::Command as _;
+        assert_eq!(
+            MoveEntitiesToLayer::new(Vec::new(), LayerId::ZERO).name(),
+            MOVE_TO_LAYER_COMMAND
+        );
+    }
+
+    #[test]
+    fn moved_out_note_names_the_destination_and_the_reason() {
+        let mut l = Layer::new("ロック済み", AciColor::WHITE);
+        l.locked = true;
+        assert_eq!(
+            moved_out_note(2, &l),
+            "2 個を「ロック済み」へ移しました。ロック中のレイヤなので選択から外れます（U で戻せます）"
+        );
+        l.locked = false;
+        l.visible = false;
+        let hidden = moved_out_note(1, &l);
+        assert!(hidden.contains("「ロック済み」へ移しました"), "{hidden}");
+        assert!(
+            hidden.contains("非表示") && hidden.contains("画面から消え"),
+            "{hidden}"
+        );
+        l.locked = true;
+        let both = moved_out_note(1, &l);
+        assert!(
+            both.contains("ロック中") && both.contains("非表示"),
+            "{both}"
+        );
     }
 
     #[test]

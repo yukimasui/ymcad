@@ -312,21 +312,71 @@ fn choosing_the_current_layer_again_does_nothing() {
     let Scene { mut h, ids } = scene();
     select(&mut h, &ids[2..]);
     let undo_depth = h.state().doc.history().len();
+    let dirty = h.state().doc.is_dirty();
+    let before = layers_of(&h, &ids);
     choose_layer(&mut h, "L1");
     assert_eq!(h.state().doc.history().len(), undo_depth, "履歴は増えない");
-    assert!(!h.state().doc.is_dirty() || undo_depth > 0);
+    assert_eq!(h.state().doc.is_dirty(), dirty, "未保存の印も変わらない");
+    assert_eq!(layers_of(&h, &ids), before, "レイヤは変わらない");
+    assert_eq!(h.state().session.selection.len(), 1, "選択もそのまま");
 }
 
-/// ロック・非表示のレイヤへも移せる。移した結果は選択から外れ、そう案内する。
-#[test]
-fn moving_to_a_locked_or_hidden_layer_drops_the_selection_with_a_note() {
-    for (target, label) in [
-        ("LOCKED", "LOCKED（ロック中）"),
-        ("HIDDEN", "HIDDEN（非表示）"),
+/// レイヤパネルの「移動」の行で `name` のボタンを押す（行は一番下なので最後に見つかるラベル）。
+fn press_move_button(h: &mut Harness<'_, CadApp>, name: &str) {
+    let button = h
+        .query_all_by_label(name)
+        .last()
+        .unwrap_or_else(|| panic!("「移動」の行に {name} のボタンが無い"));
+    button.click();
+    settle(h);
+}
+
+fn open_layer_panel(h: &mut Harness<'_, CadApp>) {
+    if !h.state().layer_panel.is_open() {
+        h.state_mut().layer_panel.toggle();
+    }
+    settle(h);
+}
+
+fn info_lines(h: &Harness<'_, CadApp>) -> Vec<String> {
+    h.state()
+        .session
+        .cmdline
+        .history()
+        .filter(|l| l.kind == LineKind::Info)
+        .map(|l| l.text.clone())
+        .collect()
+}
+
+/// ロック・非表示のレイヤへ移すと選択から外れる。移し先の名前と理由つきの案内が、コマンドラインと
+/// 開いている両方のパネルに出る。プロパティパネルのドロップダウンからでも、レイヤパネルの
+/// 「移動」の行からでも同じ（案内は `Session::apply_external` が出す）。
+fn moving_to_an_uneditable_layer_drops_the_selection_with_a_note(via_layer_panel: bool) {
+    for (target, label, note) in [
+        (
+            "LOCKED",
+            "LOCKED（ロック中）",
+            "2 個を「LOCKED」へ移しました。ロック中のレイヤなので選択から外れます（U で戻せます）",
+        ),
+        (
+            "HIDDEN",
+            "HIDDEN（非表示）",
+            "2 個を「HIDDEN」へ移しました。非表示のレイヤなので画面から消え、選択から外れます（U で戻せます）",
+        ),
     ] {
         let Scene { mut h, ids } = scene();
+        // ドロップダウンはレイヤパネルの線種の欄と区別がつかなくなるので、レイヤパネルは後で開く。
+        if via_layer_panel {
+            open_layer_panel(&mut h);
+        }
         select(&mut h, &ids[..2]);
-        choose_layer(&mut h, label);
+        assert!(!has(&h, note), "{target}: 前提: 移す前は案内が無い");
+        if via_layer_panel {
+            press_move_button(&mut h, target);
+        } else {
+            choose_layer(&mut h, label);
+            open_layer_panel(&mut h);
+        }
 
         let dest = layer(&h, target);
         assert_eq!(layers_of(&h, &ids[..2]), vec![dest; 2], "{target}: 移る");
@@ -335,19 +385,24 @@ fn moving_to_a_locked_or_hidden_layer_drops_the_selection_with_a_note() {
             "{target}: 選択から外れる"
         );
         assert!(has(&h, EMPTY_NOTE));
-        let infos: Vec<String> = h
-            .state()
-            .session
-            .cmdline
-            .history()
-            .filter(|l| l.kind == LineKind::Info)
-            .map(|l| l.text.clone())
-            .collect();
         assert!(
-            infos
-                .iter()
-                .any(|t| t.contains("選択から外れました") && t.contains('2')),
-            "{target}: 案内が出る: {infos:?}"
+            info_lines(&h).iter().any(|t| t == note),
+            "{target}: コマンドラインに案内が出る: {:?}",
+            info_lines(&h)
+        );
+        assert_eq!(
+            h.query_all_by_label(note).count(),
+            3,
+            "{target}: コマンドラインの履歴に加えて、プロパティとレイヤの両方のパネルにも出る"
+        );
+
+        // 選び直したら古い案内は消える（次の選択まで出し続けるだけ）。
+        select(&mut h, &ids[2..]);
+        assert!(h.state().session.drop_note().is_none());
+        assert_eq!(
+            h.query_all_by_label(note).count(),
+            1,
+            "{target}: 選び直したらパネルの案内は消える（履歴の 1 行だけ残る）"
         );
 
         type_text(&mut h, "U");
@@ -358,6 +413,32 @@ fn moving_to_a_locked_or_hidden_layer_drops_the_selection_with_a_note() {
             "{target}: Undo で戻る"
         );
     }
+}
+
+/// ロック・非表示のレイヤへも移せる（プロパティパネルのドロップダウンから）。
+#[test]
+fn moving_to_a_locked_or_hidden_layer_drops_the_selection_with_a_note() {
+    moving_to_an_uneditable_layer_drops_the_selection_with_a_note(false);
+}
+
+/// 同じことをレイヤパネルの「移動」の行からしても、同じ案内が出る
+/// （修正前はプロパティパネルだけが、しかも曖昧な文言で案内していた）。
+#[test]
+fn moving_from_the_layer_panel_gives_the_same_note() {
+    moving_to_an_uneditable_layer_drops_the_selection_with_a_note(true);
+}
+
+/// 普通のレイヤへ移したときは案内を出さない（選択も残る）。
+#[test]
+fn moving_to_an_ordinary_layer_gives_no_note() {
+    let Scene { mut h, ids } = scene();
+    open_layer_panel(&mut h);
+    select(&mut h, &ids[..2]);
+    let infos = info_lines(&h);
+    press_move_button(&mut h, "L1");
+    assert_eq!(h.state().session.selection.len(), 2, "選択は残る");
+    assert_eq!(info_lines(&h), infos, "案内は増えない");
+    assert!(h.state().session.drop_note().is_none());
 }
 
 // ---- コマンド実行中は表示だけ -----------------------------------------------------
@@ -405,6 +486,106 @@ fn the_panel_is_display_only_while_a_command_runs() {
     choose_layer(&mut h, "L1");
     let l1 = layer(&h, "L1");
     assert_eq!(layers_of(&h, &ids[..2]), vec![l1; 2]);
+}
+
+/// コマンド実行中（選択待ちを含む）は、レイヤパネルの「移動」の行も押せない。プロパティパネルと
+/// 同じ案内が出る。修正前は「移動」の行だけ押せて、実行中のコマンドの下でレイヤが変わった。
+#[test]
+fn the_layer_panels_move_row_is_disabled_while_a_command_runs() {
+    let Scene { mut h, ids } = scene();
+    open_layer_panel(&mut h);
+    assert!(
+        BUSY_NOTE.contains("中断すると選択も外れます"),
+        "案内に、中断すると選択も外れることを添える"
+    );
+    // MOVE（基点待ち。選択済みで始める）と ERASE（選択待ち。選択を空にして始め、待つ間に選び直す）。
+    for (name, select_first) in [("MOVE", true), ("ERASE", false)] {
+        let before = layers_of(&h, &ids);
+        let undo_depth = h.state().doc.history().len();
+        select(&mut h, if select_first { &ids[..2] } else { &[] });
+        hover(&mut h, P1);
+        type_text(&mut h, name);
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(h.state().session.active_command(), Some(name), "前提");
+        select(&mut h, &ids[..2]);
+        assert_eq!(
+            h.query_all_by_label(BUSY_NOTE).count(),
+            2,
+            "{name}: 両方のパネルに案内が出る"
+        );
+
+        press_move_button(&mut h, "L1");
+        assert_eq!(layers_of(&h, &ids), before, "{name}: レイヤは変わらない");
+        assert_eq!(
+            h.state().doc.history().len(),
+            undo_depth,
+            "{name}: 履歴も同じ"
+        );
+        assert_eq!(
+            h.state().session.active_command(),
+            Some(name),
+            "{name}: 続く"
+        );
+
+        press(&mut h, egui::Key::Escape);
+        assert!(!has(&h, BUSY_NOTE), "{name}: 終われば案内が消える");
+    }
+
+    // 対照: 終われば押せる。
+    select(&mut h, &ids[..2]);
+    press_move_button(&mut h, "L1");
+    let l1 = layer(&h, "L1");
+    assert_eq!(layers_of(&h, &ids[..2]), vec![l1; 2], "終われば移せる");
+}
+
+/// 右側のパネルを 3 枚開いても、作図領域は最小幅を保ち、どのパネルも中身が隣へはみ出さない。
+/// 修正前は 1280px で作図領域が約 60px になった（レイヤ・コンポーネント各 460px ＋ プロパティ 300px）。
+#[test]
+fn three_side_panels_leave_the_canvas_its_minimum_width() {
+    let Scene { mut h, ids } = scene();
+    let wide = h.state().viewport.rect().width();
+    open_layer_panel(&mut h);
+    let with_layers = h.state().viewport.rect().width();
+    assert!(with_layers < wide, "前提: パネルを開くと作図領域は狭まる");
+
+    h.state_mut().component_panel.toggle();
+    select(&mut h, &ids[..1]);
+    assert!(open(&h), "前提: 3 枚目まで開いた");
+    assert!(h.state().layer_panel.is_open() && h.state().component_panel.is_open());
+    let canvas = h.state().viewport.rect();
+    assert!(
+        canvas.width() >= crate::app::MIN_CANVAS_WIDTH - 1.0,
+        "作図領域が最小幅を保つ: {}px",
+        canvas.width()
+    );
+    assert!(
+        canvas.width() < 800.0,
+        "前提: 3 枚開いたので、確かに狭まっている: {}px",
+        canvas.width()
+    );
+
+    // 内側のパネル（プロパティ）が、最小幅も取れずに隣へはみ出していない。
+    // 項目名の欄はパネルの左端に置かれるので、作図領域の右端より右にあるはず。
+    let label = h.get_by_label("長さ").rect();
+    assert!(
+        label.left() >= canvas.right(),
+        "プロパティの中身が作図領域に食い込んでいる: 項目名 {label:?} / 作図領域 {canvas:?}"
+    );
+}
+
+/// 狭い画面（1024px）でも、3 枚開いて作図領域の最小幅が残る。
+#[test]
+fn the_canvas_minimum_width_holds_on_a_narrow_screen() {
+    let mut h = app_with_width(1024.0);
+    open_layer_panel(&mut h);
+    h.state_mut().component_panel.toggle();
+    press_ctrl_1(&mut h);
+    assert!(open(&h) && h.state().layer_panel.is_open() && h.state().component_panel.is_open());
+    let canvas = h.state().viewport.rect().width();
+    assert!(
+        canvas >= crate::app::MIN_CANVAS_WIDTH - 1.0,
+        "作図領域が最小幅を保つ: {canvas}px"
+    );
 }
 
 /// 要約のキャッシュは、同じ図面・同じ選択のフレームでは作り直さない。

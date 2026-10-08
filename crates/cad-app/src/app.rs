@@ -33,6 +33,20 @@ fn default_drawing_limits() -> Aabb {
 const FIT_MARGIN: f64 = 0.05;
 /// プロパティパネルの既定の幅 [px]。レイヤ・コンポーネントより狭い（値が主で、長い表は無い）。
 const PROPERTIES_PANEL_WIDTH: f32 = 300.0;
+/// レイヤ・コンポーネントパネルの既定の幅 [px]。レイヤの 1 行（約 310px）が収まる幅。
+const SIDE_PANEL_WIDTH: f32 = 370.0;
+/// 右側のパネルを何枚開いても作図領域に残す幅の最小 [px]。
+///
+/// 外側のパネルから順に、残りの幅からこれを引いた分までしか広がれない。ユーザーがドラッグで
+/// 広げた後や狭い画面でも毎フレーム効く（保存された幅も範囲に収められる）。
+const MIN_CANVAS_WIDTH: f32 = 400.0;
+/// 各パネルの最小幅 [px]。中身（レイヤの 1 行、プロパティの表）がはみ出さずに収まる幅。
+///
+/// egui の `Panel` は、範囲の上限が中身の最小幅より狭いと、中身を隣のパネルの上にはみ出して
+/// 描いてしまう。そうなる前に、内側のパネルの分を外側のパネルが空けておく（[`right_panel`]）。
+const LAYER_PANEL_MIN_WIDTH: f32 = 330.0;
+const COMPONENT_PANEL_MIN_WIDTH: f32 = 240.0;
+const PROPERTIES_PANEL_MIN_WIDTH: f32 = 200.0;
 /// クリック選択の拾い半径 [px]。画面上で一定になるようモデル空間へ換算して使う。
 const PICK_RADIUS_PX: f32 = 6.0;
 /// この距離[px]を超えてドラッグしたら、クリックではなく矩形選択とみなす。
@@ -763,6 +777,30 @@ fn ellipsize(text: &str, max_chars: usize) -> String {
     short
 }
 
+/// 右側のパネル。幅は、残りの幅から作図領域の最小幅を引いた分までに毎フレーム収める。
+///
+/// `reserved` … このパネルより内側（あとで置く）の、開いているパネルの最小幅の合計。
+/// これを空けておかないと、3 枚開いたとき内側のパネルが中身の最小幅より狭くなる。
+/// 画面が狭くて空けられないときは、作図領域の最小幅を優先して、内側のパネルが縮む。
+fn right_panel(
+    id: &'static str,
+    default_width: f32,
+    min_width: f32,
+    reserved: f32,
+    ui: &egui::Ui,
+) -> egui::Panel {
+    let room = (ui.available_width() - MIN_CANVAS_WIDTH).max(0.0);
+    let max = if room - reserved >= min_width {
+        room - reserved
+    } else {
+        room
+    };
+    egui::Panel::right(id)
+        .default_size(default_width)
+        .min_size(min_width)
+        .max_size(max)
+}
+
 impl CadApp {
     /// ファイル操作の結果をコマンドラインへ出す。
     fn report_file_outcome(&mut self, outcome: FileOutcome) {
@@ -775,7 +813,9 @@ impl CadApp {
                 // コンポーネントの編集）とスナップを捨てる（ADR-0039）。
                 // 座標の欄も最小の幅へ戻す（広がったままにしない）。
                 self.session.document_replaced();
-                // 版番号が前の図面と重なりうるので、選択の要約も作り直す。
+                // 念のための無効化。`document_replaced` が選択を空にして選択の版が進むので、
+                // 通常は要約のキャッシュのキーが変わって作り直される。版番号が前の図面と
+                // 偶然重なっても古い要約が残らないよう、明示的に捨てておく（必須の処理ではない）。
                 self.properties_panel.invalidate();
                 self.session.cmdline.info(msg);
                 self.snap.release();
@@ -827,21 +867,48 @@ impl CadApp {
         format!("{dirty}{name} — ymcad")
     }
 
+    /// 内側に置くパネルのうち開いているものの最小幅の合計（[`right_panel`] の `reserved`）。
+    /// `with_components` … コンポーネントパネルも内側にあるか（レイヤパネルのとき）。
+    fn reserved_width(&self, with_components: bool) -> f32 {
+        let components = if with_components && self.component_panel.is_open() {
+            COMPONENT_PANEL_MIN_WIDTH
+        } else {
+            0.0
+        };
+        let properties = if self.properties_panel.is_open() {
+            PROPERTIES_PANEL_MIN_WIDTH
+        } else {
+            0.0
+        };
+        components + properties
+    }
+
     /// レイヤパネルを描画し、返ってきたコマンドを適用する。
     fn layer_area(&mut self, ui: &mut egui::Ui) {
         if !self.layer_panel.is_open() {
             return;
         }
-        egui::Panel::right("layers")
-            .default_size(460.0)
-            .show(ui, |ui| {
-                let commands = self
-                    .layer_panel
-                    .show(ui, &self.doc, &self.session.selection);
-                for cmd in commands {
-                    self.session.apply_external(cmd, &mut self.doc);
-                }
-            });
+        let busy = self.session.active_command().is_some();
+        let reserved = self.reserved_width(true);
+        right_panel(
+            "layers",
+            SIDE_PANEL_WIDTH,
+            LAYER_PANEL_MIN_WIDTH,
+            reserved,
+            ui,
+        )
+        .show(ui, |ui| {
+            let commands = self.layer_panel.show(
+                ui,
+                &self.doc,
+                &self.session.selection,
+                busy,
+                self.session.drop_note(),
+            );
+            for cmd in commands {
+                self.session.apply_external(cmd, &mut self.doc);
+            }
+        });
     }
 }
 
@@ -851,26 +918,32 @@ impl CadApp {
         if !self.component_panel.is_open() {
             return;
         }
-        egui::Panel::right("components")
-            .default_size(460.0)
-            .show(ui, |ui| {
-                let (commands, request) = self.component_panel.show(
-                    ui,
-                    &self.doc,
-                    &self.session.selection,
-                    self.session.editing(),
+        let reserved = self.reserved_width(false);
+        right_panel(
+            "components",
+            SIDE_PANEL_WIDTH,
+            COMPONENT_PANEL_MIN_WIDTH,
+            reserved,
+            ui,
+        )
+        .show(ui, |ui| {
+            let (commands, request) = self.component_panel.show(
+                ui,
+                &self.doc,
+                &self.session.selection,
+                self.session.editing(),
+            );
+            for cmd in commands {
+                self.session.apply_external(cmd, &mut self.doc);
+            }
+            if let Some(PanelRequest::Insert(def)) = request {
+                // 名前を打たせずに INSERT を始める。
+                self.session.start_tool_directly(
+                    Box::new(crate::tools::component::InsertTool::for_definition(def)),
+                    &mut self.doc,
                 );
-                for cmd in commands {
-                    self.session.apply_external(cmd, &mut self.doc);
-                }
-                if let Some(PanelRequest::Insert(def)) = request {
-                    // 名前を打たせずに INSERT を始める。
-                    self.session.start_tool_directly(
-                        Box::new(crate::tools::component::InsertTool::for_definition(def)),
-                        &mut self.doc,
-                    );
-                }
-            });
+            }
+        });
     }
 }
 
@@ -881,31 +954,28 @@ impl CadApp {
         if !self.properties_panel.is_open() {
             return;
         }
-        egui::Panel::right("properties")
-            .default_size(PROPERTIES_PANEL_WIDTH)
-            .show(ui, |ui| {
-                // 選択待ちを含め、コマンドを実行している間は表示だけにする。
-                let busy = self.session.active_command().is_some();
-                let commands = self.properties_panel.show(
-                    ui,
-                    &self.doc,
-                    &self.session.selection,
-                    busy,
-                );
-                for cmd in commands {
-                    let before = self.session.selection.len();
-                    self.session.apply_external(cmd, &mut self.doc);
-                    let dropped = before.saturating_sub(self.session.selection.len());
-                    // 実行中は `apply_external` が案内する（ここへ来るのは実行中でないときだけ）。
-                    // ロック・非表示のレイヤへ移すと選択から外れる。パネルは空の表示に変わるので、
-                    // 黙っていると消えたように見える。
-                    if dropped > 0 && !busy {
-                        self.session.cmdline.info(format!(
-                            "PROPERTIES: 移し先のレイヤがロックか非表示のため、{dropped} 個が選択から外れました"
-                        ));
-                    }
-                }
-            });
+        right_panel(
+            "properties",
+            PROPERTIES_PANEL_WIDTH,
+            PROPERTIES_PANEL_MIN_WIDTH,
+            0.0,
+            ui,
+        )
+        .show(ui, |ui| {
+            // 選択待ちを含め、コマンドを実行している間は表示だけにする。
+            let busy = self.session.active_command().is_some();
+            let commands = self.properties_panel.show(
+                ui,
+                &self.doc,
+                &self.session.selection,
+                busy,
+                self.session.drop_note(),
+            );
+            // 選択から外れたときの案内は `Session::apply_external` が出す（レイヤパネルと共通）。
+            for cmd in commands {
+                self.session.apply_external(cmd, &mut self.doc);
+            }
+        });
     }
 
     /// Ctrl+1 でプロパティパネルを開閉する。
