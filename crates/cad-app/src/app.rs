@@ -11,7 +11,7 @@ use crate::drafting::{self, Drafting};
 use crate::file_ops::{self, FileOps, FileOutcome};
 use crate::hover::Hover;
 use crate::input::{self, ViewAction};
-use crate::layer_panel::LayerPanel;
+use crate::layer_panel::{LayerPanel, PanelNotice};
 use crate::properties_panel::PropertiesPanel;
 use crate::render;
 use crate::resolved::ResolvedInstances;
@@ -988,6 +988,11 @@ impl CadApp {
                 );
                 for cmd in commands {
                     self.session.apply_external(cmd, &mut self.doc);
+                }
+                match self.layer_panel.take_notice() {
+                    Some(PanelNotice::Info(text)) => self.session.cmdline.info(text),
+                    Some(PanelNotice::Error(text)) => self.session.cmdline.error(text),
+                    None => {}
                 }
             });
         });
