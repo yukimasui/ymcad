@@ -224,7 +224,9 @@ def run(binary: Path, root: Path) -> list[Path]:
 
     # --- 安全策 -------------------------------------------------------------
     c.fails("open_drawing", {"path": "../sample.ymc"}, "..")
-    c.fails("save_drawing", {"path": "/tmp/ymcad-mcp-smoke-outside.ymc"}, "root")
+    outside = root.parent / f"{root.name}-mcp-smoke-outside.ymc"
+    check(outside.parent != root, "作業ディレクトリに / は使えません")
+    c.fails("save_drawing", {"path": str(outside)}, "root")
     c.fails("save_drawing", {"path": "note.txt"}, "拡張子")
     c.fails("new_drawing", {"bogus": 1}, "bogus")
 
@@ -234,7 +236,7 @@ def run(binary: Path, root: Path) -> list[Path]:
     code, rest, err = c.close()
     check(code == 0, f"終了コードが 0 でない: {code}\n{err.decode('utf-8', 'replace')}")
     check(rest == b"", f"stdout に余計な出力: {rest!r}")
-    check(not Path("/tmp/ymcad-mcp-smoke-outside.ymc").exists(), "root の外に書いた")
+    check(not outside.exists(), "root の外に書いた")
 
     roundtrip = root / "roundtrip.ymc"
     check(
