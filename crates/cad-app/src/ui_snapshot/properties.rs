@@ -415,3 +415,117 @@ fn ui_snapshot_properties_crowded_with_a_reason() {
         shot(&mut h, &format!("properties_s_crowded_reason_{width}"));
     }
 }
+
+// ---- インプレース編集中の束縛（段階 3） ------------------------------------------
+
+/// コンポーネント「窓」（線分 1 本・ポリライン 1 本）の編集に入った状態。線分の終点 X に `幅`、
+/// 始点 Y に長い式、ポリラインの頂点 2 の Y に `高さ` を束縛してある。返り値は（線分, ポリライン）。
+fn in_component_edit(h: &mut Harness<'static, CadApp>) -> (EntityId, EntityId) {
+    let (doc, _) = h.state_mut().parts_mut();
+    doc.apply(Box::new(DefineComponent::new(
+        "COMPONENT",
+        "窓",
+        Point2::ORIGIN,
+        vec![
+            Entity::new(
+                Geometry::Line(Line::new(Point2::ORIGIN, Point2::new(120.0, 0.0))),
+                LayerId::ZERO,
+            ),
+            Entity::new(
+                Geometry::Polyline(Polyline::new(
+                    vec![
+                        Point2::new(0.0, 20.0),
+                        Point2::new(120.0, 20.0),
+                        Point2::new(120.0, 80.0),
+                    ],
+                    false,
+                )),
+                LayerId::ZERO,
+            ),
+        ],
+    )))
+    .expect("定義");
+    let def = doc.definitions().by_name("窓").expect("窓");
+    let params = vec![
+        ParamDecl::number("幅", 120.0),
+        ParamDecl::number("高さ", 80.0),
+        ParamDecl::number("枠厚", 5.0),
+        ParamDecl::boolean("開き", false),
+    ];
+    doc.apply(Box::new(SetDefinitionParams::new("PARAM", def, params)))
+        .expect("宣言");
+    for (entity, slot, expr) in [
+        (0, Slot::LineBx, "幅"),
+        (0, Slot::LineAy, "if 開き then 幅 * 2 + 枠厚 else 0"),
+        (1, Slot::PolylineVy(2), "高さ"),
+    ] {
+        doc.apply(Box::new(SetBinding::new(
+            "BIND",
+            def,
+            Binding::new(entity, slot, parse(expr).expect("解析")),
+        )))
+        .expect("束縛");
+    }
+    doc.apply(Box::new(InsertInstance::new(
+        "INSERT",
+        def,
+        Placement::at(Point2::new(100.0, 100.0)),
+        LayerId::ZERO,
+    )))
+    .expect("配置");
+    h.run_steps(STEPS);
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Num1);
+    h.run_steps(STEPS);
+    type_text(h, "EDITCOMP");
+    press(h, egui::Key::Enter);
+    // インスタンスの線分の上をクリックしたことにする（画面の位置ではなく図面の座標で渡す）。
+    let (doc, session) = h.state_mut().parts_mut();
+    session.handle_click(
+        Point2::new(160.0, 100.0),
+        false,
+        1.0,
+        doc,
+        &mut crate::selection::ScanAll,
+    );
+    let edit = session.editing().cloned().expect("編集中");
+    let (members, origins) = edit.members(doc);
+    let at = |i| members[origins.iter().position(|o| *o == Some(i)).expect("中身")];
+    let ids = (at(0), at(1));
+    h.run_steps(STEPS);
+    ids
+}
+
+/// インプレース編集中、束縛（式）で決まる項目は表示だけで横に式が出る（長い式は省略）。
+/// 束縛の無い項目は欄のまま。ツールチップには式の全体。ポリラインは束縛された頂点の行が出る。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_properties_bound_in_component_edit() {
+    use egui_kittest::kittest::Queryable as _;
+
+    let mut h = harness();
+    let (line, polyline) = in_component_edit(&mut h);
+    h.state_mut().parts_mut().1.selection.insert(line);
+    h.run_steps(STEPS);
+    hover(&mut h, CANVAS_CENTER);
+    shot(&mut h, "properties_t_bound_line");
+
+    let badge = h
+        .query_all_by_label_contains("← 式「if")
+        .next()
+        .expect("長い式の案内")
+        .rect()
+        .center();
+    hover(&mut h, badge);
+    // ツールチップは少し待ってから出る。
+    for _ in 0..4 {
+        h.run_steps(STEPS);
+    }
+    shot(&mut h, "properties_t_bound_tooltip");
+
+    let sel = &mut h.state_mut().parts_mut().1.selection;
+    sel.clear();
+    sel.insert(polyline);
+    h.run_steps(STEPS);
+    hover(&mut h, CANVAS_CENTER);
+    shot(&mut h, "properties_t_bound_polyline");
+}

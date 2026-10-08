@@ -703,11 +703,22 @@ fn closing_a_polyline_is_one_click_and_one_undo() {
     );
 }
 
-/// コンポーネントの編集中、束縛（式）を持つ中身は数値を表示だけにする。束縛の無い中身は編集できる。
-#[test]
-fn bound_members_are_display_only_during_a_component_edit() {
+// ---- インプレース編集中の束縛（段階 3） -----------------------------------------
+
+/// コンポーネント「窓」の編集に入った状態。中身は線分 2 本（添字 0: (0,0)-(30,0)、
+/// 添字 1: (0,20)-(30,20)）で、添字 0 の終点 X に式 `幅` を束縛してある。インスタンスは
+/// (100, 100) に `rotation_deg` 度回して置き、その上をクリックして EDITCOMP で入る。
+/// 返り値は（ハーネス, 定義, 束縛のある線分, 束縛の無い線分）。パネルは開いて、何も選んでいない。
+fn in_component_edit(
+    rotation_deg: f64,
+) -> (
+    Harness<'static, CadApp>,
+    cad_core::component::DefinitionId,
+    EntityId,
+    EntityId,
+) {
     let mut h = app();
-    {
+    let def = {
         let app = h.state_mut();
         let doc = &mut app.doc;
         doc.apply(Box::new(DefineComponent::new(
@@ -739,34 +750,147 @@ fn bound_members_are_display_only_during_a_component_edit() {
             Binding::new(0, Slot::LineBx, parse("幅").expect("解析")),
         )))
         .expect("束縛");
+        let placement = Placement::new(
+            Point2::new(100.0, 100.0),
+            rotation_deg.to_radians(),
+            1.0,
+            false,
+        )
+        .expect("配置");
         doc.apply(Box::new(InsertInstance::new(
             "INSERT",
             def,
-            Placement::at(Point2::new(100.0, 100.0)),
+            placement,
             LayerId::ZERO,
         )))
         .expect("配置");
-    }
+        def
+    };
     settle(&mut h);
     press_ctrl_1(&mut h);
     type_text(&mut h, "EDITCOMP");
     press(&mut h, egui::Key::Enter);
+    // 添字 0 の線分の中ほど（定義の (15, 0)）を、配置で図面へ移した点。
+    let (sin, cos) = rotation_deg.to_radians().sin_cos();
     let on_instance = h
         .state()
         .viewport
-        .model_to_screen(Point2::new(115.0, 100.0));
+        .model_to_screen(Point2::new(100.0 + 15.0 * cos, 100.0 + 15.0 * sin));
     click(&mut h, on_instance);
     let session = h.state().session.editing().cloned().expect("前提: 編集中");
     let (members, origins) = session.members(&h.state().doc);
     let bound = members[origins.iter().position(|o| *o == Some(0)).expect("添字 0")];
     let free = members[origins.iter().position(|o| *o == Some(1)).expect("添字 1")];
+    (h, def, bound, free)
+}
 
+/// **束縛された項目だけが表示だけになり、横に式が出る。** 同じ中身の束縛の無い項目は編集できる。
+/// 端点が束縛されていれば、長さ・角度（両端点から決まる）も表示だけ。
+#[test]
+fn bound_items_show_their_expression_and_the_rest_stay_editable() {
+    let (mut h, _, bound, free) = in_component_edit(0.0);
     select(&mut h, &[bound]);
     hover(&mut h, P1);
-    assert!(has(&h, BOUND_NOTE), "束縛を持つ中身は案内が出る");
-    assert!(!editable(&h, "始点 X"), "数値は表示だけ");
+    assert!(has(&h, BOUND_NOTE), "表示だけの項目がある旨の案内");
+    assert!(!editable(&h, "終点 X"), "束縛された項目は表示だけ");
+    assert!(has(&h, "← 式「幅」"), "横に式が出る");
+    for label in ["始点 X", "始点 Y", "終点 Y"] {
+        assert!(editable(&h, label), "{label}: 束縛の無い項目は編集できる");
+    }
+    for label in ["長さ", "角度"] {
+        assert!(
+            !editable(&h, label),
+            "{label}: 端点が束縛されているので表示だけ"
+        );
+    }
+    assert!(has(&h, "← 端点の式から"), "長さ・角度には元が式である旨");
 
+    // 束縛を持たない中身は、すべて編集できる。
     select(&mut h, &[free]);
     assert!(!has(&h, BOUND_NOTE));
-    assert!(editable(&h, "始点 X"), "束縛の無い中身は編集できる");
+    assert!(!has(&h, "← 式「幅」"));
+    for label in ["始点 X", "始点 Y", "終点 X", "終点 Y", "長さ", "角度"] {
+        assert!(editable(&h, label), "{label}");
+    }
+}
+
+/// **束縛の無い項目は編集中でも変えられ、ENDCOMP の後も定義に残る。** 束縛はそのまま。
+#[test]
+fn a_free_item_changed_during_a_component_edit_survives_endcomp() {
+    use cad_core::geom::tolerance::eq_len;
+
+    let (mut h, def, bound, _) = in_component_edit(0.0);
+    select(&mut h, &[bound]);
+    hover(&mut h, P1);
+    enter_value(&mut h, "始点 Y", "112.5");
+    assert_eq!(
+        line_of(&h, bound).a,
+        Point2::new(100.0, 112.5),
+        "編集中の図面が変わる"
+    );
+
+    hover(&mut h, P1);
+    type_text(&mut h, "ENDCOMP");
+    press(&mut h, egui::Key::Enter);
+    assert!(h.state().session.editing().is_none(), "前提: 編集を終えた");
+    let d = h.state().doc.definitions().get(def).expect("定義");
+    let Geometry::Line(l) = &d.entities[0].geom else {
+        panic!("線分のはず");
+    };
+    assert!(
+        eq_len(l.a.y, 12.5),
+        "定義の座標（配置の基点を引いた値）で残る: {:?}",
+        l.a
+    );
+    assert!(
+        eq_len(l.a.x, 0.0) && eq_len(l.b.y, 0.0),
+        "ほかの値はそのまま"
+    );
+    assert_eq!(d.bindings.len(), 1, "束縛は残る");
+    assert_eq!(
+        (d.bindings[0].entity, d.bindings[0].slot),
+        (0, Slot::LineBx)
+    );
+}
+
+/// 回した配置で入ったときは、図面の軸と定義の軸の対応で決める。90° 回すと、定義の終点 X は
+/// 図面の終点 Y になる。
+#[test]
+fn a_rotated_component_edit_locks_the_item_on_the_turned_axis() {
+    let (mut h, _, bound, _) = in_component_edit(90.0);
+    select(&mut h, &[bound]);
+    hover(&mut h, P1);
+    assert!(!editable(&h, "終点 Y"), "定義の終点 X は図面の Y");
+    assert!(editable(&h, "終点 X"), "定義の終点 Y（束縛なし）は図面の X");
+    assert!(has(&h, "← 式「幅」"));
+}
+
+/// 編集中でなければ従来どおり。束縛を持つ定義のインスタンスも、ただの図形も、すべて編集できる。
+#[test]
+fn outside_a_component_edit_nothing_is_locked() {
+    let (mut h, _, _, _) = in_component_edit(0.0);
+    hover(&mut h, P1);
+    type_text(&mut h, "ENDCOMP");
+    press(&mut h, egui::Key::Enter);
+    assert!(h.state().session.editing().is_none(), "前提: 編集を終えた");
+    let instance = h
+        .state()
+        .doc
+        .entities()
+        .ids()
+        .last()
+        .expect("置き直したインスタンス");
+    select(&mut h, &[instance]);
+    hover(&mut h, P1);
+    for label in ["基点 X", "基点 Y", "回転", "倍率"] {
+        assert!(editable(&h, label), "{label}");
+    }
+    assert!(!has(&h, BOUND_NOTE));
+
+    let line = add_line(&mut h, LayerId::ZERO, 10.0);
+    select(&mut h, &[line]);
+    for label in ["始点 X", "終点 X", "長さ", "角度"] {
+        assert!(editable(&h, label), "{label}");
+    }
+    assert!(!has(&h, BOUND_NOTE));
 }

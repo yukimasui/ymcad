@@ -272,8 +272,8 @@ fn numbered_params(names: &[String]) -> String {
         .join("  ")
 }
 
-/// スロットの入力名（`終点X`、`頂点X2` のような形）。
-fn slot_input_name(slot: Slot) -> String {
+/// スロットの入力名（`終点X`、`頂点X2` のような形）。プロパティパネルの式の案内も同じ名前で出す。
+pub(crate) fn slot_input_name(slot: Slot) -> String {
     match slot {
         Slot::PolylineVx(i) | Slot::PolylineVy(i) => format!("{}{i}", slot.label()),
         other => other.label().to_owned(),

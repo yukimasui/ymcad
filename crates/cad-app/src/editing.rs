@@ -27,7 +27,7 @@
 //! 出るときにそれを渡す（`ExitDefinitionEdit`）。
 //! **定義の形は変えずに、編集セッションの間だけ対応を持つ。**
 
-use cad_core::component::{DefinitionId, Placement};
+use cad_core::component::{Binding, DefinitionId, Placement};
 use cad_core::{Document, EntityId};
 
 /// 編集セッション。
@@ -125,19 +125,20 @@ impl EditSession {
         self.entered.iter().position(|e| *e == id)
     }
 
-    /// この図形に、定義の束縛（式）が付いているか。
+    /// この図形を指す、定義の束縛（式）。あとから描いた図形・編集の外の図形は空。
     ///
-    /// プロパティパネルは、束縛を持つ中身の数値を表示だけにする（Issue #31 段階 2。項目ごとに
-    /// 分けるのは段階 3）。束縛の付いた座標をパネルで変えても、`ENDCOMP` で書き戻した後は
+    /// プロパティパネルは、束縛で決まる項目を表示だけにする（Issue #31 段階 3、
+    /// `properties_bind.rs`）。束縛の付いた座標をパネルで変えても、`ENDCOMP` で書き戻した後は
     /// 式の値で上書きされ、変えた値が黙って消えるため。
     #[must_use]
-    pub fn is_bound(&self, doc: &Document, id: EntityId) -> bool {
+    pub fn bindings<'d>(&self, doc: &'d Document, id: EntityId) -> Vec<&'d Binding> {
         let Some(index) = self.original_index(id) else {
-            return false;
+            return Vec::new();
         };
         doc.definitions()
             .get(self.definition)
-            .is_some_and(|d| d.bindings.iter().any(|b| b.entity == index))
+            .map(|d| d.bindings.iter().filter(|b| b.entity == index).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -293,16 +294,16 @@ mod tests {
         assert!(!members.contains(&outside));
     }
 
-    /// 束縛の付いた中身だけが「束縛あり」。あとから描いた図形と、編集の外の図形は束縛なし。
+    /// 束縛の付いた中身だけが束縛を持つ。あとから描いた図形と、編集の外の図形は束縛なし。
     #[test]
-    fn is_bound_follows_the_definition_bindings() {
+    fn bindings_follow_the_definition_bindings() {
         use cad_core::command::SetBinding;
-        use cad_core::component::{Binding, Slot};
+        use cad_core::component::Slot;
 
         let (mut doc, session) = doc_in_edit();
         let (first, second) = (session.entered[0], session.entered[1]);
         assert!(
-            !session.is_bound(&doc, first),
+            session.bindings(&doc, first).is_empty(),
             "束縛が無ければ表示だけにしない"
         );
 
@@ -320,15 +321,17 @@ mod tests {
         )))
         .expect("束縛");
         assert_eq!(session.original_index(second), Some(1));
-        assert!(session.is_bound(&doc, second), "添字 1 に束縛がある");
-        assert!(!session.is_bound(&doc, first), "添字 0 には無い");
+        let bound = session.bindings(&doc, second);
+        assert_eq!(bound.len(), 1, "添字 1 に束縛がある");
+        assert_eq!(bound[0].slot, Slot::LineBx);
+        assert!(session.bindings(&doc, first).is_empty(), "添字 0 には無い");
 
         doc.apply(Box::new(AddEntities::one("LINE", line(50.0))))
             .expect("追加");
         let fresh = doc.entities().ids().last().expect("あるはず");
         assert_eq!(session.original_index(fresh), None);
         assert!(
-            !session.is_bound(&doc, fresh),
+            session.bindings(&doc, fresh).is_empty(),
             "あとから描いた図形に束縛は無い"
         );
     }
