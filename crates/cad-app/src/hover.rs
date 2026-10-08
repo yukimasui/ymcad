@@ -10,6 +10,13 @@
 //! スナップ（`snap::SnapState`）の索引は共有しない。スナップは点の入力待ちでしか更新されず、
 //! ホバーは待機中にも要るので、片方の都合で作り直しの時期が決まると取り違えが起きる。
 //! 1 万図形でも作り直しはミリ秒の桁なので、2 つ持っても困らない。
+//!
+//! # 結果プレビュー（段階 2、ADR-0043）
+//!
+//! 図形を指す段階では、強調する図形をクリックしたら図面がどう変わるか（TRIM で消える部分、
+//! EXTEND で伸びる部分）も求める（`Session::entity_preview`）。境界の列のキャッシュ
+//! （[`Boundaries`]）もここに持つので、図面を入れ替えたとき（`Hover::new()` で作り直す）に
+//! 索引と一緒に捨てられる。
 
 use cad_core::geom::{Aabb, Point2};
 use cad_core::snap::SpatialIndex;
@@ -17,6 +24,8 @@ use cad_core::{Document, EntityId};
 
 use crate::selection::{self, Picker};
 use crate::session::{ClickTarget, PickStage, Session};
+use crate::tools::entity_preview::Boundaries;
+use crate::tools::EntityPreview;
 
 /// 空間インデックスで候補を絞って拾う。
 ///
@@ -78,6 +87,10 @@ pub struct Hover {
     last: Option<(Key, ClickTarget)>,
     /// このフレームで強調するか（カーソルがキャンバスの外・矩形選択中などは偽）。
     shown: bool,
+    /// 結果プレビュー（TRIM / EXTEND）の境界の列のキャッシュ。
+    boundaries: Boundaries,
+    /// このフレームの結果プレビュー。
+    preview: Option<EntityPreview>,
     /// 計算し直した回数（使い回しのテスト用）。
     #[cfg(test)]
     computed: usize,
@@ -111,6 +124,7 @@ impl Hover {
     ) {
         let Some(pos) = at else {
             self.shown = false;
+            self.preview = None;
             return;
         };
         self.shown = true;
@@ -121,15 +135,36 @@ impl Hover {
             tolerance: tolerance.to_bits(),
             stage: session.pick_stage(),
         };
-        if self.last.as_ref().is_some_and(|(k, _)| *k == key) {
-            return;
+        if !self.last.as_ref().is_some_and(|(k, _)| *k == key) {
+            let target = session.click_target(pos, tolerance, doc, &mut self.picker);
+            self.last = Some((key, target));
+            #[cfg(test)]
+            {
+                self.computed += 1;
+            }
         }
-        let target = session.click_target(pos, tolerance, doc, &mut self.picker);
-        self.last = Some((key, target));
-        #[cfg(test)]
-        {
-            self.computed += 1;
-        }
+        // 結果プレビューは毎回ツールに聞く。強調する図形が同じでも、実行中のツールが
+        // 替わる（TRIM → EXTEND）と結果が変わるので、上の鍵では使い回せない。
+        // 重いのは境界の列の複製で、そちらは `Boundaries` が（版番号, 対象）で使い回す。
+        self.preview = self
+            .last
+            .as_ref()
+            .and_then(|(_, target)| session.entity_preview(target, doc, &mut self.boundaries));
+    }
+
+    /// クリックしたら図面がどう変わるか（TRIM で消える部分・EXTEND で伸びる部分）。
+    ///
+    /// 強調している図形（[`Self::highlighted`]）をクリックした結果。計算できない
+    /// （線分以外・交点が無い等）・強調しない場面では `None`。
+    #[must_use]
+    pub fn entity_preview(&self) -> Option<&EntityPreview> {
+        self.preview.as_ref().filter(|_| self.shown)
+    }
+
+    /// 境界の列のキャッシュ（テスト用）。
+    #[cfg(test)]
+    pub(crate) fn boundaries(&self) -> &Boundaries {
+        &self.boundaries
     }
 
     /// 強調する図形。
