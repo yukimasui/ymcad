@@ -84,7 +84,7 @@ pub enum Toggle {
 }
 
 /// 入力が数値として読めないときの理由。
-pub const NOT_A_NUMBER: &str = "数値として読めません";
+pub const NOT_A_NUMBER: &str = "数値として読めません（数値だけを入力してください。式は使えません）";
 /// 非有限（`nan`・`inf`・桁あふれ）の値の理由。
 pub const NOT_FINITE: &str = "有限の数値を入力してください";
 /// 0 以下の長さの理由。
@@ -283,7 +283,8 @@ pub fn with_number(geom: &Geometry, field: Field, value: f64) -> Result<Geometry
 /// 項目を `value` にしたときに確定すべき新しい形。
 ///
 /// - 表示（4 桁）で今の値と同じに見えるなら `Ok(None)`（確定しない。触っただけ・Enter を
-///   押しただけで図形が丸めの分だけ動いたり、履歴が増えたりしない）
+///   押しただけで図形が丸めの分だけ動いたり、履歴が増えたりしない）。角度は 360° 違いも
+///   同じ値（`[0, 360)` に巻いた表示の値で比べる）
 /// - 結果が元の形と同じでも `Ok(None)`（`ReplaceGeometries` は同じ形でも履歴に積むので、
 ///   ここで止める。ADR-0040 の補足）
 ///
@@ -295,7 +296,15 @@ pub fn edit_number(geom: &Geometry, field: Field, value: f64) -> Result<Option<G
     if !value.is_finite() {
         return Err(NOT_FINITE.to_owned());
     }
-    if same_on_screen(value, current) {
+    // 角度は 360° 違いを同じ値と見る。`current` は `[0, 360)` に巻いた表示の値なので、入力も
+    // 同じ巻き方にしてから比べる（0° の線分に `360` を打って履歴が増え、終点が誤差だけ
+    // 動くのを防ぐ）。巻くのは比べるときだけで、確定する値は打たれたまま `with_number` へ渡す。
+    let compared = if field.is_angle() {
+        display_deg(value.to_radians())
+    } else {
+        value
+    };
+    if same_on_screen(compared, current) {
         return Ok(None);
     }
     let new = with_number(geom, field, value)?;
@@ -347,6 +356,11 @@ mod tests {
 
     /// 基点 (3, 4)・回転 0.3 rad・倍率 2 のインスタンス（定義は図面を作って足す）。
     fn instance() -> Geometry {
+        instance_rotated(0.3)
+    }
+
+    /// 回転が `rotation` [rad] のインスタンス（ほかは [`instance`] と同じ）。
+    fn instance_rotated(rotation: f64) -> Geometry {
         let mut doc = Document::new();
         doc.apply(Box::new(DefineComponent::new(
             "COMPONENT",
@@ -359,7 +373,7 @@ mod tests {
         )))
         .expect("定義");
         let def = doc.definitions().by_name("窓").expect("定義がある");
-        let placement = Placement::new(Point2::new(3.0, 4.0), 0.3, 2.0, false).expect("配置");
+        let placement = Placement::new(Point2::new(3.0, 4.0), rotation, 2.0, false).expect("配置");
         doc.apply(Box::new(InsertInstance::new(
             "INSERT",
             def,
@@ -689,9 +703,12 @@ mod tests {
         let shown = display_deg(0.5);
         // 表示と同じ値なら確定しない。
         assert_eq!(edit_number(&full, Field::ArcStart, shown), Ok(None));
-        // DXF の 0°→360° の円弧（終了角が 2π）。開始角に 360 を入れても 1 周のまま。
+        // DXF の 0°→360° の円弧（終了角が 2π）。開始角に 360 を入れても、0° と 360° は同じ角度
+        // なので確定しない（Issue #78 の 6。以前は 1 周のまま表現だけが変わる確定になった）。
         let dxf = arc(0.0, TAU);
-        let Geometry::Arc(a) = edited(&dxf, Field::ArcStart, 360.0) else {
+        assert_eq!(edit_number(&dxf, Field::ArcStart, 360.0), Ok(None));
+        // `with_number` を直接呼べば、1 周のまま両方が同じ値になる。
+        let Geometry::Arc(a) = with_number(&dxf, Field::ArcStart, 360.0).expect("通る") else {
             unreachable!()
         };
         assert_eq!(a.start_angle, a.end_angle, "両方が同じ値");
@@ -701,6 +718,79 @@ mod tests {
             unreachable!()
         };
         assert!(a.sweep() < TAU);
+    }
+
+    // ---- 角度は 360° 違いを同じ値と見る（Issue #78 の 6） -----------------------
+
+    /// 0° の線分に `360` / `-360` / `720` を打っても確定しない（終点が誤差だけ動いて履歴が増えない）。
+    #[test]
+    fn a_full_turn_on_a_zero_degree_line_is_not_a_change() {
+        let l = Geometry::Line(Line::new(Point2::new(1.0, 2.0), Point2::new(11.0, 2.0)));
+        assert_eq!(display_value(&l, Field::LineAngle), Some(0.0), "前提");
+        for v in [0.0, 360.0, -360.0, 720.0] {
+            assert_eq!(edit_number(&l, Field::LineAngle, v), Ok(None), "{v}");
+        }
+        // 0° 以外が同じ向きの別の書き方でも同じ。90° の線分に 450・-270。
+        let up = Geometry::Line(Line::new(Point2::ORIGIN, Point2::new(0.0, 5.0)));
+        for v in [90.0, 450.0, -270.0] {
+            assert_eq!(edit_number(&up, Field::LineAngle, v), Ok(None), "{v}");
+        }
+        // 角度が違えば通る。
+        assert!(edit_number(&l, Field::LineAngle, 359.0)
+            .expect("通る")
+            .is_some());
+    }
+
+    /// 回転 270° のインスタンスに `-90` を打っても確定しない。作図線・円弧の角も同じ。
+    #[test]
+    fn minus_ninety_is_two_hundred_seventy_degrees() {
+        let i = instance_rotated(3.0 * FRAC_PI_2);
+        assert_eq!(display_value(&i, Field::Rotation), Some(270.0), "前提");
+        for v in [270.0, -90.0, 630.0] {
+            assert_eq!(edit_number(&i, Field::Rotation, v), Ok(None), "{v}");
+        }
+        let x =
+            Geometry::Xline(Xline::new(Point2::ORIGIN, Vec2::new(0.0, -1.0)).expect("方向がある"));
+        assert_eq!(edit_number(&x, Field::XlineAngle, -90.0), Ok(None));
+        let a = arc(3.0 * FRAC_PI_2, 0.5);
+        assert_eq!(edit_number(&a, Field::ArcStart, -90.0), Ok(None));
+    }
+
+    /// 丸めの境目。`359.99995` は表示で `360.0000` = 0° に見えるので、0° と同じ値として確定しない。
+    /// 逆に、表示で違って見える `359.9999` は確定する。
+    #[test]
+    fn rounding_boundaries_of_the_wrapped_angle() {
+        let l = Geometry::Line(Line::new(Point2::ORIGIN, Point2::new(10.0, 0.0)));
+        for v in [359.999_95, 359.999_99, -0.000_04, 360.000_04] {
+            assert_eq!(edit_number(&l, Field::LineAngle, v), Ok(None), "{v}");
+        }
+        for v in [359.9999, 0.0001, -0.0001] {
+            assert!(
+                edit_number(&l, Field::LineAngle, v)
+                    .expect("通る")
+                    .is_some(),
+                "{v}"
+            );
+        }
+        // 長さなど、角度でない項目は巻かない（360 は 360）。
+        assert!(edit_number(&l, Field::LineLength, 360.0)
+            .expect("通る")
+            .is_some());
+    }
+
+    /// 360° 違いを同じと見るのは確定するかどうかだけ。確定するときの値は打たれたまま
+    /// （`-90` を打てば `270°` として書き込まれ、表示は `[0, 360)`）。
+    #[test]
+    fn a_changed_angle_is_written_as_typed() {
+        let i = instance_rotated(0.3);
+        let Geometry::Instance(got) = edited(&i, Field::Rotation, -90.0) else {
+            unreachable!()
+        };
+        assert!(eq_angle(got.placement.rotation, (-90f64).to_radians()));
+        assert_eq!(
+            display_value(&Geometry::Instance(got), Field::Rotation),
+            Some(270.0)
+        );
     }
 
     // ---- 表示と同じなら確定しない ----------------------------------------------

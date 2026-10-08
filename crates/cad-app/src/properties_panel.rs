@@ -209,8 +209,9 @@ impl PropertiesPanel {
     #[must_use]
     pub fn show(&mut self, ui: &mut egui::Ui, input: &PanelInput<'_>) -> Vec<Box<dyn Command>> {
         let mut commands: Vec<Box<dyn Command>> = Vec::new();
-        // 仮の形はドラッグしているフレームだけ描く。
-        self.preview = None;
+        // 仮の形はドラッグしているフレームだけ描く。前のフレームの分は、表の表示だけの値
+        // （直径・円周・中点など）を仮の形から出すために取っておく（1 フレーム遅れる）。
+        let last_preview = self.preview.take();
         if !self.open {
             return commands;
         }
@@ -249,7 +250,7 @@ impl PropertiesPanel {
                 );
                 ui.separator();
                 if summary.total == 1 {
-                    self.show_items(ui, input, &mut commands);
+                    self.show_items(ui, input, last_preview.as_ref(), &mut commands);
                 } else {
                     // 複数選択はレイヤだけ（判断 4）。1 つのときの編集途中の値は持ち越さない。
                     self.discard_edit();
@@ -327,6 +328,7 @@ impl PropertiesPanel {
         &mut self,
         ui: &mut egui::Ui,
         input: &PanelInput<'_>,
+        last_preview: Option<&Geometry>,
         commands: &mut Vec<Box<dyn Command>>,
     ) {
         let doc = input.doc;
@@ -358,13 +360,23 @@ impl PropertiesPanel {
 
         let geom = &entity.geom;
         let target = Target { doc, id, geom };
+        // ドラッグ中は、表示だけの項目（円の直径・円周、円弧の掃引角・弧長、線分の中点など）も
+        // 仮の形から出す。図形は仮の形に変わって見えるのに、数字だけ元のままになるのを防ぐ。
+        // 仮の形を使うのは、いまの編集（同じ図形・同じ版）に結び付いているときだけ。
+        let shown_geom = last_preview
+            .filter(|_| {
+                self.editing.is_some_and(|e| {
+                    e.id == id && e.revision == doc.revision() && e.pending.is_some()
+                })
+            })
+            .unwrap_or(geom);
         let mut has_number = false;
         egui::Grid::new(("properties_items", kind_of(geom) as u8))
             .num_columns(2)
             .min_col_width(LABEL_WIDTH)
             .spacing(GRID_SPACING)
             .show(ui, |ui| {
-                for item in properties::items(geom, doc.definitions()) {
+                for item in properties::items(shown_geom, doc.definitions()) {
                     ui.add(egui::Label::new(item.label).selectable(false));
                     let key = match (item.editor, editable) {
                         (Some(Editor::Number(field, value)), true) => {
@@ -473,15 +485,20 @@ impl PropertiesPanel {
             self.note = None;
         }
 
-        if let Some(reason) = parse_error.take() {
-            // 数値として読めない・有限でない。値は元のまま。
+        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            // 取り消し。打ちかけの値は捨てる。読み取りの失敗（`parse_error`）より先に見る。
             self.end_edit(id, field);
-            self.set_note(id, Key::Number(field), revision, reason.to_owned());
             return;
         }
-        if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-            // 取り消し。打ちかけの値は捨てる。
-            self.end_edit(id, field);
+        if let Some(reason) = parse_error.take() {
+            // 編集を始めた記録が無い欄の読み取りの失敗は、利用者が打った値の失敗ではない。
+            // Esc で取り消した次のフレームで、`DragValue` が打ちかけの文字（`abc` など）を
+            // もう一度読みにいくため（`lost_focus` が 2 フレーム続く）。理由を出さず、無視する。
+            if self.editing.is_some_and(|e| mine(&e)) {
+                // 数値として読めない・有限でない。値は元のまま。
+                self.end_edit(id, field);
+                self.set_note(id, Key::Number(field), revision, reason.to_owned());
+            }
             return;
         }
         if response.dragged() || response.has_focus() {
@@ -493,6 +510,10 @@ impl PropertiesPanel {
             }
             if response.dragged() {
                 self.update_preview(doc, id, geom, field);
+                if self.preview.is_some() {
+                    // 表の表示だけの値は 1 フレーム遅れて追いつく。マウスを止めても追いつかせる。
+                    ui.ctx().request_repaint();
+                }
             }
             return;
         }
@@ -506,6 +527,10 @@ impl PropertiesPanel {
         }
         if session.is_none() {
             // 編集を始めていない（フォーカスが外れた次のフレームなど）。何もしない。
+            // 守りは二重になっている。ここ（呼び出し側）と `commit`（冒頭で編集を始めた記録を
+            // 確かめ、無ければ何も確定しない）。重複は意図したもの。この先の `commit` を呼ぶ
+            // 3 か所のどれかの条件が変わっても、記録の無い欄から確定が出ないようにするため。
+            // どちらも外さないこと。
             return;
         }
         if v != shown {
@@ -590,6 +615,7 @@ impl PropertiesPanel {
         let revision = doc.revision();
         let session = self.editing.filter(|e| e.id == id && e.field == field);
         self.end_edit(id, field);
+        // 編集を始めた記録が無ければ確定しない。`number_field` の `session.is_none()` と二重の守り。
         let Some(session) = session else {
             return;
         };

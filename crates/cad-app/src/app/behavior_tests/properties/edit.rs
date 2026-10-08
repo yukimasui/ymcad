@@ -5,10 +5,11 @@
 //! 「形 × 項目 × 値 → 新しい形」の中身は `properties_edit.rs` の単体テスト。
 
 use super::*;
+use crate::properties::fmt_num;
 use crate::properties_edit::{LENGTH_NOT_POSITIVE, NOT_A_NUMBER, NOT_FINITE, ZERO_SWEEP};
 use crate::properties_panel::{BOUND_NOTE, STALE_NOTE};
 use cad_core::command::AddEntities;
-use cad_core::geom::{Arc, Polyline};
+use cad_core::geom::{Arc, Circle, Polyline};
 
 /// 行の項目名 `label` と同じ高さにある、数値の欄の矩形（ボタン表示でも入力中でも）。
 fn field_rect(h: &Harness<'_, CadApp>, label: &str) -> egui::Rect {
@@ -242,6 +243,67 @@ fn drag_field_continue(
     at
 }
 
+/// ドラッグ中は、表示だけの項目（円の直径・円周）も仮の形の値になる（Issue #78 の 1）。
+/// 図形（仮の円）は大きくなっているのに、数字だけ元のままにならない。離したら確定した値と一致する。
+#[test]
+fn derived_values_follow_the_preview_while_dragging() {
+    let (mut h, id) = one_geometry(Geometry::Circle(Circle::new(
+        Point2::new(200.0, 150.0),
+        50.0,
+    )));
+    assert!(has(&h, "100.0000"), "前提: 直径は 100");
+
+    let at = drag_field(&mut h, "半径", 10.0, 6);
+    // 表示だけの項目は 1 フレーム遅れて追いつくので、マウスを止めたまま数フレーム回す。
+    settle(&mut h);
+    let Some(Geometry::Circle(preview)) = h.state().properties_panel.drag_preview().cloned() else {
+        panic!("ドラッグ中は仮の円がある");
+    };
+    assert!(preview.radius > 50.0, "右へ動かすと半径が増える");
+    let diameter = fmt_num(preview.radius * 2.0);
+    let circumference = fmt_num(std::f64::consts::TAU * preview.radius);
+    assert!(has(&h, &diameter), "直径は仮の形の値 {diameter}");
+    assert!(has(&h, &circumference), "円周は仮の形の値 {circumference}");
+    assert!(!has(&h, "100.0000"), "元の直径は残らない");
+    assert_eq!(
+        geom_of(&h, id),
+        Geometry::Circle(Circle::new(Point2::new(200.0, 150.0), 50.0)),
+        "図面はまだ変わっていない"
+    );
+
+    release(&mut h, at);
+    let Geometry::Circle(after) = geom_of(&h, id) else {
+        unreachable!()
+    };
+    assert_eq!(after, preview, "離したら仮の形のとおりに確定する");
+    assert!(
+        has(&h, &diameter) && has(&h, &circumference),
+        "確定後も同じ値"
+    );
+}
+
+/// 線分の長さをドラッグすると、終点と中点の表示も仮の形に追いつく。
+#[test]
+fn line_midpoint_follows_the_preview_while_dragging() {
+    let (mut h, _) = one_line();
+    assert!(has(&h, "50.0000"), "前提: 中点 X は 50");
+    let at = drag_field(&mut h, "長さ", 10.0, 6);
+    settle(&mut h);
+    let Some(Geometry::Line(preview)) = h.state().properties_panel.drag_preview().cloned() else {
+        panic!("ドラッグ中は仮の形がある");
+    };
+    let mid = preview.midpoint();
+    assert!(mid.x > 50.0, "長くなると中点も動く");
+    assert!(has(&h, &fmt_num(mid.x)), "中点 X は仮の形の値");
+    assert!(!has(&h, "50.0000"), "元の中点 X は残らない");
+    assert_eq!(
+        field_value(&h, "終点 X"),
+        fmt_num(preview.b.x),
+        "編集できる終点 X も仮の形の値"
+    );
+    release(&mut h, at);
+}
+
 // ---- 取り消しとキーの持ち主 ---------------------------------------------------
 
 /// Esc で打ちかけの値を捨てる。図形も履歴も変わらず、コマンドラインの Esc（選択の解除）にも
@@ -404,6 +466,72 @@ fn an_arc_cannot_be_given_a_zero_sweep() {
     };
     assert_eq!(a.start_angle, 45f64.to_radians());
     assert_eq!(a.end_angle, std::f64::consts::PI, "終了角は元の値のまま");
+}
+
+/// 式（`100+20`）を打ったときの理由は、式が使えないことも伝える（Issue #78 の 2）。
+#[test]
+fn an_expression_is_refused_and_the_reason_says_expressions_are_not_supported() {
+    let (mut h, id) = one_line();
+    let before = line_of(&h, id);
+    let depth = undo_depth(&h);
+
+    enter_value(&mut h, "終点 X", "100+20");
+    assert!(has(&h, NOT_A_NUMBER), "理由が出る");
+    assert!(
+        NOT_A_NUMBER.contains("数値として読めません")
+            && NOT_A_NUMBER.contains("数値だけを入力してください。式は使えません"),
+        "文言: {NOT_A_NUMBER}"
+    );
+    assert_eq!(line_of(&h, id), before, "確定しない");
+    assert_eq!(undo_depth(&h), depth, "履歴も増えない");
+}
+
+/// `abc` を打って Esc で取り消しても、理由は出ない（Issue #78 の 5）。Esc の次のフレームで
+/// `DragValue` が打ちかけの文字をもう一度読みにいくが、編集を始めた記録が無い欄の失敗は無視する。
+/// 図形も履歴も変わらない。取り消しの後でも、次に Enter で打った `abc` には理由が出る。
+#[test]
+fn escape_after_typing_garbage_shows_no_reason() {
+    let (mut h, id) = one_line();
+    let before = line_of(&h, id);
+    let depth = undo_depth(&h);
+
+    click_field(&mut h, "終点 X");
+    type_text(&mut h, "abc");
+    press(&mut h, egui::Key::Escape);
+    h.run_steps(10);
+    assert!(!has(&h, NOT_A_NUMBER), "取り消したのに理由が出ない");
+    assert_eq!(line_of(&h, id), before, "形は変わらない");
+    assert_eq!(undo_depth(&h), depth, "履歴は増えない");
+    assert_eq!(field_value(&h, "終点 X"), "100.0000", "欄は元の値に戻る");
+    assert!(
+        !h.state().properties_panel.has_edit_state(),
+        "編集中の状態も残らない"
+    );
+
+    // 取り消さずに Enter で確定しようとしたときは、これまでどおり理由が出る。
+    enter_value(&mut h, "終点 X", "abc");
+    assert!(has(&h, NOT_A_NUMBER), "Enter なら理由が出る");
+    assert_eq!(line_of(&h, id), before);
+}
+
+/// 角度は 360° 違いを同じ値と見る（Issue #78 の 6）。0° の線分に `360` / `-360` を打って
+/// Enter を押しても、履歴は増えず終点も動かない。
+#[test]
+fn typing_a_full_turn_on_a_zero_degree_line_does_not_commit() {
+    let (mut h, id) = one_line();
+    let before = line_of(&h, id);
+    let depth = undo_depth(&h);
+    assert_eq!(field_value(&h, "角度"), "0.0000°", "前提: 0°");
+
+    for text in ["360", "-360", "720", "359.99995"] {
+        enter_value(&mut h, "角度", text);
+        assert_eq!(line_of(&h, id), before, "{text}: 終点が動かない");
+        assert_eq!(undo_depth(&h), depth, "{text}: 履歴は増えない");
+        assert!(!has(&h, NOT_A_NUMBER), "{text}: 理由も出ない");
+    }
+    // 角度が違えば確定する。
+    enter_value(&mut h, "角度", "90");
+    assert_eq!(undo_depth(&h), depth + 1, "90 は確定する");
 }
 
 // ---- 編集途中の状態の寿命 -----------------------------------------------------
