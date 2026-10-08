@@ -265,7 +265,10 @@ fn non_ascii_names_are_not_sanitised() {
 fn coordinates_survive_bit_exactly() {
     let mut doc = Document::new();
     // 巨大・微小・割り切れない値・負のゼロを混ぜる。
-    let a = p(1.234_567_890_123_456_7e12, -9.876_543_210_987_654e-12);
+    let a = p(
+        1.234_567_890_123_456_7e12,
+        -9.876_543_210_987_654 / 1_000_000_000_000.0,
+    );
     let b = p(1.0 / 3.0, std::f64::consts::PI);
     add(
         &mut doc,

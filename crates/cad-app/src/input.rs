@@ -85,13 +85,14 @@ pub fn collect_view_actions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cad_core::geom::tolerance::eq_len;
 
     /// ホイール 1 ノッチ（50 points 相当）でちょうど 1 段ズームすること。
     #[test]
     fn one_wheel_notch_is_one_zoom_step() {
         let steps = f64::from(SCROLL_POINTS_PER_ZOOM_STEP / SCROLL_POINTS_PER_ZOOM_STEP);
         let factor = ZOOM_STEP.powf(steps);
-        assert!((factor - ZOOM_STEP).abs() < 1e-12);
+        assert!(eq_len(factor, ZOOM_STEP));
     }
 
     /// ホイールを奥へ回すと拡大、手前へ回すと縮小になること。
@@ -102,6 +103,6 @@ mod tests {
         assert!(zoom_in > 1.0, "奥へ回したら拡大");
         assert!(zoom_out < 1.0, "手前へ回したら縮小");
         // 往復すれば元に戻る。
-        assert!((zoom_in * zoom_out - 1.0).abs() < 1e-12);
+        assert!(eq_len(zoom_in * zoom_out, 1.0));
     }
 }
