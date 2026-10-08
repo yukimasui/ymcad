@@ -779,21 +779,23 @@ fn clip_ray(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cad_core::geom::tolerance::{eq_len, is_zero_len};
 
     #[test]
     fn nice_step_returns_1_2_5_series() {
-        assert!((nice_step(1.0) - 1.0).abs() < 1e-12);
-        assert!((nice_step(1.5) - 2.0).abs() < 1e-12);
-        assert!((nice_step(3.0) - 5.0).abs() < 1e-12);
-        assert!((nice_step(7.0) - 10.0).abs() < 1e-12);
-        assert!((nice_step(0.03) - 0.05).abs() < 1e-12);
-        assert!((nice_step(23_000.0) - 50_000.0).abs() < 1e-6);
+        assert!(eq_len(nice_step(1.0), 1.0));
+        assert!(eq_len(nice_step(1.5), 2.0));
+        assert!(eq_len(nice_step(3.0), 5.0));
+        assert!(eq_len(nice_step(7.0), 10.0));
+        assert!(eq_len(nice_step(0.03), 0.05));
+        assert!(eq_len(nice_step(23_000.0), 50_000.0));
     }
 
     /// 返り値は必ず入力以上（グリッドが目標間隔より細かくならない）。
     #[test]
     fn nice_step_is_never_smaller_than_input() {
-        let mut x = 1e-9;
+        // 十分小さい値から十分大きい値まで、間隔を 1.37 倍ずつ広げて確かめる。
+        let mut x = 1.0 / 1_000_000_000.0;
         while x < 1e9 {
             let s = nice_step(x);
             assert!(s >= x, "nice_step({x:e}) = {s:e} が入力より小さい");
@@ -808,9 +810,7 @@ mod tests {
             for m in [1.0, 1.3, 2.7, 4.9, 6.1, 9.9] {
                 let s = nice_step(m * 10f64.powi(exp));
                 let mantissa = s / 10f64.powf(s.log10().floor());
-                let ok = [1.0, 2.0, 5.0]
-                    .iter()
-                    .any(|v: &f64| (mantissa - v).abs() < 1e-9);
+                let ok = [1.0, 2.0, 5.0].iter().any(|v: &f64| eq_len(mantissa, *v));
                 assert!(ok, "nice_step の仮数 {mantissa} が 1/2/5 系列でない");
             }
         }
@@ -822,7 +822,7 @@ mod tests {
         assert_eq!(v, vec![-2.0, 0.0, 2.0, 4.0, 6.0]);
         // すべて step の整数倍であること（格子が歪んでいない）。
         for x in v {
-            assert!((x / 2.0).fract().abs() < 1e-12);
+            assert!(is_zero_len((x / 2.0).fract()));
         }
     }
 
@@ -872,10 +872,10 @@ mod tests {
 
     #[test]
     fn nice_step_rejects_invalid_input() {
-        assert!((nice_step(0.0) - 1.0).abs() < 1e-12);
-        assert!((nice_step(-5.0) - 1.0).abs() < 1e-12);
-        assert!((nice_step(f64::NAN) - 1.0).abs() < 1e-12);
-        assert!((nice_step(f64::INFINITY) - 1.0).abs() < 1e-12);
+        assert!(eq_len(nice_step(0.0), 1.0));
+        assert!(eq_len(nice_step(-5.0), 1.0));
+        assert!(eq_len(nice_step(f64::NAN), 1.0));
+        assert!(eq_len(nice_step(f64::INFINITY), 1.0));
     }
 
     // ---- インスタンスの描画 -----------------------------------------------

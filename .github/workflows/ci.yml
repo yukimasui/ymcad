@@ -131,10 +131,11 @@ jobs:
           echo "OK: 縮小変換は viewport.rs に閉じています"
 
       # トレランスは geom/tolerance.rs に一元管理する。
+      # crates/ 配下のすべて（cad-core / cad-app の src・tests・examples）が対象。
       - name: トレランスのマジックナンバーが無いこと
         run: |
           set -euo pipefail
-          HITS=$(grep -rnE '[0-9](\.[0-9]*)?e-[0-9]' crates/cad-core/src --include='*.rs' \
+          HITS=$(grep -rnE '[0-9](\.[0-9]*)?e-[0-9]' crates --include='*.rs' \
                  | grep -v 'geom/tolerance.rs' | grep -v ':[0-9]*: *//' || true)
           if [ -n "$HITS" ]; then
             echo "::error::tolerance.rs の外にトレランスの直書きがあります"; echo "$HITS"; exit 1

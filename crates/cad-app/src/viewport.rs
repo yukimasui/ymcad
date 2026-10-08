@@ -30,7 +30,11 @@
 use cad_core::geom::{Aabb, Point2, Vec2};
 
 /// スケールの下限。これ以上引くと図面全体が 1px 未満になる。
-const MIN_SCALE: f64 = 1e-9;
+///
+/// 幾何の許容誤差（`cad_core::geom::tolerance`）ではなく表示倍率の範囲。
+/// 上限の逆数にして、拡大側と縮小側が対称であることを式で示す
+/// （指数表記の負指数はトレランスの直書き検査の対象なので使わない）。
+const MIN_SCALE: f64 = 1.0 / MAX_SCALE;
 /// スケールの上限。
 const MAX_SCALE: f64 = 1e9;
 
@@ -244,6 +248,7 @@ impl Viewport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cad_core::geom::tolerance::eq_len;
 
     fn vp(center: Point2, scale: f64) -> Viewport {
         let mut v = Viewport {
@@ -267,7 +272,7 @@ mod tests {
             for center in [
                 Point2::ORIGIN,
                 Point2::new(1e6, -1e6),
-                Point2::new(1e-6, 1e-6),
+                Point2::new(1.0 / 1_000_000.0, 1.0 / 1_000_000.0),
             ] {
                 let v = vp(center, scale);
                 // 画面内に収まるいくつかのモデル点で検査する。
@@ -356,7 +361,7 @@ mod tests {
         v.pan_px(egui::vec2(100.0, 0.0));
         // 図面を右へドラッグしたら、画面中心のモデル座標は左へ動く。
         assert!(v.center().x < 0.0);
-        assert!((v.center().x - (-50.0)).abs() < 1e-9);
+        assert!(eq_len(v.center().x, -50.0));
     }
 
     /// 範囲全体が画面に収まること。
@@ -425,7 +430,7 @@ mod tests {
 
         let rel = ((v.scale() - before) / before).abs();
         assert!(
-            rel < 1e-9,
+            eq_len(v.scale(), before),
             "{} 回のズーム操作後、倍率の相対誤差 {rel:e} が大きすぎる (before={before}, after={})",
             DEPTH * ROUNDS * 2,
             v.scale()
@@ -437,6 +442,8 @@ mod tests {
     fn px_model_len_roundtrip() {
         let v = vp(Point2::ORIGIN, 250.0);
         let len = v.px_to_model_len(10.0);
-        assert!((v.model_len_to_px(len) - 10.0).abs() < 1e-4);
+        // 戻り値は f32 なので、許容は f32 の分解能（10 px で約 1e-6）に合わせる。
+        let px = f64::from(v.model_len_to_px(len));
+        assert!((px - 10.0).abs() <= 10.0 * f64::from(f32::EPSILON));
     }
 }

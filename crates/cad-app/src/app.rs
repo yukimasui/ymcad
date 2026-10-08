@@ -1170,6 +1170,7 @@ mod behavior_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cad_core::geom::tolerance::eq_len;
 
     #[test]
     fn draw_timer_reports_zero_when_empty() {
@@ -1183,8 +1184,8 @@ mod tests {
         t.push(Duration::from_micros(1000)); // 1.0ms
         t.push(Duration::from_micros(3000)); // 3.0ms
         let (avg, max) = t.stats_ms();
-        assert!((avg - 2.0).abs() < 1e-9, "平均は 2.0ms のはず: {avg}");
-        assert!((max - 3.0).abs() < 1e-9, "最大は 3.0ms のはず: {max}");
+        assert!(eq_len(avg, 2.0), "平均は 2.0ms のはず: {avg}");
+        assert!(eq_len(max, 3.0), "最大は 3.0ms のはず: {max}");
     }
 
     /// 窓を越えても古いサンプルで壊れないこと。
@@ -1195,8 +1196,8 @@ mod tests {
             t.push(Duration::from_micros(500));
         }
         let (avg, max) = t.stats_ms();
-        assert!((avg - 0.5).abs() < 1e-9);
-        assert!((max - 0.5).abs() < 1e-9);
+        assert!(eq_len(avg, 0.5));
+        assert!(eq_len(max, 0.5));
     }
 
     /// 座標の欄は桁の多い座標で広がり、小さい座標に戻っても縮まない。
