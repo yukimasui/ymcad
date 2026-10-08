@@ -1,7 +1,7 @@
 //! ymcad の MCP サーバー。
 //!
 //! LLM（Claude Code などの MCP クライアント）が、標準入出力の JSON-RPC で
-//! 図面ファイル（`.ymc` / `.dxf`）を開き、中身を調べ、保存できるようにする。
+//! 図面ファイル（`.ymc` / `.dxf`）を開き、中身を調べ、描いて変え、保存できるようにする。
 //! 設計判断は `docs/DECISIONS.md` の ADR-0046、使い方は `docs/MCP.md`。
 //!
 //! # 構成
@@ -10,7 +10,7 @@
 //! |---|---|
 //! | [`protocol`] | JSON-RPC の封筒（要求・通知・エラー）と MCP の取り決め（`initialize`） |
 //! | [`server`] | [`Server`]: 図面・図面の通し番号・root・開いたファイルの記録 |
-//! | `tools` | 道具の一覧と実装（`tools/list` / `tools/call`） |
+//! | `tools` | 道具の一覧と実装（`tools/list` / `tools/call`）。図面を変える道具の約束は `tools/mutate.rs` |
 //! | [`convert`] | 図形 ↔ JSON、度 ↔ ラジアン。**変換はここに 1 か所だけ** |
 //! | [`ids`] | 図形 ID の文字列 `d<起動の印>-<図面>e<index>g<generation>` |
 //! | [`paths`] | root の配下だけを読み書きさせるパスの検査 |

@@ -643,6 +643,35 @@ pub(super) mod tests {
             )))
             .unwrap();
 
+        // ラジアンの角度は、度で出して読み戻すと最後のビットがずれうる（0.1 刻みの 20 本のどれかは必ずずれる）。
+        let arcs: Vec<Entity> = (1..=20)
+            .map(|k| {
+                let a = 0.1 * f64::from(k) + 0.012_345_678_9;
+                Entity::new(
+                    Geometry::Arc(cad_core::geom::Arc::new(
+                        Point2::new(0.0, 0.0),
+                        1.0,
+                        a,
+                        a * 2.0,
+                    )),
+                    LayerId::ZERO,
+                )
+            })
+            .collect();
+        assert!(
+            arcs.iter().any(|e| {
+                let Geometry::Arc(a) = &e.geom else {
+                    return false;
+                };
+                crate::convert::deg_to_rad(crate::convert::rad_to_deg(a.start_angle)).to_bits()
+                    != a.start_angle.to_bits()
+            }),
+            "往復でずれる角度を含めること"
+        );
+        s.doc
+            .apply(Box::new(AddEntities::many("ADD", arcs)))
+            .unwrap();
+
         let list = ok(&mut s, "list_entities", json!({}));
         let ids: Vec<Value> = list["entities"]
             .as_array()
@@ -667,7 +696,16 @@ pub(super) mod tests {
             .iter()
             .map(|(_, e)| e.geom.clone())
             .collect();
+        let bytes_before = cad_core::native::write::write_to_bytes(&s.doc);
+        // クライアントとの間は文字列なので、いったん JSON の文字列にして読み戻したものを渡す
+        // （serde_json の既定の読み取りでは小数が 1〜2 ULP ずれ、ここで落ちる）。
+        let changes: Value = serde_json::from_str(&json!(changes).to_string()).unwrap();
         mutate(&mut s, "modify_entities", json!({ "changes": changes }));
+        assert_eq!(
+            cad_core::native::write::write_to_bytes(&s.doc),
+            bytes_before,
+            "get した値をそのまま渡し返しても、形は 1 ビットも変わらない"
+        );
         let after: Vec<Geometry> = s
             .doc
             .entities()

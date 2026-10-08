@@ -505,6 +505,16 @@ pub fn apply_fields(
             allowed.join(", ")
         ));
     }
+    // いまの値と同じ JSON を渡された項目は「変えない」として扱い、元の値をそのまま使う。
+    // 度で出した角度を読み戻すとラジアンの最後のビットがずれうるので、get_entities の出力を
+    // そのまま渡し返しても形が 1 ビットも変わらないように（JSON の数値自体は float_roundtrip で正確に読む）。
+    let now = geometry_to_json(current, defs);
+    let changed: Map<String, Value> = set
+        .iter()
+        .filter(|(k, v)| now.get(k.as_str()) != Some(*v))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let set = &changed;
     let point = |key: &str, old: Point2| match set.get(key) {
         None => Ok(old),
         Some(v) => point_from_json(v, key),
