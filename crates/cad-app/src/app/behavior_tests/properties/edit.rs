@@ -717,7 +717,21 @@ fn in_component_edit(
     EntityId,
     EntityId,
 ) {
-    let mut h = app();
+    component_edit_in(app(), rotation_deg, &[])
+}
+
+/// [`in_component_edit`] と同じ図面を `h` に作って編集に入る。添字 0 の線分には、終点 X の `幅` に
+/// 加えて `extra` の束縛も付ける（パラメータは `幅`・`枠厚`・`開き`）。
+fn component_edit_in(
+    mut h: Harness<'static, CadApp>,
+    rotation_deg: f64,
+    extra: &[(Slot, &str)],
+) -> (
+    Harness<'static, CadApp>,
+    cad_core::component::DefinitionId,
+    EntityId,
+    EntityId,
+) {
     let def = {
         let app = h.state_mut();
         let doc = &mut app.doc;
@@ -741,15 +755,21 @@ fn in_component_edit(
         doc.apply(Box::new(SetDefinitionParams::new(
             "PARAM",
             def,
-            vec![ParamDecl::number("幅", 30.0)],
+            vec![
+                ParamDecl::number("幅", 30.0),
+                ParamDecl::number("枠厚", 5.0),
+                ParamDecl::boolean("開き", false),
+            ],
         )))
         .expect("宣言");
-        doc.apply(Box::new(SetBinding::new(
-            "BIND",
-            def,
-            Binding::new(0, Slot::LineBx, parse("幅").expect("解析")),
-        )))
-        .expect("束縛");
+        for (slot, expr) in std::iter::once((Slot::LineBx, "幅")).chain(extra.iter().copied()) {
+            doc.apply(Box::new(SetBinding::new(
+                "BIND",
+                def,
+                Binding::new(0, slot, parse(expr).expect("解析")),
+            )))
+            .expect("束縛");
+        }
         let placement = Placement::new(
             Point2::new(100.0, 100.0),
             rotation_deg.to_radians(),
@@ -893,4 +913,81 @@ fn outside_a_component_edit_nothing_is_locked() {
         assert!(editable(&h, label), "{label}");
     }
     assert!(!has(&h, BOUND_NOTE));
+}
+
+/// 長い式。省略しないとパネルに収まらない。
+const LONG_EXPR: &str = "if 開き then 幅 * 2 + 枠厚 else 0";
+
+/// 式の案内（`←` で始まる文字か、式を囲む「」）の矩形。上の案内文（「←」の付いた値は…）は拾わない。
+fn badge_rects(h: &Harness<'_, CadApp>) -> Vec<(String, egui::Rect)> {
+    h.query_all_by_label_contains("←")
+        .chain(h.query_all_by_label_contains("「"))
+        .filter_map(|n| Some((n.value()?, n.rect())))
+        .filter(|(text, _)| {
+            // 式は「」で囲んだ形（コンポーネントパネルの「窓」の宣言 などは拾わない）。
+            text.starts_with('←') || (text.starts_with('「') && text.ends_with('」'))
+        })
+        .fold(Vec::new(), |mut all, b| {
+            if !all.contains(&b) {
+                all.push(b);
+            }
+            all
+        })
+}
+
+/// **長い式の案内が、次の行の欄に重ならない。** 1 行に収め、入り切らない分は式の側だけを省略する
+/// （`← 式` は必ず残る）。90° 回した配置で入ると、定義の始点 Y の長い式が図面の「始点 X」に付き、
+/// すぐ下の「始点 Y」は編集できる欄になる（操作レビューで、折り返した 2 行目が欄の下に隠れた並び）。
+/// 1280px・パネル 1 枚と、1024px・3 枚で見る。
+#[test]
+fn a_long_expression_badge_stays_on_one_line_and_clear_of_the_next_field() {
+    for (width, three) in [(1280.0, false), (1024.0, true)] {
+        let (mut h, _, bound, _) =
+            component_edit_in(app_with_width(width), 90.0, &[(Slot::LineAy, LONG_EXPR)]);
+        if three {
+            open_layer_panel(&mut h);
+            h.state_mut().component_panel.toggle();
+        }
+        select(&mut h, &[bound]);
+        hover(&mut h, P1);
+        assert!(
+            editable(&h, "始点 Y"),
+            "{width}: 前提: 次の行は編集できる欄"
+        );
+        let next = field_rect(&h, "始点 Y");
+        let start_x = h.get_by_label("始点 X").rect();
+        let badges = badge_rects(&h);
+        for (text, rect) in &badges {
+            assert!(
+                !rect.intersects(next.shrink(1.0)),
+                "{width}: 案内 {text:?} {rect:?} が次の行の欄 {next:?} に重なる"
+            );
+        }
+        // 案内は折り返さない（項目名と同じ 1 行の高さに収まる）。
+        for (text, rect) in &badges {
+            assert!(
+                rect.height() <= start_x.height() + 2.0,
+                "{width}: 案内 {text:?} が折り返している: {rect:?} / 項目名 {start_x:?}"
+            );
+        }
+        // 省略するのは式の部分だけ。
+        assert!(
+            badges.iter().any(|(t, _)| t == "← 式"),
+            "{width}: 「← 式」は省略されずに残る: {badges:?}"
+        );
+        // パネルの右端（レイヤのドロップダウンの右端）からはみ出さない。
+        let panel_right = h
+            .query_all_by_role(egui::accesskit::Role::ComboBox)
+            .map(|n| n.rect())
+            .filter(|r| r.left() > start_x.left())
+            .min_by(|a, b| a.left().total_cmp(&b.left()))
+            .expect("プロパティのレイヤのドロップダウン")
+            .right();
+        for (text, rect) in &badges {
+            assert!(
+                rect.right() <= panel_right + 8.0,
+                "{width}: 案内 {text:?} {rect:?} がパネルの右端 {panel_right} からはみ出す"
+            );
+        }
+    }
 }

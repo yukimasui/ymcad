@@ -334,21 +334,75 @@ fn editor_key(editor: Editor) -> Key {
     }
 }
 
+/// 式の案内のうち、省略してよい残り（式）に少なくとも取りたい幅 [px]。これが取れないほど狭ければ、
+/// 案内を値の横ではなく次の行に出す。
+const BADGE_REST_MIN_WIDTH: f32 = 40.0;
+
 /// 表示だけの値。束縛（式）で決まるなら、横に式の案内を出す（ツールチップで式の全体と理由）。
+///
+/// 案内は**折り返さずに 1 行**で出し、入り切らなければ式の側だけを省略する（`← 式` は残す）。
+/// 折り返すと、表の行の高さが増えた分だけ次の行の欄の下に 2 行目が隠れた（PR #82 の操作レビュー）。
+/// 値の横に `← 式` と式の頭も入らないほど狭いとき（3 枚のパネルを開いた狭い画面）は、表に 1 行
+/// 足して、値の下の行に出す。表の行は 1 行ずつなので、欄と重ならない。
+///
+/// 呼び出し側は、いつもどおりこの後で `end_row` する。
 fn show_value(ui: &mut egui::Ui, value: String, lock: Option<&Lock>) {
-    let value = egui::Label::new(egui::RichText::new(value).monospace()).selectable(false);
+    let width_of = |ui: &egui::Ui, text: &str, style: egui::TextStyle| {
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), style.resolve(ui.style()), BOUND_COLOR)
+            .size()
+            .x
+    };
     let Some(lock) = lock else {
-        ui.add(value);
+        ui.add(
+            egui::Label::new(egui::RichText::new(value).monospace())
+                .selectable(false)
+                .extend(),
+        );
         return;
     };
-    ui.horizontal_wrapped(|ui| {
-        ui.add(value);
+    let (head, _) = lock.badge_parts();
+    let needed = width_of(ui, &value, egui::TextStyle::Monospace)
+        + ui.spacing().item_spacing.x
+        + width_of(ui, head, egui::TextStyle::Body)
+        + BADGE_REST_MIN_WIDTH;
+    let beside = ui.available_width() >= needed;
+    ui.horizontal(|ui| {
         ui.add(
-            egui::Label::new(egui::RichText::new(lock.badge()).color(BOUND_COLOR))
-                .selectable(false),
-        )
-        .on_hover_text(lock.tooltip());
+            egui::Label::new(egui::RichText::new(value).monospace())
+                .selectable(false)
+                .extend(),
+        );
+        if beside {
+            show_badge(ui, lock);
+        }
     });
+    if !beside {
+        ui.end_row();
+        ui.label("");
+        ui.horizontal(|ui| show_badge(ui, lock));
+    }
+}
+
+/// 式の案内（`← 式` と、入り切らなければ省略する式）。ツールチップは式の全体と理由。
+fn show_badge(ui: &mut egui::Ui, lock: &Lock) {
+    let (head, rest) = lock.badge_parts();
+    let text = |s: String| egui::RichText::new(s).color(BOUND_COLOR);
+    let head = ui.add(
+        egui::Label::new(text(head.to_owned()))
+            .selectable(false)
+            .extend(),
+    );
+    // 頭と残りは続けて 1 つの文に見せる。
+    ui.spacing_mut().item_spacing.x = 0.0;
+    let rest = ui.add(
+        egui::Label::new(text(rest))
+            .selectable(false)
+            .truncate()
+            // 省略されたときの egui 既定のツールチップ（式の文字だけ）は出さず、理由つきの方を出す。
+            .show_tooltip_when_elided(false),
+    );
+    head.union(rest).on_hover_text(lock.tooltip());
 }
 
 impl PropertiesPanel {

@@ -252,18 +252,28 @@ impl Lock {
         }
     }
 
-    /// 値の横に出す短い案内（`← 式「幅」`、`← 端点の式から`）。
+    /// 値の横に出す短い案内（`← 式「幅」`、`← 端点の式から`）。[`Lock::badge_parts`] をつないだもの。
     #[must_use]
     pub fn badge(&self) -> String {
+        let (head, rest) = self.badge_parts();
+        format!("{head}{rest}")
+    }
+
+    /// 短い案内を「必ず見せる頭」と「入り切らなければ省略してよい残り」に分けたもの。
+    ///
+    /// パネルは案内を折り返さずに 1 行で出し、幅が足りなければ残り（式の側）だけを省略する。
+    /// 頭（`← 式`）まで削ると、何の印か分からなくなる。式の全体はツールチップにある。
+    #[must_use]
+    pub fn badge_parts(&self) -> (&'static str, String) {
         match self {
             Self::Bound(exprs) => {
                 let quoted: String = exprs
                     .iter()
                     .map(|(_, e)| format!("「{}」", shorten(e)))
                     .collect();
-                format!("← 式{quoted}")
+                ("← 式", quoted)
             }
-            Self::Derived { what, .. } => format!("← {what}の式から"),
+            Self::Derived { what, .. } => ("← ", format!("{what}の式から")),
         }
     }
 
@@ -279,12 +289,22 @@ impl Lock {
         let lines: Vec<String> = self
             .exprs()
             .iter()
-            .map(|(slot, e)| format!("  {} = {e}", slot_input_name(*slot)))
+            .map(|(slot, e)| format!("  {}{} = {e}", slot_input_name(*slot), ordinal(*slot)))
             .collect();
         format!(
             "{head}\n{}\n（スロット名は定義の座標）\nここで変えても ENDCOMP の後に式の値へ戻るため、表示だけにしています。\n式は BIND（BI）で変えます",
             lines.join("\n")
         )
+    }
+}
+
+/// ポリラインの頂点のスロットなら、数え方の注記（`頂点Y2` は 0 始まりなので `（3 つ目の頂点）`）。
+fn ordinal(slot: Slot) -> String {
+    match slot {
+        Slot::PolylineVx(i) | Slot::PolylineVy(i) => {
+            format!("（{} つ目の頂点）", u64::from(i) + 1)
+        }
+        _ => String::new(),
     }
 }
 
@@ -799,13 +819,36 @@ mod tests {
     }
 
     /// 対応の向きが `component::place` と一致している（定義の値を 1 つ動かして置き直すと、
-    /// 動くのは対応表が言う項目だけ）。表と配置の計算がずれていないことを確かめる。
+    /// 動くのは対応表が言う項目だけ）。表と配置の計算がずれていないことを、**すべての種類**の
+    /// すべてのスロット × すべての数値の項目で確かめる（ポリラインの頂点は頂点の行で）。
+    /// 表に項目を足したときも、ここから漏れない。
     #[test]
     fn the_frame_agrees_with_place() {
-        use crate::properties_edit::display_value;
+        use crate::properties_edit::{display_value, same_on_screen};
         use cad_core::component::place;
-        let line = Geometry::Line(Line::new(Point2::new(1.0, 2.0), Point2::new(4.0, 6.0)));
-        let arc = Geometry::Arc(Arc::new(Point2::new(1.0, 2.0), 3.0, 0.2, 1.4));
+
+        // 種類ごとの、どの値も 10.5 とは違う図形（スロットを 10.5 にすると必ず動く）。
+        let Geometry::Instance(inst) = instance() else {
+            unreachable!()
+        };
+        let shapes = [
+            Geometry::Line(Line::new(Point2::new(1.0, 2.0), Point2::new(4.0, 6.0))),
+            Geometry::Circle(Circle::new(Point2::new(1.0, 2.0), 3.0)),
+            Geometry::Arc(Arc::new(Point2::new(1.0, 2.0), 3.0, 0.2, 1.4)),
+            Geometry::Xline(Xline::at_angle(Point2::new(1.0, 2.0), 0.3)),
+            Geometry::Instance(inst.with_placement(
+                Placement::new(Point2::new(1.0, 2.0), 0.3, 1.5, false).expect("配置"),
+            )),
+            Geometry::Polyline(Polyline::new(
+                vec![
+                    Point2::new(1.0, 2.0),
+                    Point2::new(4.0, 6.0),
+                    Point2::new(7.0, 1.0),
+                ],
+                false,
+            )),
+        ];
+        let moved_to = 10.5;
         for placement in [
             rotated(0.0, false),
             rotated(90.0, false),
@@ -815,49 +858,60 @@ mod tests {
             rotated(-45.0, true),
         ] {
             let frame = Frame::of(placement);
-            for (geom, kind, slot, fields) in [
-                (
-                    &line,
-                    Kind::Line,
-                    Slot::LineAx,
-                    &[Field::LineStartX, Field::LineStartY][..],
-                ),
-                (
-                    &line,
-                    Kind::Line,
-                    Slot::LineAy,
-                    &[Field::LineStartX, Field::LineStartY][..],
-                ),
-                (
-                    &arc,
-                    Kind::Arc,
-                    Slot::ArcStart,
-                    &[Field::ArcStart, Field::ArcEnd][..],
-                ),
-                (
-                    &arc,
-                    Kind::Arc,
-                    Slot::ArcEnd,
-                    &[Field::ArcStart, Field::ArcEnd][..],
-                ),
-            ] {
-                let mut moved = geom.clone();
-                assert!(slot.apply(&mut moved, 0.5 + 10.0));
-                let before = place(geom, Point2::ORIGIN, placement);
-                let after = place(&moved, Point2::ORIGIN, placement);
-                for field in fields {
-                    let changed = !crate::properties_edit::same_on_screen(
-                        display_value(&before, *field).expect("値"),
-                        display_value(&after, *field).expect("値"),
-                    );
-                    let mapped = source(kind, Key::Number(*field))
-                        .expect("表にある")
-                        .slots(frame)
-                        .contains(&slot);
-                    assert_eq!(
-                        changed, mapped,
-                        "{placement:?} で {slot:?} を動かすと {field:?} が変わる = {changed}"
-                    );
+            for geom in &shapes {
+                let kind = kind_of(geom);
+                let slots: Vec<Slot> = all_slots()
+                    .into_iter()
+                    .map(|s| match s {
+                        // 頂点は 1 番（0 番ではなく真ん中）で代表する。
+                        Slot::PolylineVx(_) => Slot::PolylineVx(1),
+                        Slot::PolylineVy(_) => Slot::PolylineVy(1),
+                        other => other,
+                    })
+                    .filter(|s| s.fits(geom))
+                    .collect();
+                assert!(!slots.is_empty(), "{kind:?}");
+                for slot in slots {
+                    let mut moved = geom.clone();
+                    assert!(slot.apply(&mut moved, moved_to), "{kind:?} {slot:?}");
+                    let before = place(geom, Point2::ORIGIN, placement);
+                    let after = place(&moved, Point2::ORIGIN, placement);
+                    // 項目の値。
+                    for key in keys(geom) {
+                        let Key::Number(field) = key else {
+                            continue;
+                        };
+                        let changed = !same_on_screen(
+                            display_value(&before, field).expect("値"),
+                            display_value(&after, field).expect("値"),
+                        );
+                        let mapped = source(kind, key)
+                            .expect("表にある")
+                            .slots(frame)
+                            .contains(&slot);
+                        assert_eq!(
+                            changed, mapped,
+                            "{placement:?} で {kind:?} の {slot:?} を動かすと {field:?} が変わる = {changed}"
+                        );
+                    }
+                    // ポリラインの頂点の行（束縛で決まる軸の行だけが出る）。
+                    if let (Geometry::Polyline(b), Geometry::Polyline(a)) = (&before, &after) {
+                        let rows = EntityBindings::new(
+                            placement,
+                            &[Binding::new(0, slot, parse("幅").expect("解析"))],
+                        )
+                        .vertex_rows(&before);
+                        for (axis, changed) in [
+                            ("X", !same_on_screen(b.vertices[1].x, a.vertices[1].x)),
+                            ("Y", !same_on_screen(b.vertices[1].y, a.vertices[1].y)),
+                        ] {
+                            let shown = rows.iter().any(|r| r.label == format!("頂点 1 {axis}"));
+                            assert_eq!(
+                                changed, shown,
+                                "{placement:?} で {slot:?} を動かすと頂点 1 の {axis} が変わる = {changed}"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -884,6 +938,9 @@ mod tests {
                 lock: Lock::Bound(vec![(Slot::PolylineVy(2), "高さ".to_owned())]),
             }]
         );
+        // 番号は 0 始まりなので、ツールチップに数え方を添える。
+        let tip = b.vertex_rows(&g)[0].lock.tooltip();
+        assert!(tip.contains("頂点Y2（3 つ目の頂点） = 高さ"), "{tip}");
         // 90° 回した配置では、定義の Y は図面の X。
         let b = with(rotated(90.0, false), &[(Slot::PolylineVy(2), "高さ")]);
         let rows = b.vertex_rows(&g);

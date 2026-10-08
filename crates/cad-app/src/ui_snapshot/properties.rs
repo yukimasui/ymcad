@@ -419,8 +419,9 @@ fn ui_snapshot_properties_crowded_with_a_reason() {
 // ---- インプレース編集中の束縛（段階 3） ------------------------------------------
 
 /// コンポーネント「窓」（線分 1 本・ポリライン 1 本）の編集に入った状態。線分の終点 X に `幅`、
-/// 始点 Y に長い式、ポリラインの頂点 2 の Y に `高さ` を束縛してある。返り値は（線分, ポリライン）。
-fn in_component_edit(h: &mut Harness<'static, CadApp>) -> (EntityId, EntityId) {
+/// 始点 Y に長い式、ポリラインの頂点 2 の Y に `高さ` を束縛してある。インスタンスは (100, 100) に
+/// `rotation_deg` 度回して置く。返り値は（線分, ポリライン）。
+fn in_component_edit(h: &mut Harness<'static, CadApp>, rotation_deg: f64) -> (EntityId, EntityId) {
     let (doc, _) = h.state_mut().parts_mut();
     doc.apply(Box::new(DefineComponent::new(
         "COMPONENT",
@@ -466,10 +467,17 @@ fn in_component_edit(h: &mut Harness<'static, CadApp>) -> (EntityId, EntityId) {
         )))
         .expect("束縛");
     }
+    let placement = Placement::new(
+        Point2::new(100.0, 100.0),
+        rotation_deg.to_radians(),
+        1.0,
+        false,
+    )
+    .expect("配置");
     doc.apply(Box::new(InsertInstance::new(
         "INSERT",
         def,
-        Placement::at(Point2::new(100.0, 100.0)),
+        placement,
         LayerId::ZERO,
     )))
     .expect("配置");
@@ -480,8 +488,10 @@ fn in_component_edit(h: &mut Harness<'static, CadApp>) -> (EntityId, EntityId) {
     press(h, egui::Key::Enter);
     // インスタンスの線分の上をクリックしたことにする（画面の位置ではなく図面の座標で渡す）。
     let (doc, session) = h.state_mut().parts_mut();
+    // 線分の中ほど（定義の (60, 0)）を配置で図面へ移した点。
+    let (sin, cos) = rotation_deg.to_radians().sin_cos();
     session.handle_click(
-        Point2::new(160.0, 100.0),
+        Point2::new(100.0 + 60.0 * cos, 100.0 + 60.0 * sin),
         false,
         1.0,
         doc,
@@ -503,14 +513,14 @@ fn ui_snapshot_properties_bound_in_component_edit() {
     use egui_kittest::kittest::Queryable as _;
 
     let mut h = harness();
-    let (line, polyline) = in_component_edit(&mut h);
+    let (line, polyline) = in_component_edit(&mut h, 0.0);
     h.state_mut().parts_mut().1.selection.insert(line);
     h.run_steps(STEPS);
     hover(&mut h, CANVAS_CENTER);
     shot(&mut h, "properties_t_bound_line");
 
     let badge = h
-        .query_all_by_label_contains("← 式「if")
+        .query_all_by_label_contains("「if")
         .next()
         .expect("長い式の案内")
         .rect()
@@ -528,4 +538,35 @@ fn ui_snapshot_properties_bound_in_component_edit() {
     h.run_steps(STEPS);
     hover(&mut h, CANVAS_CENTER);
     shot(&mut h, "properties_t_bound_polyline");
+}
+
+/// 長い式の案内が付いた行のすぐ下に、編集できる行が来る並び（90° 回したインスタンスから入ると、
+/// 定義の始点 Y の長い式が図面の「始点 X」に付き、「始点 Y」は欄のまま）。案内は折り返さず 1 行で、
+/// 入り切らない分は式の側だけ省略される。1280px・パネル 1 枚と、1024px・3 枚（狭いので案内は値の
+/// 下の行に出る）。PR #82 の操作レビューで、折り返した 2 行目が次の行の欄の下に隠れた。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_properties_long_expression_above_a_field() {
+    for (width, three) in [(1280.0, false), (1024.0, true)] {
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(width, 800.0))
+            .wgpu()
+            .build_eframe(|cc| {
+                let font = crate::jp_font::install(&cc.egui_ctx)
+                    .map(|f| format!("{} (face {})", f.path.display(), f.index));
+                CadApp::new(font)
+            });
+        h.run_steps(STEPS);
+        let (line, _) = in_component_edit(&mut h, 90.0);
+        if three {
+            for command in ["LA", "CS"] {
+                type_text(&mut h, command);
+                press(&mut h, egui::Key::Enter);
+            }
+        }
+        h.state_mut().parts_mut().1.selection.insert(line);
+        h.run_steps(STEPS);
+        hover(&mut h, egui::pos2(width / 8.0, 350.0));
+        shot(&mut h, &format!("properties_u_long_expression_{width}"));
+    }
 }
