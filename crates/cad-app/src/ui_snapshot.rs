@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 use crate::app::CadApp;
 
+mod hover;
 mod properties;
 
 /// 画面の大きさ [px]。
