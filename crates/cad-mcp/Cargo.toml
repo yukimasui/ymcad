@@ -1,0 +1,35 @@
+# INVARIANT — CI (.github/workflows/ci.yml の「cad-mcp が GUI のクレートに依存していないこと」) で検査している。
+#
+#   1. cad-mcp は cad-app に依存しない。egui / eframe / winit / wgpu / rfd も入れない。
+#      段階 2（起動中のアプリとつなぐ）では cad-app → cad-mcp の向きで道具の実装を使い回す。
+#   2. MCP の SDK（rmcp）は使わない。JSON-RPC は自前で書く（ADR-0046）。
+#   3. 依存を足すのはこのクレートだけ。cad-core には足さない（設計原則 10）。
+
+[package]
+name = "cad-mcp"
+description = "ymcad の MCP サーバー（標準入出力の JSON-RPC）。LLM が図面ファイルを読み書きする。"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "cad_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ymcad-mcp"
+path = "src/main.rs"
+
+[dependencies]
+cad-core.workspace = true
+serde_json = "1"
+
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+# cad-core と同じ。座標は f64 のまま扱い、f32 への劣化を検出する。
+cast_possible_truncation = "warn"
+cast_precision_loss = "warn"

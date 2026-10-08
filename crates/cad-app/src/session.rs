@@ -8,10 +8,11 @@ use cad_core::command::ExitDefinitionEdit;
 use cad_core::geom::{Aabb, Point2};
 use cad_core::{Document, Entity, EntityId, Geometry};
 
-use crate::cmdline::{coord, dimension, CommandLine, LineKind, Submission};
+use crate::cmdline::dimension::{self, DimKind};
+use crate::cmdline::{coord, CommandLine, LineKind, Submission};
 use crate::command_label::display_name;
 use crate::editing::EditSession;
-use crate::grips::{self, Grip};
+use crate::grips::{self, Grip, GripGroup};
 use crate::input::ViewAction;
 use crate::properties::{self, MOVE_TO_LAYER_COMMAND};
 use crate::selection::{self, Picker, Selection, WindowMode};
@@ -69,9 +70,10 @@ pub enum ClickTarget {
     Nothing,
     /// 待機中に、選択した図形のグリップに当たった（Issue #30）。クリックすると掴む。
     ///
+    /// 同じ位置に重なったグリップ（選んだ図形どうしの共有点）は束でまとめて掴む（段階 2）。
     /// 図形のピックより優先する。強調（紫の縁取り）は出さない。クリックの結果は「選ぶ」ではなく
     /// 「掴む」なので（ADR-0042「強調 = クリックの結果」）、乗せたグリップを大きく描いて示す。
-    Grip(Grip),
+    Grip(GripGroup),
 }
 
 impl ClickTarget {
@@ -400,6 +402,16 @@ impl Session {
         self.tool.as_ref().and_then(|t| t.dimension_base())
     }
 
+    /// 寸法入力の欄の見せ方。円の四分点のグリップを掴んでいる間だけ「半径」の 1 欄
+    /// （Issue #30 段階 2）。ほかは「長さ」「角度」。
+    #[must_use]
+    pub fn dimension_kind(&self) -> DimKind {
+        self.tool
+            .as_ref()
+            .and_then(|t| t.grip())
+            .map_or(DimKind::LengthAngle, GripTool::dimension_kind)
+    }
+
     /// 直交モード・極トラッキングの基準点（[`Tool::tracking_base`]、ADR-0038）。
     /// 点の指定を待っていて、ツールが基準点を持つときだけ `Some`。
     #[must_use]
@@ -480,7 +492,7 @@ impl Session {
             Submission::Dimension(values) => {
                 self.cmdline.push_line(
                     LineKind::Input,
-                    format!("> {}", dimension::describe(values)),
+                    format!("> {}", self.dimension_kind().describe(values)),
                 );
                 self.handle_dimension(values, doc);
             }
@@ -1067,16 +1079,16 @@ impl Session {
             .unwrap_or_default()
     }
 
-    /// グリップを掴む（クリック、またはグリップの上で押してドラッグした時点）。
+    /// グリップの束を掴む（クリック、またはグリップの上で押してドラッグした時点）。
     ///
     /// コマンド名で始めるコマンドとは別の入口で、**再実行の対象として覚えない**
     /// （`remember_command` しない。空の Enter で GRIP が再実行されると、掴んでいない状態で
     /// 何を動かすのか決まらない）。掴めるのは [`Self::grips_enabled`] の間だけ。
-    pub fn start_grip(&mut self, grip: &Grip, doc: &Document) {
+    pub fn start_grip(&mut self, group: &GripGroup, doc: &Document) {
         if !self.grips_enabled() {
             return;
         }
-        let Some(tool) = GripTool::new(doc, grip) else {
+        let Some(tool) = GripTool::new(doc, group) else {
             return;
         };
         // 寸法入力の固定は前の基点のもの。掴んだ点から始め直す。

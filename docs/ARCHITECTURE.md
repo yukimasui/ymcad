@@ -5,13 +5,17 @@
 ```
 ymcad/
 ├── crates/
-│   ├── cad-core/   ジオメトリ・エンティティ・コマンド・ファイル入出力（UI 非依存、f64 のみ）
-│   └── cad-app/    egui アプリケーション（入力処理・描画）
+│   ├── cad-core/   ジオメトリ・エンティティ・コマンド・ファイル入出力（UI 非依存、f64 のみ、依存パッケージ 0）
+│   ├── cad-app/    egui アプリケーション（入力処理・描画）
+│   └── cad-mcp/    MCP サーバー ymcad-mcp（標準入出力の JSON-RPC。LLM が図面ファイルを読み書きする）
 └── spikes/
     └── ime-check/  Phase 0 の IME 検証用。ワークスペース外
 ```
 
-依存の向きは **`cad-app` → `cad-core`** の一方向のみ。逆流は CI で検査している。
+依存の向きは **`cad-app` → `cad-core`** と **`cad-mcp` → `cad-core`** のみ。逆流は CI で検査している
+（`cad-core` の依存は `cad-core` だけ、`cad-mcp` は `cad-app` と GUI のクレートに依存しない）。
+`cad-mcp` を `cad-app` から独立させているのは、段階 2（起動中のアプリとつなぐ）で
+`cad-app` → `cad-mcp` の向きに道具の実装を使い回すため（ADR-0046、`docs/MCP.md`）。
 
 ### なぜ 2 クレートに分けるか
 
