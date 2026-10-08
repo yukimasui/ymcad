@@ -448,6 +448,15 @@ impl CadApp {
         painter.rect_filled(response.rect, 0.0, ui.visuals().extreme_bg_color);
         render::draw_grid(&painter, &self.viewport, ui.visuals());
         render::draw_origin_marker(&painter, &self.viewport);
+        // ホバーの縁取りは図形の下に敷く。上に重ねると線の色（選択色・レイヤ色）が変わり、
+        // 「もう選んだか」が乗せている間は見えなくなる（PR #63 の操作レビュー）。
+        render::draw_hover(
+            &painter,
+            &self.doc,
+            &self.viewport,
+            self.hover.highlighted(),
+            &mut self.resolved,
+        );
         render::draw_entities(
             &painter,
             &self.doc,
@@ -455,13 +464,6 @@ impl CadApp {
             &self.session.selection,
             &mut self.resolved,
             self.session.editing(),
-        );
-        render::draw_hover(
-            &painter,
-            &self.doc,
-            &self.viewport,
-            self.hover.highlighted(),
-            &mut self.resolved,
         );
 
         let preview = self.session.preview(self.cursor_model, &self.doc);
@@ -645,7 +647,7 @@ impl CadApp {
                     .sense(egui::Sense::click()),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text("オブジェクトスナップの ON/OFF  F3")
+            .on_hover_text("オブジェクトスナップの ON/OFF  F3（点を指定するときに効く）")
         });
         if osnap_label.clicked() {
             self.toggle_osnap();

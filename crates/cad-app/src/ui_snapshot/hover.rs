@@ -17,6 +17,7 @@ fn draw_line(h: &mut Harness<'_, CadApp>, a: egui::Pos2, b: egui::Pos2) {
 }
 
 /// 待機中: 左の線分に乗せる（紫の縁取り）。右の線分は選択済み（水色）で、見分けられること。
+/// 続けて選択済みの線分に乗せる → 線は水色のまま、下に紫の縁取りが敷かれること。
 #[test]
 #[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
 fn ui_snapshot_hover_idle() {
@@ -26,6 +27,9 @@ fn ui_snapshot_hover_idle() {
     click(&mut h, egui::pos2(700.0, 350.0));
     hover(&mut h, egui::pos2(502.0, 350.0));
     shot(&mut h, "hover_a_idle_line_beside_a_selected_one");
+    // 選択済みの線分に乗せても、縁取りは線の下に敷くので線は水色のまま。
+    hover(&mut h, egui::pos2(702.0, 350.0));
+    shot(&mut h, "hover_d_selected_line_keeps_its_color");
 }
 
 /// グループの一員に乗せる → グループ全体（2 本）が強調される。
