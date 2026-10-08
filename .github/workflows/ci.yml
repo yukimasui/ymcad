@@ -51,6 +51,18 @@ jobs:
           cargo run -q -p cad-core --example write_sample -- "$out/sample.dxf"
           python3 tools/validate_dxf_r12.py "$out/sample.dxf"
 
+      # MCP サーバー（ymcad-mcp）を Python の別実装のクライアントで通しで動かす。
+      # Rust の結合テストはサーバーと同じ serde_json で読み書きするので、同じ誤解を見逃しうる。
+      # 開いて保存した .ymc は validate_ymc.py に通し、元とバイト単位で一致することも見る。
+      # バイナリは上の `cargo build --workspace --release` で作ったものを使う。
+      - name: MCP サーバーを別実装のクライアントで通し検査
+        run: |
+          set -euo pipefail
+          out=$(mktemp -d)
+          cargo run -q -p cad-core --example write_sample -- "$out/sample.ymc"
+          cargo run -q -p cad-core --example write_sample -- "$out/sample.dxf"
+          python3 tools/mcp_smoke.py target/release/ymcad-mcp "$out"
+
       # 検証スクリプト自体が壊れていないことを確かめる。
       #
       # 「壊したファイルで失敗すること」を確認しないと、スクリプトが何を渡しても
@@ -81,57 +93,79 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # cad-core は UI 非依存でなければならない（将来 wasm ビューアを載せる余地を残すため）。
+      # cad-core の依存パッケージはゼロ（設計原則 10。wasm ビューアの道を守るため。ADR-0026）。
+      # UI のクレートに限らず、cad-core 以外が 1 つでも出たら落とす。
       #
       # `cargo tree -p cad-core -i egui` の「失敗を期待する」形は使わない。
       # ネットワークエラーやパッケージ名の typo でも非ゼロ終了するため、
       # 検査が壊れていても「合格」に見えてしまう (fail-open)。
-      # 依存をフラットに列挙してから禁止クレート名を照合する fail-closed な形にする。
-      - name: cad-core が UI クレートに依存していないこと
+      # 依存をフラットに列挙してから照合する fail-closed な形にする。
+      - name: cad-core の依存が cad-core だけであること
         run: |
           set -euo pipefail
-          DEPS=$(cargo tree -p cad-core --edges normal,build --prefix none --format '{p}' \
+          DEPS=$(cargo tree -p cad-core --target all --edges normal,build --prefix none --format '{p}' \
                  | awk '{print $1}' | sort -u)
           # 依存リストが取れていること自体を先に確認する（fail-closed）。
           if ! printf '%s\n' "$DEPS" | grep -qx 'cad-core'; then
             echo "::error::cargo tree の出力を解釈できませんでした。検査が機能していません。"
             exit 1
           fi
+          OTHERS=$(printf '%s\n' "$DEPS" | grep -vx 'cad-core' || true)
+          if [ -n "$OTHERS" ]; then
+            echo "::error file=crates/cad-core/Cargo.toml::cad-core に依存パッケージがあります（設計原則 10）"
+            echo "$OTHERS"
+            exit 1
+          fi
+          echo "OK: cad-core の依存パッケージはゼロです"
+
+      # cad-mcp（MCP サーバー）は cad-app にも GUI のクレートにも依存しない。
+      # 段階 2 では cad-app → cad-mcp の向きで使い回すので、逆向きが入ると循環する。
+      - name: cad-mcp が GUI のクレートと cad-app に依存していないこと
+        run: |
+          set -euo pipefail
+          DEPS=$(cargo tree -p cad-mcp --target all --edges normal,build --prefix none --format '{p}' \
+                 | awk '{print $1}' | sort -u)
+          for must in cad-mcp cad-core; do
+            if ! printf '%s\n' "$DEPS" | grep -qx "$must"; then
+              echo "::error::cargo tree の出力に $must がありません。検査が機能していません。"
+              exit 1
+            fi
+          done
           FAIL=0
-          for ui in egui eframe egui-winit egui_glow egui-wgpu epaint emath ecolor \
+          for ui in cad-app egui eframe egui-winit egui_glow egui-wgpu egui_extras epaint emath ecolor \
                     winit wgpu glow glutin rfd accesskit; do
             if printf '%s\n' "$DEPS" | grep -qx "$ui"; then
-              echo "::error file=crates/cad-core/Cargo.toml::cad-core が UI クレート '$ui' に依存しています"
+              echo "::error file=crates/cad-mcp/Cargo.toml::cad-mcp が '$ui' に依存しています"
               FAIL=1
             fi
           done
-          if [ "$FAIL" -eq 0 ]; then echo "OK: cad-core は UI 非依存です"; fi
+          if [ "$FAIL" -eq 0 ]; then echo "OK: cad-mcp は GUI と cad-app に依存していません"; fi
           exit "$FAIL"
 
-      # 図面座標は f64。cad-core に f32 を持ち込まない。
-      - name: cad-core が f64 のみで書かれていること
+      # 図面座標は f64。cad-core と cad-mcp（src・tests）に f32 を持ち込まない。
+      - name: cad-core と cad-mcp が f64 のみで書かれていること
         run: |
           set -euo pipefail
-          HITS=$(grep -rn '\bf32\b' crates/cad-core/src --include='*.rs' \
+          HITS=$(grep -rn '\bf32\b' crates/cad-core/src crates/cad-mcp --include='*.rs' \
                  | grep -v ':[0-9]*: *//' || true)
           if [ -n "$HITS" ]; then
-            echo "::error::cad-core に f32 が含まれています"; echo "$HITS"; exit 1
+            echo "::error::cad-core / cad-mcp に f32 が含まれています"; echo "$HITS"; exit 1
           fi
-          echo "OK: cad-core に f32 はありません"
+          echo "OK: cad-core / cad-mcp に f32 はありません"
 
       # f64 → f32 の縮小変換は viewport.rs の変換関数だけに閉じ込める。
       - name: f64→f32 の縮小が viewport.rs に閉じていること
         run: |
           set -euo pipefail
-          HITS=$(grep -rn 'as f32' crates/cad-app/src --include='*.rs' \
-                 | grep -v 'src/viewport.rs' | grep -v ':[0-9]*: *//' || true)
+          HITS=$(grep -rn 'as f32' crates/cad-app/src crates/cad-mcp --include='*.rs' \
+                 | grep -v 'cad-app/src/viewport.rs' | grep -v ':[0-9]*: *//' || true)
           if [ -n "$HITS" ]; then
             echo "::error::viewport.rs の外で f64→f32 の縮小が行われています"; echo "$HITS"; exit 1
           fi
           echo "OK: 縮小変換は viewport.rs に閉じています"
 
       # トレランスは geom/tolerance.rs に一元管理する。
-      # crates/ 配下のすべて（cad-core / cad-app の src・tests・examples）が対象。
+      # crates/ 配下のすべて（cad-core / cad-app / cad-mcp の src・tests・examples）が対象。
       - name: トレランスのマジックナンバーが無いこと
         run: |
           set -euo pipefail

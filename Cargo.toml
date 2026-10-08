@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/cad-core", "crates/cad-app"]
+members = ["crates/cad-core", "crates/cad-app", "crates/cad-mcp"]
 # spikes/ は Phase 0 の検証用で独立した Cargo.lock を持つ。ワークスペースに含めない。
 exclude = ["spikes/*"]
 
