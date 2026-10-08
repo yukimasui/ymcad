@@ -541,7 +541,7 @@ impl CadApp {
             &self.session.hot_grips(),
         );
         if let Some(g) = hovered {
-            render::draw_grip_label(&painter, &self.viewport, &g);
+            render::draw_grip_label(&painter, &self.viewport, g);
         }
 
         if let Some(hit) = tracked.and_then(|t| t.polar) {
@@ -1104,6 +1104,7 @@ impl CadApp {
             return;
         }
         let busy = self.session.active_command().is_some();
+        let gripping = self.session.is_gripping();
         let reserved = self.reserved_width(true);
         let canvas_min = self.canvas_min_width(ui.max_rect().width());
         right_panel(
@@ -1121,6 +1122,7 @@ impl CadApp {
                     &self.doc,
                     &self.session.selection,
                     busy,
+                    gripping,
                     self.session.drop_note(&self.doc),
                 );
                 for cmd in commands {
@@ -1198,6 +1200,7 @@ impl CadApp {
                     selection: &self.session.selection,
                     // 選択待ちを含め、コマンドを実行している間は表示だけにする。
                     busy: self.session.active_command().is_some(),
+                    gripping: self.session.is_gripping(),
                     drop_note: self.session.drop_note(&self.doc),
                     component_edit: self.session.editing(),
                     length_step: self.viewport.px_to_model_len(1.0),
@@ -1277,7 +1280,10 @@ impl eframe::App for CadApp {
         let allow_suggestions = !self.session.has_active_tool();
         // 寸法入力の基点。Tab / Esc / Enter の扱いがこれで変わるので、キーを取る前に渡す。
         let dimension_base = self.session.dimension_base();
-        self.session.cmdline.set_dimension_base(dimension_base);
+        let dimension_kind = self.session.dimension_kind();
+        self.session
+            .cmdline
+            .set_dimension_base(dimension_base, dimension_kind);
         self.session
             .cmdline
             .begin_frame(&ctx, allow_suggestions, self.files.is_confirming());

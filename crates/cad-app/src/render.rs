@@ -6,7 +6,7 @@
 
 use crate::drafting::PolarHit;
 use crate::editing::EditSession;
-use crate::grips::Grip;
+use crate::grips::{Grip, GripGroup};
 use crate::resolved::ResolvedInstances;
 use crate::selection::{Selection, WindowMode};
 use crate::tools::EntityPreview;
@@ -613,29 +613,37 @@ const GRIP_BORDER_COLOR: egui::Color32 = egui::Color32::from_rgb(0x10, 0x10, 0x1
 
 /// 選択した図形のグリップを描く。乗せているもの（`hovered`）は大きく紫、掴んでいるもの（`hot`）は赤。
 ///
-/// 図形・仮の形の**後**に描く（線に隠れないように）。
+/// 図形・仮の形の**後**に描く（線に隠れないように）。重なったグリップ（段階 2）は同じ位置に
+/// 同じ四角を描くので 1 つに見える。乗せている束・掴んでいる束に入ったものは普通の青では描かず、
+/// 束を 1 つの四角として最後に描く（青い小さな四角が紫・赤の上に重なって見えないように）。
 pub fn draw_grips(
     painter: &egui::Painter,
     vp: &Viewport,
     grips: &[Grip],
-    hovered: Option<Grip>,
+    hovered: Option<&GripGroup>,
     hot: &[Grip],
 ) {
     let same = |a: &Grip, b: &Grip| a.id == b.id && a.handle == b.handle;
+    let in_hovered = |g: &Grip| hovered.is_some_and(|h| h.grips().iter().any(|o| same(o, g)));
     let clip = vp.rect().expand(GRIP_HOVER_PX);
     for g in grips {
-        if hot.iter().any(|h| same(h, g)) {
+        if hot.iter().any(|h| same(h, g)) || in_hovered(g) {
             continue;
         }
-        let is_hovered = hovered.is_some_and(|h| same(&h, g));
-        let (size, color) = if is_hovered {
-            (GRIP_HOVER_PX, GRIP_HOVER_COLOR)
-        } else {
-            (GRIP_PX, GRIP_COLOR)
-        };
-        draw_grip_square(painter, vp.model_to_screen(g.at), size, color, clip);
+        draw_grip_square(painter, vp.model_to_screen(g.at), GRIP_PX, GRIP_COLOR, clip);
     }
-    for g in hot {
+    if let Some(h) = hovered {
+        let at = h.representative().at;
+        draw_grip_square(
+            painter,
+            vp.model_to_screen(at),
+            GRIP_HOVER_PX,
+            GRIP_HOVER_COLOR,
+            clip,
+        );
+    }
+    if let Some(g) = hot.first() {
+        // 掴んだ束はどれも掴んだ点にある。
         draw_grip_square(
             painter,
             vp.model_to_screen(g.at),
@@ -669,10 +677,10 @@ fn draw_grip_square(
 /// 乗せているグリップの横に、掴んで動かしたら何が起きるか（「端点を動かす」など）を出す。
 ///
 /// グリップの右上に出す。右下はカーソル横の入力欄（ADR-0034）なので避ける。
-pub fn draw_grip_label(painter: &egui::Painter, vp: &Viewport, grip: &Grip) {
-    let at = vp.model_to_screen(grip.at);
+pub fn draw_grip_label(painter: &egui::Painter, vp: &Viewport, group: &GripGroup) {
+    let at = vp.model_to_screen(group.representative().at);
     let galley = painter.layout_no_wrap(
-        grip.handle.label().to_owned(),
+        group.label(),
         egui::FontId::proportional(13.0),
         egui::Color32::WHITE,
     );

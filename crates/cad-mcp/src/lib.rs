@@ -13,6 +13,7 @@
 //! | `tools` | 道具の一覧と実装（`tools/list` / `tools/call`）。図面を変える道具の約束は `tools/mutate.rs` |
 //! | [`convert`] | 図形 ↔ JSON、度 ↔ ラジアン。**変換はここに 1 か所だけ** |
 //! | [`ids`] | 図形 ID の文字列 `d<起動の印>-<図面>e<index>g<generation>` |
+//! | [`render`] | 図面の SVG / PNG（モデル → 画像 px の変換は `render::fit` に 1 か所） |
 //! | [`paths`] | root の配下だけを読み書きさせるパスの検査 |
 //! | [`limits`] | 入力・ファイル・一覧の上限 |
 //!
@@ -33,6 +34,7 @@ pub mod convert;
 pub mod ids;
 pub mod paths;
 pub mod protocol;
+pub mod render;
 pub mod server;
 mod tools;
 

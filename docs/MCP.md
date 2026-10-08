@@ -4,8 +4,8 @@ LLM（Claude Code などの MCP クライアント）が、ymcad の図面ファ
 描いて変え、保存できるようにするサーバーです。標準入出力で JSON-RPC を話します（1 行 1 メッセージ）。
 GUI のアプリ（`cad-app`）には触りません。
 
-> **段階 1b（作図・変更・レイヤ）までの内容です。** SVG / PNG の描画（1c）、
-> コンポーネントの操作（1d）は後の段階で足します（Issue #70）。
+> **段階 1b（作図・変更・レイヤ）と 1c（描画）までの内容です。** コンポーネントの操作（1d）は
+> 後の段階で足します（Issue #70）。
 > 設計判断は `docs/DECISIONS.md` の ADR-0046。
 
 ## ビルド
@@ -15,7 +15,8 @@ cargo build --release -p cad-mcp
 # → target/release/ymcad-mcp
 ```
 
-依存は `cad-core` と `serde_json` だけです（`cad-core` の依存はゼロのまま）。
+依存は `cad-core`・`serde_json`・`resvg`（PNG にするため。`default-features` なしで、文字・画像の読み込みは入れません）です。
+`cad-core` の依存はゼロのままで、GUI のクレートは入りません。
 
 ## Claude Code への登録
 
@@ -83,6 +84,7 @@ Claude Code 2.1.294 から `--mcp-config` でつなぎ、`sample.ymc`（`write_s
 | `list_layers` | レイヤ（名前・色・表示・ロック・線種・現在か・図形の数） | 読むだけ |
 | `list_components` | コンポーネント定義（パラメータ・束縛の式・インスタンスの数）。束縛の対象 `field` は図形の JSON の項目名（`start.x`・`radius`・`vertices[3].y` など） | 読むだけ |
 | `undo{steps?}` / `redo{steps?}` | 取り消し・やり直し（既定 1 回、上限 256 回。尽きたら止まる） | 図面を変える |
+| `render{format?, width?, height?, region?, background?}` | 図面を PNG / SVG にして返す（下の「描画」） | 読むだけ |
 
 ### 作図・変更・変形・レイヤ（段階 1b）
 
@@ -121,6 +123,31 @@ Claude Code 2.1.294 から `--mcp-config` でつなぎ、`sample.ymc`（`write_s
 各道具の引数の詳しい説明は `tools/list` の `description` / `inputSchema` にあります（日本語）。
 **知らない引数を渡すと、動かす前に拒みます**（綴り違いのフラグを黙って無視しないため）。
 
+## 描画（`render`）
+
+図面を画像にして返します。LLM が自分の描いた図を目で確かめるための道具です。
+
+| 引数 | 内容 |
+|---|---|
+| `format` | `png`（既定。`image` ブロック）/ `svg`（`text` ブロック）/ `both`（image と text） |
+| `width` / `height` | 画像の大きさ px。既定 1024 × 768、**一辺 16〜4096**（超えると拒みます） |
+| `region` | 見せるモデルの範囲 `{"min": [x, y], "max": [x, y]}`。幅と高さは 0 より大きく。省くと、表示中の図形（インスタンスの中身を含む。作図線は除く）の範囲に 5% の余白を付けた範囲 |
+| `background` | `dark`（既定。アプリと同じ暗い背景 `#0a0a0a`）/ `light`（白。このとき白（ACI 7）の線は黒で描く） |
+
+- 結果の先頭の text（= `structuredContent`）に **`view`**（画像に見えているモデルの範囲）と
+  **`pixels_per_unit`**（1 モデル単位あたりの px）が入ります。縦横比は保つので、`region` と画像の縦横比が違えば
+  `view` は `region` より広くなります（`region` は中央に収まる）。画像の位置 (px, py)（左上が原点、下向きが +）の
+  モデル座標は `x = view.min.x + px / pixels_per_unit`、`y = view.max.y - py / pixels_per_unit`（**モデルの Y は上向き**）
+- 描いた図形・範囲の外で省いた図形・非表示のレイヤで省いた図形の数が `entities_drawn` /
+  `entities_outside_view` / `entities_on_hidden_layers` に入ります（画像が空のとき、範囲が違うのか非表示なのか分かるように）
+- 色はレイヤ・図形の色（ACI）、破線は線種（`dash_pattern_px`）のとおり。**文字は描きません**。
+  インスタンスは中身に展開し、インスタンス自身のレイヤ・色・線種で描きます（アプリと同じ）
+- SVG の各要素の `data-id` は図形 ID です（SVG の本文を読む LLM が、どの要素がどの図形か辿れます）。
+  座標は画像の px そのもので、PNG は SVG をそのままラスタにしたものです
+- SVG は 8 MiB まで。超えたら `region` で絞るよう促して拒みます
+- 作図線と、範囲を横切る線分・ポリラインは範囲で切って描きます。半径が 1e5 px を超える円・円弧（大きな円の一部だけを
+  拡大して見るとき）は、見える角度の窓だけを折れ線にして描きます
+
 ## 安全策
 
 - **読み書きできるのは `--root` の配下だけ。** 相対パスは最初の root から解決します
@@ -141,8 +168,9 @@ Claude Code 2.1.294 から `--mcp-config` でつなぎ、`sample.ymc`（`write_s
   `drawing_info` の `poisoned` が `true` になる。`open_drawing` / `new_drawing` で外れる
 - 上限: 1 行 4 MiB（超えた行は読み捨てて `-32700`）、開くファイル 64 MiB、一覧 1000 件、ID 1000 個、undo / redo 256 回、
   1 回で描く・変える図形 1000 個、ポリラインの頂点 10,000 個、図面の図形 100 万個、座標の絶対値 10 億、式 1 KiB、
-  レイヤ名 255 文字、**道具の結果 256 KiB**（読むだけの道具は超えたら `isError` で絞り込みを促す。図面を変える道具は
-  変更を済ませたうえで結果だけ省く）
+  レイヤ名 255 文字、画像の一辺 4096 px（最大でも 4096 × 4096 × 4 = 64 MiB の画素）、SVG 8 MiB、
+  **道具の結果（JSON の text）256 KiB**（読むだけの道具は超えたら `isError` で絞り込みを促す。図面を変える道具は
+  変更を済ませたうえで結果だけ省く。`render` の画像・SVG のブロックはこの数に入らない）
 - ネットワークもシェルも使いません
 - 守れないもの: 検査と読み書きの間に他のプロセスがファイルを差し替える競合。同じ大きさで更新時刻の分解能の内に
   書き換えられたファイル（ADR-0046）
@@ -174,7 +202,8 @@ printf '%s\n' \
 ```bash
 cargo test -p cad-mcp        # 単体（Server::handle を直接）と結合（バイナリを起動）
 
-# Python の標準ライブラリだけのクライアントで通しで動かし、保存したファイルを validate_ymc.py に通す（CI でも実行）
+# Python の標準ライブラリだけのクライアントで通しで動かし、保存したファイルを validate_ymc.py に通す（CI でも実行）。
+# render の SVG（xml.etree で解析）と PNG（シグネチャ・IHDR・CRC・IDAT）もここで検査する
 mkdir -p /tmp/mcp
 cargo run -p cad-core --example write_sample -- /tmp/mcp/sample.ymc
 cargo run -p cad-core --example write_sample -- /tmp/mcp/sample.dxf

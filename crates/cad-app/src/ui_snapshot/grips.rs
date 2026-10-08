@@ -1,4 +1,4 @@
-//! グリップ編集（Issue #30 段階 1）の見た目。
+//! グリップ編集（Issue #30 段階 1・2）の見た目。
 //!
 //! 図形はモデル座標で置き、画面上の位置は撮る直前に表示範囲から求める（履歴が伸びると
 //! 作図領域が上下に縮むので）。
@@ -125,4 +125,67 @@ fn ui_snapshot_grips_too_many() {
     add_and_select(&mut h, geoms);
     hover(&mut h, CANVAS_CENTER);
     shot(&mut h, "grips_h_too_many");
+}
+
+// ---- 段階 2 ------------------------------------------------------------------
+
+/// 線分 4 本の矩形と、ポリラインの矩形を選ぶ。
+fn shared_and_edges() -> Harness<'static, CadApp> {
+    let mut h = harness();
+    hover(&mut h, CANVAS_CENTER);
+    add_and_select(
+        &mut h,
+        vec![
+            Geometry::Line(Line::new(p(60.0, 60.0), p(180.0, 60.0))),
+            Geometry::Line(Line::new(p(180.0, 60.0), p(180.0, 140.0))),
+            Geometry::Line(Line::new(p(180.0, 140.0), p(60.0, 140.0))),
+            Geometry::Line(Line::new(p(60.0, 140.0), p(60.0, 60.0))),
+            Geometry::Polyline(Polyline::rectangle(p(260.0, 60.0), p(380.0, 140.0))),
+        ],
+    );
+    h
+}
+
+/// 重なったグリップ → 線分 4 本の矩形の角は 1 つの四角。乗せると 1 つの紫の四角と
+/// 「端点を動かす（2 個）」。ポリラインには頂点と辺の中点のグリップ。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_grips_shared_corner() {
+    let mut h = shared_and_edges();
+    hover_model(&mut h, p(220.0, 200.0), egui::Vec2::ZERO);
+    shot(&mut h, "grips_i_shared_and_edges");
+    hover_model(&mut h, p(180.0, 60.0), egui::vec2(2.0, 1.0));
+    shot(&mut h, "grips_j_hover_shared_corner");
+}
+
+/// 重なったグリップを掴んで動かしているとき → 隣り合う 2 本の仮の形が琥珀色で、角でつながっている。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_grips_moving_shared_corner() {
+    let mut h = shared_and_edges();
+    click_model(&mut h, p(180.0, 60.0));
+    hover_model(&mut h, p(215.0, 35.0), egui::Vec2::ZERO);
+    shot(&mut h, "grips_k_moving_shared_corner");
+}
+
+/// ポリラインの辺の中点 → 乗せると「辺を動かす」、掴んで動かすと辺が平行に動いた仮の形。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_grips_polyline_edge() {
+    let mut h = shared_and_edges();
+    hover_model(&mut h, p(380.0, 100.0), egui::vec2(1.0, 1.0));
+    shot(&mut h, "grips_l_hover_edge");
+    click_model(&mut h, p(380.0, 100.0));
+    hover_model(&mut h, p(430.0, 110.0), egui::Vec2::ZERO);
+    shot(&mut h, "grips_m_moving_edge");
+}
+
+/// 円の四分点を掴む → カーソル横の寸法入力は「半径」の 1 欄（角度の欄は無い）。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_grips_quadrant_radius_field() {
+    let mut h = kinds();
+    click_model(&mut h, p(270.0, 90.0));
+    hover_model(&mut h, p(295.0, 70.0), egui::Vec2::ZERO);
+    shot(&mut h, "grips_n_quadrant_radius_field");
 }

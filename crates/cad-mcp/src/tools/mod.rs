@@ -20,6 +20,7 @@ mod history;
 mod layers;
 mod mutate;
 mod query;
+mod render;
 mod transform;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -74,6 +75,7 @@ const TOOLS: &[Tool] = &[
     layers::DELETE_LAYER,
     history::UNDO,
     history::REDO,
+    render::RENDER,
 ];
 
 /// 引数の JSON Schema（object）を組み立てる。**知らない引数は受け付けない**。
@@ -147,6 +149,7 @@ fn run_tool(server: &mut Server, tool: &Tool, arguments: Map<String, Value>) -> 
         .as_object()
         .map(|m| m.keys().map(String::as_str).collect())
         .unwrap_or_default();
+    server.attachments.clear();
     let outcome = match Args::new(arguments, &known) {
         Err(msg) => Err(msg),
         Ok(args) => catch_unwind(AssertUnwindSafe(|| (tool.run)(server, &args)))
@@ -173,15 +176,24 @@ fn run_tool(server: &mut Server, tool: &Tool, arguments: Map<String, Value>) -> 
     };
 
     match outcome.and_then(|structured| bound_result(tool, structured)) {
-        Ok((structured, text)) => json!({
-            "content": [{ "type": "text", "text": text }],
-            "structuredContent": structured,
-            "isError": false,
-        }),
-        Err(message) => json!({
-            "content": [{ "type": "text", "text": message }],
-            "isError": true,
-        }),
+        Ok((structured, text)) => {
+            // 先頭は structuredContent と同じ JSON の text。画像などの追加のブロックはその後ろ。
+            let mut content = vec![json!({ "type": "text", "text": text })];
+            content.append(&mut server.attachments);
+            json!({
+                "content": content,
+                "structuredContent": structured,
+                "isError": false,
+            })
+        }
+        Err(message) => {
+            // 失敗した道具が途中まで積んだ画像などは返さない（次の呼び出しへも持ち越さない）。
+            server.attachments.clear();
+            json!({
+                "content": [{ "type": "text", "text": message }],
+                "isError": true,
+            })
+        }
     }
 }
 

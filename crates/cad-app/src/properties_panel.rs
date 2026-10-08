@@ -92,6 +92,8 @@ pub struct PanelInput<'a> {
     pub selection: &'a Selection,
     /// コマンド（選択待ちを含む）を実行中か。真の間は表示だけになる。
     pub busy: bool,
+    /// そのコマンドがグリップ編集か（案内の文言を変える。Esc で選択は外れない）。
+    pub gripping: bool,
     /// 図形をロック・非表示のレイヤへ移して選択から外れたときの案内（`Session::drop_note`）。
     /// 選択が空の表示の上に出す。
     pub drop_note: Option<&'a str>,
@@ -223,7 +225,12 @@ impl PropertiesPanel {
         ui.heading("プロパティ");
         ui.separator();
         if input.busy {
-            ui.colored_label(BUSY_COLOR, BUSY_NOTE);
+            let note = if input.gripping {
+                properties::GRIP_BUSY_NOTE
+            } else {
+                BUSY_NOTE
+            };
+            ui.colored_label(BUSY_COLOR, note);
             ui.separator();
             // 実行中は編集しない。打ちかけの値も残さない（終わった後に古い値で確定しない）。
             self.discard_edit();

@@ -28,6 +28,9 @@ cad-core.workspace = true
 # …695 になる）。get_entities の出力を modify_entities へ渡し返すと形が黙ってずれるので、正確に読む。
 # 足すクレートは無い（serde_json の中の切り替えだけ）。
 serde_json = { version = "1", features = ["float_roundtrip"] }
+# PNG にするため（render）。default-features なし = 文字・システムフォント・画像の読み込みを入れない。
+# 描くのは自前の SVG だけで、文字は描かない（ADR-0046 決定 7）。
+resvg = { version = "0.45", default-features = false }
 
 [lints.rust]
 missing_debug_implementations = "warn"
