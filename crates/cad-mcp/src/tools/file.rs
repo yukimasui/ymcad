@@ -22,7 +22,6 @@ use serde_json::json;
 
 use super::{Args, Tool, ToolResult};
 use crate::convert::aabb_to_json;
-use crate::ids::drawing_name;
 use crate::limits::MAX_FILE_BYTES;
 use crate::paths::Format;
 use crate::server::{FileStamp, OpenedFile, Server};
@@ -93,7 +92,7 @@ pub(super) const SAVE_DRAWING: Tool = Tool {
 pub(super) const DRAWING_INFO: Tool = Tool {
     name: "drawing_info",
     title: "図面の情報",
-    description: "いまの図面の情報: 図面名（ID の頭の d<番号>）、ファイルのパスと形式、未保存の変更の有無、図形・レイヤ・コンポーネントの数、\
+    description: "いまの図面の情報: 図面名（ID の頭の d<起動の印>-<番号>）、ファイルのパスと形式、未保存の変更の有無、図形・レイヤ・コンポーネントの数、\
 図面範囲（作図線を除く。度・f64）、取り消し・やり直しができるか、開いた後にファイルが他から書き換えられたか、読み書きできる root。",
     schema: || (json!({}), &[]),
     read_only: true,
@@ -108,7 +107,7 @@ fn ensure_can_discard(s: &Server, discard: bool, action: &str) -> Result<(), Str
         return Err(format!(
             "いまの図面（{}）に未保存の変更があります。{action}と変更は失われます。\
              残すなら先に save_drawing で保存し、捨ててよければ discard_changes: true を付けて呼び直してください。",
-            drawing_name(s.serial)
+            s.tag().name()
         ));
     }
     Ok(())
@@ -120,7 +119,7 @@ fn new_drawing(s: &mut Server, a: &Args) -> ToolResult {
     let discarded = s.doc.is_dirty();
     s.replace_document(Document::new(), None);
     Ok(json!({
-        "drawing": drawing_name(s.serial),
+        "drawing": s.tag().name(),
         "discarded_changes": discarded,
     }))
 }
@@ -149,7 +148,7 @@ fn open_drawing(s: &mut Server, a: &Args) -> ToolResult {
         }),
     );
     Ok(json!({
-        "drawing": drawing_name(s.serial),
+        "drawing": s.tag().name(),
         "path": path.display().to_string(),
         "format": format.name(),
         "entity_count": s.doc.entities().len(),
@@ -258,7 +257,7 @@ fn save_drawing(s: &mut Server, a: &Args) -> ToolResult {
         stamp: FileStamp::of(&target),
     });
     Ok(json!({
-        "drawing": drawing_name(s.serial),
+        "drawing": s.tag().name(),
         "path": target.display().to_string(),
         "format": format.name(),
         "overwrote": existed,
@@ -272,7 +271,7 @@ fn drawing_info(s: &mut Server, _: &Args) -> ToolResult {
     let history = doc.history();
     let file_changed = s.file.as_ref().map(|f| f.stamp != FileStamp::of(&f.path));
     Ok(json!({
-        "drawing": drawing_name(s.serial),
+        "drawing": s.tag().name(),
         "path": s.file.as_ref().map(|f| f.path.display().to_string()),
         "format": s.file.as_ref().map(|f| f.format.name()),
         "dirty": doc.is_dirty(),
@@ -330,8 +329,11 @@ mod tests {
     fn new_drawing_advances_the_serial() {
         let dir = TempDir::new("file-new");
         let mut s = server(&dir);
+        let first = s.tag().name();
         let r = ok(&mut s, "new_drawing", json!({}));
-        assert_eq!(r["drawing"], "d2");
+        assert_eq!(r["drawing"], s.tag().name());
+        assert_eq!(s.serial, 2);
+        assert_ne!(r["drawing"], first.as_str());
         assert_eq!(r["discarded_changes"], false);
     }
 
@@ -355,7 +357,8 @@ mod tests {
             json!({"path": "a.ymc", "discard_changes": true}),
         );
         assert_eq!(r["discarded_changes"], true);
-        assert_eq!(r["drawing"], "d2");
+        assert_eq!(s.serial, 2);
+        assert_eq!(r["drawing"], s.tag().name());
     }
 
     #[test]
@@ -591,7 +594,8 @@ mod tests {
         let dir = TempDir::new("file-info");
         let mut s = server(&dir);
         let r = ok(&mut s, "drawing_info", json!({}));
-        assert_eq!(r["drawing"], "d1");
+        assert_eq!(r["drawing"], s.tag().name());
+        assert!(r["drawing"].as_str().unwrap().ends_with("-1"));
         assert_eq!(r["path"], Value::Null);
         assert_eq!(r["dirty"], false);
         assert_eq!(r["bbox"], Value::Null);

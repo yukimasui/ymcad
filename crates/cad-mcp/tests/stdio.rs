@@ -125,7 +125,11 @@ fn session_over_stdio_saves_a_drawing() {
     );
 
     let r = mcp.call(3, "open_drawing", json!({"path": "empty.ymc"}));
-    assert_eq!(r["structuredContent"]["drawing"], "d2");
+    let name = r["structuredContent"]["drawing"].as_str().unwrap();
+    assert!(
+        name.starts_with('d') && name.ends_with("-2"),
+        "2 枚目の図面: {name}"
+    );
     let r = mcp.call(4, "drawing_info", json!({}));
     assert_eq!(r["structuredContent"]["format"], "ymc");
     assert_eq!(r["structuredContent"]["dirty"], false);

@@ -228,7 +228,7 @@ fn initialize(server: &mut Server, params: &Map<String, Value>) -> Result<Value,
 /// クライアントへ渡す使い方の要約（LLM が読む）。
 const INSTRUCTIONS: &str = "ymcad（2D CAD）の図面ファイル（.ymc / .dxf）を開いて調べ、保存するサーバーです。\
 角度は度、座標は f64 の数値（点は {\"x\":..,\"y\":..}）。\
-図形 ID は d<図面>e<番号>g<世代> の文字列で、図面を開き直すと変わります（古い ID は拒まれます）。\
+図形 ID は d<起動の印>-<図面>e<番号>g<世代> の文字列で、図面を開き直す・サーバーをつなぎ直すと変わります（古い ID は拒まれます）。\
 読み書きできるのは起動時に指定した root の配下の .ymc / .dxf だけです。\
 .ymc が保存形式（無損失）、.dxf は交換用（R12・非可逆。保存すると警告が出ます）。\
 未保存の変更があるときの new_drawing / open_drawing は discard_changes: true、\

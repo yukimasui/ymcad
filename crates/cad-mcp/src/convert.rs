@@ -23,6 +23,8 @@ use cad_core::ColorSpec;
 use cad_core::{DefinitionTable, Document, Entity, EntityId, Geometry, Instance};
 use serde_json::{json, Map, Value};
 
+use crate::ids::DrawingTag;
+
 /// 図形の種類の名前（JSON の `type`）。並びは `list_entities` の説明にも使う。
 pub const ENTITY_TYPES: [&str; 6] = ["line", "circle", "arc", "xline", "polyline", "instance"];
 
@@ -364,9 +366,9 @@ pub fn color_to_json(c: ColorSpec) -> Value {
 
 /// 図形 1 つの要約（一覧用）。形の中身は含めない。
 #[must_use]
-pub fn entity_summary_json(doc: &Document, serial: u64, id: EntityId, e: &Entity) -> Value {
+pub fn entity_summary_json(doc: &Document, tag: DrawingTag, id: EntityId, e: &Entity) -> Value {
     json!({
-        "id": crate::ids::format_id(serial, id),
+        "id": crate::ids::format_id(tag, id),
         "type": geometry_type(&e.geom),
         "layer": layer_name(doc, e),
         "bbox": aabb_to_json(e.bbox(doc.definitions())),
@@ -375,9 +377,9 @@ pub fn entity_summary_json(doc: &Document, serial: u64, id: EntityId, e: &Entity
 
 /// 図形 1 つの全体（ID・属性・形）。
 #[must_use]
-pub fn entity_to_json(doc: &Document, serial: u64, id: EntityId, e: &Entity) -> Value {
+pub fn entity_to_json(doc: &Document, tag: DrawingTag, id: EntityId, e: &Entity) -> Value {
     let mut out = Map::new();
-    out.insert("id".into(), json!(crate::ids::format_id(serial, id)));
+    out.insert("id".into(), json!(crate::ids::format_id(tag, id)));
     out.insert("layer".into(), json!(layer_name(doc, e)));
     out.insert("color".into(), color_to_json(e.color));
     out.insert(

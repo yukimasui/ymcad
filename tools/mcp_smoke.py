@@ -185,17 +185,23 @@ def run(binary: Path, root: Path) -> list[Path]:
     # --- DXF を開いてネイティブで保存 -------------------------------------
     info = c.ok("open_drawing", {"path": "sample.dxf"})
     check(info["format"] == "dxf" and info["entity_count"] > 0, f"DXF を開けない: {info}")
-    check(info["drawing"] == "d2", f"図面の通し番号: {info}")
+    # 図面名は d<起動の印（16 進）>-<通し番号>。起動の印はプロセスごとに違う。
+    session, _, serial = info["drawing"][1:].partition("-")
+    check(
+        len(session) == 6 and all(ch in "0123456789abcdef" for ch in session) and serial == "2",
+        f"図面の名前: {info}",
+    )
     saved = c.ok("save_drawing", {"path": "from_dxf.ymc"})
     check(saved["format"] == "ymc", f"拡張子で形式が決まっていない: {saved}")
 
     # --- ネイティブを開いて照会し、保存 -----------------------------------
     info = c.ok("open_drawing", {"path": str(sample_ymc)})
-    check(info["drawing"] == "d3", f"図面の通し番号: {info}")
+    check(info["drawing"] == f"d{session}-3", f"図面の通し番号: {info}")
+    drawing = info["drawing"]
     listing = c.ok("list_entities", {"limit": 1000})
     check(listing["total"] == info["entity_count"], "list_entities の total と entity_count が違う")
     ids = [e["id"] for e in listing["entities"]]
-    check(all(i.startswith("d3e") for i in ids), f"ID に図面の番号が入っていない: {ids}")
+    check(all(i.startswith(f"{drawing}e") for i in ids), f"ID に図面の名前が入っていない: {ids}")
     got = c.ok("get_entities", {"ids": ids})
     types = sorted(e["geometry"]["type"] for e in got["entities"])
     # 図面に直接置かれた図形だけ（定義の中の図形は数えない。validate_ymc.py の --expect とは違う）。
@@ -212,7 +218,9 @@ def run(binary: Path, root: Path) -> list[Path]:
         and math.isclose(arcs[0]["end_angle"], math.degrees(2.75)),
         f"円弧の角度が度で出ていない: {arcs[0]}",
     )
-    c.fails("get_entities", {"ids": ["d2e0g0"]}, "別の図面")
+    c.fails("get_entities", {"ids": [f"d{session}-2e0g0"]}, "別の図面")
+    other_session = f"{(int(session, 16) ^ 1):06x}"
+    c.fails("get_entities", {"ids": [f"d{other_session}-3e0g0"]}, "つなぎ直す前")
     layers = c.ok("list_layers", {})["layers"]
     check(any(l["name"] == "0" for l in layers), f"レイヤ 0 が無い: {layers}")
     comps = c.ok("list_components", {})["components"]

@@ -196,6 +196,11 @@ pub(crate) mod test_support {
         r["structuredContent"].clone()
     }
 
+    /// いまの図面の、世代 0 の図形 ID（テストで ID を書くため）。
+    pub fn eid(s: &Server, index: u32) -> String {
+        format!("{}e{index}g0", s.tag().name())
+    }
+
     /// 失敗するはずの呼び出し。説明の文を返す。
     pub fn err(s: &mut Server, name: &str, args: Value) -> String {
         let r = call_raw(s, name, args.clone());

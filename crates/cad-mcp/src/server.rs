@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use cad_core::Document;
 use serde_json::Value;
 
+use crate::ids::DrawingTag;
 use crate::paths::{Format, Roots};
 
 /// MCP サーバー。図面を 1 枚だけ持つ。
@@ -18,6 +19,8 @@ pub struct Server {
     pub(crate) roots: Roots,
     /// いまの図面。**変えるのは `Document::apply` / `undo` / `redo` だけ**（設計原則 4）。
     pub(crate) doc: Document,
+    /// 起動の印。起動ごとに違う値で、図形 ID の頭に入る（[`crate::ids`]）。
+    pub(crate) session: u32,
     /// 図面の通し番号。新規・開くたびに増える。図形 ID の頭に入る（[`crate::ids`]）。
     pub(crate) serial: u64,
     /// 図面を読み書きしたファイル。新規なら `None`。
@@ -75,6 +78,7 @@ impl Server {
         Ok(Self {
             roots: Roots::new(roots)?,
             doc: Document::new(),
+            session: crate::ids::new_session(),
             serial: 1,
             file: None,
             protocol_version: None,
@@ -117,6 +121,14 @@ impl Server {
         };
         // `serde_json::to_string` は文字列中の改行をエスケープするので、返事は必ず 1 行になる。
         Some(reply.to_string())
+    }
+
+    /// いまの図面の印（図形 ID の頭）。
+    pub(crate) fn tag(&self) -> DrawingTag {
+        DrawingTag {
+            session: self.session,
+            serial: self.serial,
+        }
     }
 
     /// 図面を入れ替える（新規・開く）。通し番号を進める。

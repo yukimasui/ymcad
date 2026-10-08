@@ -11,7 +11,7 @@ use super::{Args, Tool, ToolResult};
 use crate::convert::{
     aabb_from_json, entity_summary_json, entity_to_json, geometry_type, point_to_json, ENTITY_TYPES,
 };
-use crate::ids::{drawing_name, resolve_ids};
+use crate::ids::resolve_ids;
 use crate::limits::{DEFAULT_LIST_LIMIT, MAX_IDS_PER_CALL, MAX_LIST_LIMIT};
 use crate::server::Server;
 
@@ -62,7 +62,7 @@ xline{origin,angle,direction} / polyline{vertices,closed} / instance{component,o
                     "items": { "type": "string" },
                     "minItems": 1,
                     "maxItems": MAX_IDS_PER_CALL,
-                    "description": "図形 ID（d<図面>e<番号>g<世代>）の配列",
+                    "description": "図形 ID（list_entities などが返した d<起動の印>-<図面>e<番号>g<世代>）の配列",
                 },
             }),
             &["ids"],
@@ -141,12 +141,12 @@ fn list_entities(s: &mut Server, a: &Args) -> ToolResult {
     for (i, (id, e)) in matches.enumerate() {
         total += 1;
         if i >= offset && entities.len() < limit {
-            entities.push(entity_summary_json(doc, s.serial, id, e));
+            entities.push(entity_summary_json(doc, s.tag(), id, e));
         }
     }
     let next = offset.saturating_add(entities.len());
     Ok(json!({
-        "drawing": drawing_name(s.serial),
+        "drawing": s.tag().name(),
         "total": total,
         "offset": offset,
         "count": entities.len(),
@@ -157,17 +157,17 @@ fn list_entities(s: &mut Server, a: &Args) -> ToolResult {
 
 fn get_entities(s: &mut Server, a: &Args) -> ToolResult {
     let ids = a.string_list("ids", MAX_IDS_PER_CALL)?;
-    let resolved = resolve_ids(&s.doc, s.serial, &ids)?;
+    let resolved = resolve_ids(&s.doc, s.tag(), &ids)?;
     let entities: Vec<Value> = resolved
         .into_iter()
         .filter_map(|id| {
             s.doc
                 .entities()
                 .get(id)
-                .map(|e| entity_to_json(&s.doc, s.serial, id, e))
+                .map(|e| entity_to_json(&s.doc, s.tag(), id, e))
         })
         .collect();
-    Ok(json!({ "drawing": drawing_name(s.serial), "entities": entities }))
+    Ok(json!({ "drawing": s.tag().name(), "entities": entities }))
 }
 
 fn list_layers(s: &mut Server, _: &Args) -> ToolResult {
@@ -192,7 +192,7 @@ fn list_layers(s: &mut Server, _: &Args) -> ToolResult {
             })
         })
         .collect();
-    Ok(json!({ "drawing": drawing_name(s.serial), "layers": layers }))
+    Ok(json!({ "drawing": s.tag().name(), "layers": layers }))
 }
 
 fn list_components(s: &mut Server, _: &Args) -> ToolResult {
@@ -250,12 +250,12 @@ fn list_components(s: &mut Server, _: &Args) -> ToolResult {
             })
         })
         .collect();
-    Ok(json!({ "drawing": drawing_name(s.serial), "components": components }))
+    Ok(json!({ "drawing": s.tag().name(), "components": components }))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::{err, ok, server};
+    use super::super::test_support::{eid, err, ok, server};
     use super::*;
     use crate::test_util::TempDir;
     use cad_core::command::{AddEntities, AddLayer, DefineComponent, InsertInstance};
@@ -304,7 +304,7 @@ mod tests {
         assert_eq!(r["total"], 7);
         assert_eq!(r["count"], 3);
         assert_eq!(r["next_offset"], 3);
-        assert_eq!(r["entities"][0]["id"], "d1e0g0");
+        assert_eq!(r["entities"][0]["id"], eid(&s, 0));
         assert_eq!(r["entities"][0]["type"], "line");
         assert_eq!(r["entities"][0]["layer"], "0");
 
@@ -371,9 +371,10 @@ mod tests {
     fn get_entities_returns_full_geometry_in_degrees() {
         let dir = TempDir::new("query-get");
         let mut s = populated(&dir);
-        let r = ok(&mut s, "get_entities", json!({"ids": ["d1e5g0", "d1e0g0"]}));
+        let ids = json!({"ids": [eid(&s, 5), eid(&s, 0)]});
+        let r = ok(&mut s, "get_entities", ids);
         let circle = &r["entities"][0];
-        assert_eq!(circle["id"], "d1e5g0");
+        assert_eq!(circle["id"], eid(&s, 5));
         assert_eq!(circle["layer"], "WALL");
         assert_eq!(circle["color"], "bylayer");
         assert_eq!(circle["group"], Value::Null);
@@ -382,7 +383,8 @@ mod tests {
         let line = &r["entities"][1];
         assert_eq!(line["geometry"]["start"], json!({"x": 0.0, "y": 0.0}));
 
-        let r = ok(&mut s, "get_entities", json!({"ids": ["d1e6g0"]}));
+        let ids = json!({"ids": [eid(&s, 6)]});
+        let r = ok(&mut s, "get_entities", ids);
         let xline = &r["entities"][0]["geometry"];
         assert_eq!(xline["type"], "xline");
         assert!((xline["angle"].as_f64().unwrap() - 90.0).abs() < cad_core::geom::EPS_LEN);
@@ -393,12 +395,15 @@ mod tests {
     fn get_entities_rejects_ids_of_another_drawing() {
         let dir = TempDir::new("query-other");
         let mut s = populated(&dir);
+        let old = eid(&s, 0);
         ok(&mut s, "save_drawing", json!({"path": "a.ymc"}));
         ok(&mut s, "open_drawing", json!({"path": "a.ymc"}));
-        let msg = err(&mut s, "get_entities", json!({"ids": ["d1e0g0"]}));
+        let msg = err(&mut s, "get_entities", json!({ "ids": [old] }));
         assert!(msg.contains("別の図面"), "{msg}");
-        let r = ok(&mut s, "get_entities", json!({"ids": ["d2e0g0"]}));
-        assert_eq!(r["entities"][0]["id"], "d2e0g0");
+        let new = eid(&s, 0);
+        assert_ne!(old, new);
+        let r = ok(&mut s, "get_entities", json!({ "ids": [new.clone()] }));
+        assert_eq!(r["entities"][0]["id"], new);
     }
 
     #[test]
@@ -407,13 +412,11 @@ mod tests {
         let mut s = populated(&dir);
         err(&mut s, "get_entities", json!({}));
         err(&mut s, "get_entities", json!({"ids": []}));
-        err(&mut s, "get_entities", json!({"ids": "d1e0g0"}));
-        err(
-            &mut s,
-            "get_entities",
-            json!({"ids": ["d1e0g0", "d1e99g0"]}),
-        );
-        let too_many: Vec<String> = (0..=MAX_IDS_PER_CALL).map(|_| "d1e0g0".into()).collect();
+        let one = eid(&s, 0);
+        err(&mut s, "get_entities", json!({ "ids": one }));
+        let ids = json!({"ids": [eid(&s, 0), eid(&s, 99)]});
+        err(&mut s, "get_entities", ids);
+        let too_many: Vec<String> = (0..=MAX_IDS_PER_CALL).map(|_| eid(&s, 0)).collect();
         err(&mut s, "get_entities", json!({ "ids": too_many }));
     }
 

@@ -12,7 +12,7 @@
 //! | [`server`] | [`Server`]: 図面・図面の通し番号・root・開いたファイルの記録 |
 //! | `tools` | 道具の一覧と実装（`tools/list` / `tools/call`） |
 //! | [`convert`] | 図形 ↔ JSON、度 ↔ ラジアン。**変換はここに 1 か所だけ** |
-//! | [`ids`] | 図形 ID の文字列 `d<図面>e<index>g<generation>` |
+//! | [`ids`] | 図形 ID の文字列 `d<起動の印>-<図面>e<index>g<generation>` |
 //! | [`paths`] | root の配下だけを読み書きさせるパスの検査 |
 //! | [`limits`] | 入力・ファイル・一覧の上限 |
 //!
