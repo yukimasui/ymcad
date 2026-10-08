@@ -431,7 +431,7 @@ impl CadApp {
         let active_drag = self.handle_pointer(&response, ui);
 
         // ---- 描画 ----
-        // ホバーの強調の計算も描画時間に入れる（Issue #34。1 万図形で重くならないかを見る）。
+        // ホバーの強調と結果プレビューの計算も描画時間に入れる（Issue #34。1 万図形で重くならないかを見る）。
         let started = Instant::now();
 
         // クリックと同じ位置（`cursor_model`）・同じ拾い半径で、クリックしたら拾われるものを決める。
@@ -464,6 +464,16 @@ impl CadApp {
             &self.session.selection,
             &mut self.resolved,
             self.session.editing(),
+        );
+
+        // TRIM / EXTEND の結果プレビュー（Issue #34 段階 2）。強調している図形をクリックしたら
+        // 消える部分・伸びる部分。消える部分は下の線を消してから描くので、図形の後に描く。
+        render::draw_entity_preview(
+            &painter,
+            &self.viewport,
+            self.doc.definitions(),
+            self.hover.entity_preview(),
+            ui.visuals().extreme_bg_color,
         );
 
         let preview = self.session.preview(self.cursor_model, &self.doc);
@@ -810,8 +820,9 @@ impl CadApp {
                 self.session.document_replaced();
                 // 版番号が前の図面と重なりうるので、選択の要約も作り直す。
                 self.properties_panel.invalidate();
-                // ピック用の索引とホバーの結果も版番号をキーにしているので、前の図面のものを捨てる
-                // （PR #63 のレビュー B1。残すとクリックでも新しい図面の図形を拾えない）。
+                // ピック用の索引とホバーの結果、結果プレビューの境界の列も版番号をキーにしているので、
+                // 前の図面のものを捨てる（PR #63 のレビュー B1。残すとクリックでも新しい図面の図形を
+                // 拾えず、TRIM / EXTEND のプレビューは前の図面の境界で計算される）。
                 self.hover = Hover::new();
                 self.session.cmdline.info(msg);
                 self.snap.release();

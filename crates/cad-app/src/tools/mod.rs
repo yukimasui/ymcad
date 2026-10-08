@@ -15,6 +15,7 @@
 pub mod component;
 pub mod draw;
 pub mod edit;
+pub mod entity_preview;
 pub mod param;
 
 use cad_core::geom::{Aabb, Point2};
@@ -23,6 +24,8 @@ use cad_core::{Command, Document, EntityId, Geometry, LayerId};
 use crate::file_ops::FileAction;
 use crate::input::ViewAction;
 use crate::selection::Selection;
+
+pub use entity_preview::{EntityPreview, PreviewCtx};
 
 /// ツールに渡す 1 手ぶんの入力。
 #[derive(Clone, Debug, PartialEq)]
@@ -217,6 +220,22 @@ pub trait Tool: std::fmt::Debug {
     /// カーソル位置に応じたラバーバンド。`Document` には入らない。
     fn preview(&self, _cursor: Point2, _ctx: &ToolCtx<'_>) -> Vec<Geometry> {
         Vec::new()
+    }
+
+    /// 図形を指す段階で、`id` を `at` でクリックしたら図面がどう変わるか（結果プレビュー）。
+    ///
+    /// `Session` が、クリックで拾われる図形（`Session::click_target` の
+    /// `ClickTarget::Entity`。ホバーの強調と同じもの）を渡す。**[`Self::step`] に
+    /// `StepInput::Entity { id, at }` が来たときと同じ結果**を、図面を変えずに返すこと。
+    /// 結果を計算できない（対象外の種類・交点が無い等）ときは `None`（強調だけが出る）。
+    /// 既定は `None`（TRIM / EXTEND だけが実装する。ADR-0043）。
+    fn entity_preview(
+        &self,
+        _id: EntityId,
+        _at: Point2,
+        _ctx: &mut PreviewCtx<'_>,
+    ) -> Option<EntityPreview> {
+        None
     }
 }
 

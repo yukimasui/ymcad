@@ -12,7 +12,10 @@ use crate::cmdline::{coord, dimension, CommandLine, LineKind, Submission};
 use crate::editing::EditSession;
 use crate::input::ViewAction;
 use crate::selection::{self, Picker, Selection, WindowMode};
-use crate::tools::{self, Immediate, StepInput, StepOutcome, Tool, ToolCtx, ToolSettings};
+use crate::tools::entity_preview::Boundaries;
+use crate::tools::{
+    self, EntityPreview, Immediate, PreviewCtx, StepInput, StepOutcome, Tool, ToolCtx, ToolSettings,
+};
 
 /// UI に対する要求。図面の変更ではないのでコマンドにはしない。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -761,6 +764,28 @@ impl Session {
                 None => ClickTarget::Nothing,
             },
         }
+    }
+
+    /// `target`（[`Self::click_target`] の結果）をクリックしたら図面がどう変わるか
+    /// （TRIM / EXTEND の結果プレビュー、Issue #34 段階 2）。図面も状態も変えない。
+    ///
+    /// 図形を指す段階で拾えた図形（[`ClickTarget::Entity`]）だけを、実行中のツールの
+    /// [`Tool::entity_preview`] へ渡す。クリック（[`Self::handle_click`]）がツールへ渡す
+    /// `StepInput::Entity { id, at }` と同じ値なので、プレビューとクリックの結果は一致する。
+    /// どのツールが対応するかはツールが決める（コマンド名で分岐しない）。
+    /// `boundaries` は境界の列のキャッシュ（`hover::Hover` が持つ）。
+    pub fn entity_preview(
+        &self,
+        target: &ClickTarget,
+        doc: &Document,
+        boundaries: &mut Boundaries,
+    ) -> Option<EntityPreview> {
+        let ClickTarget::Entity { id, at } = *target else {
+            return None;
+        };
+        let tool = self.tool.as_ref()?;
+        let mut ctx = PreviewCtx::new(self.ctx(doc), boundaries);
+        tool.entity_preview(id, at, &mut ctx)
     }
 
     /// キャンバスがクリックされた。
