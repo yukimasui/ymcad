@@ -78,10 +78,7 @@ mod tests {
     fn labels_are_distinct_japanese_phrases() {
         let mut seen = std::collections::BTreeSet::new();
         for (internal, label) in LABELS {
-            assert!(
-                !label.is_empty() && !label.chars().all(|c| c.is_ascii()),
-                "{internal}"
-            );
+            assert!(!label.is_empty() && !label.is_ascii(), "{internal}");
             assert!(seen.insert(*label), "重複: {label}");
             assert!(leaked(label).is_none(), "{label}");
         }
