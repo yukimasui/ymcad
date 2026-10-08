@@ -12,7 +12,7 @@ use crate::file_ops::{self, FileOps, FileOutcome};
 use crate::hover::Hover;
 use crate::input::{self, ViewAction};
 use crate::layer_panel::LayerPanel;
-use crate::properties_panel::PropertiesPanel;
+use crate::properties_panel::{PanelInput, PropertiesPanel};
 use crate::render;
 use crate::resolved::ResolvedInstances;
 use crate::ribbon::Ribbon;
@@ -495,6 +495,16 @@ impl CadApp {
 
         let preview = self.session.preview(self.cursor_model, &self.doc);
         render::draw_preview(&painter, &self.viewport, self.doc.definitions(), &preview);
+        // プロパティパネルで値をドラッグしている間の仮の形（Issue #31 段階 2）。図面はまだ変えて
+        // いないので、ラバーバンドと同じ経路で描く。
+        if let Some(g) = self.properties_panel.drag_preview() {
+            render::draw_preview(
+                &painter,
+                &self.viewport,
+                self.doc.definitions(),
+                std::slice::from_ref(g),
+            );
+        }
 
         if let Some(hit) = tracked.and_then(|t| t.polar) {
             render::draw_polar_guide(&painter, &self.viewport, &hit);
@@ -876,9 +886,10 @@ impl CadApp {
                 // コンポーネントの編集）とスナップを捨てる（ADR-0039）。
                 // 座標の欄も最小の幅へ戻す（広がったままにしない）。
                 self.session.document_replaced();
-                // 念のための無効化。`document_replaced` が選択を空にして選択の版が進むので、
-                // 通常は要約のキャッシュのキーが変わって作り直される。版番号が前の図面と
-                // 偶然重なっても古い要約が残らないよう、明示的に捨てておく（必須の処理ではない）。
+                // プロパティパネルの編集中の値（打ちかけ・ドラッグ中）と理由を捨てる。版番号に
+                // 結び付けているが、版番号は新しい図面と重なりうるので、残すと前の図面で打ちかけた
+                // 値が新しい図面の同じ番号の図形へ確定されうる（#63・#66 のレビューで 2 回出た穴）。
+                // 要約のキャッシュも捨てる（こちらは選択の版が進むので念のため）。
                 self.properties_panel.invalidate();
                 // ピック用の索引とホバーの結果、結果プレビューの境界の列も版番号をキーにしているので、
                 // 前の図面のものを捨てる（PR #63 のレビュー B1。残すとクリックでも新しい図面の図形を
@@ -1051,15 +1062,16 @@ impl CadApp {
         )
         .show(ui, |ui| {
             own_width(ui, "properties_scroll", |ui| {
-                // 選択待ちを含め、コマンドを実行している間は表示だけにする。
-                let busy = self.session.active_command().is_some();
-                let commands = self.properties_panel.show(
-                    ui,
-                    &self.doc,
-                    &self.session.selection,
-                    busy,
-                    self.session.drop_note(&self.doc),
-                );
+                let input = PanelInput {
+                    doc: &self.doc,
+                    selection: &self.session.selection,
+                    // 選択待ちを含め、コマンドを実行している間は表示だけにする。
+                    busy: self.session.active_command().is_some(),
+                    drop_note: self.session.drop_note(&self.doc),
+                    component_edit: self.session.editing(),
+                    length_step: self.viewport.px_to_model_len(1.0),
+                };
+                let commands = self.properties_panel.show(ui, &input);
                 // 選択から外れたときの案内は `Session::apply_external` が出す（レイヤパネルと共通）。
                 for cmd in commands {
                     self.session.apply_external(cmd, &mut self.doc);
