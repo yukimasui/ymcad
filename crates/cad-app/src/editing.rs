@@ -140,6 +140,15 @@ impl EditSession {
             .map(|d| d.bindings.iter().filter(|b| b.entity == index).collect())
             .unwrap_or_default()
     }
+
+    /// この図形を指す束縛が 1 つでもあるか。
+    ///
+    /// グリップ編集（Issue #30）は、束縛の付いた中身にグリップを出さない（項目ごとではなく
+    /// 図形ごとに判定する。束縛の付いた形を動かしても `ENDCOMP` で式の値に戻るため）。
+    #[must_use]
+    pub fn is_bound(&self, doc: &Document, id: EntityId) -> bool {
+        !self.bindings(doc, id).is_empty()
+    }
 }
 
 #[cfg(test)]
