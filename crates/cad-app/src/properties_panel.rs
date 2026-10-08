@@ -65,6 +65,9 @@ pub const STALE_NOTE: &str = "編集中に図面が変わったため、入力�
 const LABEL_WIDTH: f32 = 84.0;
 /// 表の列と行の間隔 [px]。
 const GRID_SPACING: [f32; 2] = [8.0, 4.0];
+/// 数値の欄（`DragValue`）の最小の幅 [px]。`-99999.9999°` が入り、最小幅のパネル（200px）でも
+/// 項目名の欄と並ぶ。
+const FIELD_WIDTH: f32 = 100.0;
 /// 角度のドラッグの速さ [度/px]。
 const ANGLE_STEP: f64 = 0.5;
 /// 倍率のドラッグの速さ [/px]。
@@ -355,6 +358,7 @@ impl PropertiesPanel {
 
         let geom = &entity.geom;
         let target = Target { doc, id, geom };
+        let mut has_number = false;
         egui::Grid::new(("properties_items", kind_of(geom) as u8))
             .num_columns(2)
             .min_col_width(LABEL_WIDTH)
@@ -370,6 +374,7 @@ impl PropertiesPanel {
                                 _ => input.length_step,
                             };
                             self.number_field(ui, target, field, value, step, commands);
+                            has_number = true;
                             Some(Key::Number(field))
                         }
                         (Some(Editor::Toggle(toggle, value)), true) => {
@@ -403,7 +408,8 @@ impl PropertiesPanel {
                     }
                 }
             });
-        if editable {
+        // 数値の欄があるときだけ（ポリラインはチェックボックスだけなので出さない）。
+        if has_number {
             ui.weak(EDIT_HINT);
         }
     }
@@ -436,6 +442,8 @@ impl PropertiesPanel {
         // ずれても、入力中の欄がフォーカスを失わない（[`field_scope`]）。
         let response = ui
             .scope_builder(field_scope(Key::Number(field), id), |ui| {
+                // 入力欄の幅は `interact_size.x` で決まる（既定の約 40px では 4 桁の値が隠れる）。
+                ui.spacing_mut().interact_size.x = FIELD_WIDTH;
                 let mut drag = egui::DragValue::new(&mut v)
                     .speed(step)
                     // 表示はステータスバー・段階 1 と同じ 4 桁。`range` は付けない（黙って丸め込まない）。
