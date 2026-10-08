@@ -7,9 +7,11 @@ use egui_kittest::kittest::Queryable as _;
 use egui_kittest::Harness;
 
 use super::{
-    app_with_dynamic, click, frame, hover, input_lines, lines, preedit, press, settle, type_text,
-    CadApp, P1, P2,
+    app_with_dynamic, click, frame, hover, input_lines, key_with, lines, preedit, press, settle,
+    type_text, CadApp, P1, P2,
 };
+use crate::cmdline::LineKind;
+use crate::layer_panel::RENAME_DROPPED_NOTE;
 use cad_core::command::AddLayer;
 use cad_core::{AciColor, LayerId};
 
@@ -219,4 +221,139 @@ fn undoing_the_layer_under_rename_ends_the_rename() {
     type_text(&mut h, "L");
     press(&mut h, egui::Key::Enter);
     assert_eq!(input_lines(&h), vec!["> LINE"]);
+}
+
+/// 履歴のうち `kind` の行。
+fn history_of(h: &Harness<'_, CadApp>, kind: LineKind) -> Vec<String> {
+    h.state()
+        .session
+        .cmdline
+        .history()
+        .filter(|l| l.kind == kind)
+        .map(|l| l.text.clone())
+        .collect()
+}
+
+/// 改名の欄の Tab は欄の中で何もしない（フォーカスを隣の部品へ移さない）。
+///
+/// 移すと、同じ行の線種のドロップダウンへフォーカスが行き、その後に打った文字は
+/// どこにも入らず、Enter はドロップダウンを開いた。フォーカスが「無い」わけではないので
+/// コマンドラインも取り直さない（PR #71 のコードレビュー）。
+#[test]
+fn tab_stays_in_the_rename_field() {
+    for shift in [false, true] {
+        let (mut h, id) = with_layer(false);
+        double_click_layer_name(&mut h, "L1");
+        type_text(&mut h, "X");
+        let modifiers = if shift {
+            egui::Modifiers::SHIFT
+        } else {
+            egui::Modifiers::NONE
+        };
+        frame(&mut h, key_with(egui::Key::Tab, modifiers));
+        settle(&mut h);
+        assert_eq!(
+            h.state().layer_panel.renaming(),
+            Some(id),
+            "改名は続いている（Shift {shift}）"
+        );
+        type_text(&mut h, "Y");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(name_of(&h, id), "XY", "Tab の後も欄に入る（Shift {shift}）");
+
+        // 改名を終えたら、打ったコマンドが実行される。
+        type_text(&mut h, "L");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(input_lines(&h), vec!["> LINE"], "Shift {shift}");
+    }
+}
+
+/// 欄の外をクリックしてやめたとき、名前を変えていれば案内を 1 行出す（黙って捨てない）。
+/// 名前を変えていなければ出さない。Esc でやめたときは本人が分かっているので出さない。
+#[test]
+fn clicking_away_after_typing_tells_that_the_rename_was_dropped() {
+    use egui_kittest::kittest::Queryable as _;
+
+    for (typed, escape, expect_note) in [
+        ("WALL", false, true),
+        ("", false, false),
+        ("WALL", true, false),
+    ] {
+        let (mut h, id) = with_layer(false);
+        double_click_layer_name(&mut h, "L1");
+        if !typed.is_empty() {
+            type_text(&mut h, typed);
+        }
+        if escape {
+            press(&mut h, egui::Key::Escape);
+        } else {
+            // パネルの見出しをクリックする（作図領域だと窓選択が始まり、案内が混ざる）。
+            let pos = h.get_by_label("レイヤ").rect().center();
+            let button = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            frame(
+                &mut h,
+                [egui::Event::PointerMoved(pos), button(true), button(false)],
+            );
+            settle(&mut h);
+        }
+        let what = format!("打った {typed:?} / Esc {escape}");
+        assert_eq!(name_of(&h, id), "L1", "{what}");
+        assert_eq!(h.state().layer_panel.renaming(), None, "{what}");
+        let notes = history_of(&h, LineKind::Info);
+        assert_eq!(
+            notes.iter().any(|t| t.contains(RENAME_DROPPED_NOTE)),
+            expect_note,
+            "{what}: {notes:?}"
+        );
+    }
+}
+
+/// 同じ名前のレイヤがあるときの Enter は、欄を閉じずに打った文字を残し、フォーカスも戻す。
+/// 案内には内部のコマンド名（`LAYER_RENAME`）を出さない。
+#[test]
+fn duplicate_name_keeps_the_field_open() {
+    for on in [false, true] {
+        let (mut h, id) = with_layer(on);
+        {
+            let app = h.state_mut();
+            app.session
+                .apply_external(Box::new(AddLayer::new("L2", AciColor::WHITE)), &mut app.doc);
+        }
+        settle(&mut h);
+
+        double_click_layer_name(&mut h, "L1");
+        type_text(&mut h, "L2");
+        press(&mut h, egui::Key::Enter);
+
+        assert_eq!(name_of(&h, id), "L1", "改名されない（動的入力 {on}）");
+        assert_eq!(
+            h.state().layer_panel.renaming(),
+            Some(id),
+            "欄は開いたまま（動的入力 {on}）"
+        );
+        assert_eq!(
+            h.state().layer_panel.rename_text(),
+            "L2",
+            "打った文字が残る"
+        );
+        let errors = history_of(&h, LineKind::Error);
+        assert_eq!(errors.len(), 1, "動的入力 {on}: {errors:?}");
+        assert!(
+            errors[0].starts_with("レイヤ名の変更:") && !errors[0].contains("LAYER_RENAME"),
+            "利用者向けの言葉で案内する: {errors:?}"
+        );
+        assert!(input_lines(&h).is_empty(), "動的入力 {on}");
+
+        // フォーカスは欄に戻っていて、続けて直して Enter で改名できる。
+        type_text(&mut h, "X");
+        assert_eq!(h.state().session.cmdline.input(), "", "動的入力 {on}");
+        press(&mut h, egui::Key::Enter);
+        assert_eq!(name_of(&h, id), "L2X", "動的入力 {on}");
+        assert_eq!(h.state().layer_panel.renaming(), None, "動的入力 {on}");
+    }
 }

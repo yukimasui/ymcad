@@ -36,6 +36,9 @@ const PALETTE: [AciColor; 9] = [
 pub const MOVE_BUSY_NOTE: &str =
     "コマンド実行中は移動できません（終えるか Esc で中断。中断すると選択も外れます）";
 
+/// 欄の外のクリックなどで改名をやめたとき、名前を変えていれば出す案内。
+pub const RENAME_DROPPED_NOTE: &str = "レイヤ名の変更をやめました（確定は Enter）";
+
 /// 行の右端に必ず残す幅 [px]（線種のドロップダウン 90px と削除ボタン）。名前はこれを除いた
 /// 残りの幅までしか使わず、長ければ省略する。色・線種・削除は名前より先に幅を確保する。
 const ROW_RIGHT_WIDTH: f32 = 90.0 + 30.0;
@@ -60,6 +63,62 @@ pub struct LayerPanel {
     new_layer_name: String,
     /// 色見本を開いているレイヤ。
     color_picker_for: Option<LayerId>,
+    /// コマンドラインへ出す案内（[`LayerPanel::take_notice`] で取り出す）。
+    notice: Option<PanelNotice>,
+}
+
+/// パネルからコマンドラインへ出す案内。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PanelNotice {
+    /// 案内。
+    Info(String),
+    /// エラー。
+    Error(String),
+}
+
+/// 改名の欄からフォーカスが外れたときの結末。
+#[derive(Debug, PartialEq, Eq)]
+enum RenameEnd {
+    /// この名前で改名する。
+    Commit(String),
+    /// 改名できない（同名のレイヤがある）。欄は開いたままにする。中身は利用者向けの案内。
+    Rejected(String),
+    /// 改名をやめる。`tell` … 打った名前を捨てたことを案内するか。
+    Dropped { tell: bool },
+}
+
+/// 改名の欄からフォーカスが外れたとき、どう終えるかを決める。
+///
+/// - Enter … 同名のレイヤがあれば断る（欄を閉じると打った名前が消えるので、先に見る）。
+///   空・元のままなら何もせず終える
+/// - Esc … 黙ってやめる（本人がやめたと分かっている）
+/// - それ以外（欄の外のクリックなど）… やめる。名前を変えていたら案内する。
+///   外のクリックで確定しないのは、作図領域を押しただけで名前が変わると気づきにくいため
+fn end_rename(doc: &Document, id: LayerId, buffer: &str, enter: bool, escape: bool) -> RenameEnd {
+    let Some(layer) = doc.layers().get(id) else {
+        return RenameEnd::Dropped { tell: false };
+    };
+    let new_name = buffer.trim();
+    let changed = new_name != layer.name;
+    if enter {
+        if new_name.is_empty() || !changed {
+            return RenameEnd::Dropped { tell: false };
+        }
+        // `RenameLayer` と同じ判定。適用してから失敗を知るのでは欄を開いたままにできない。
+        if doc
+            .layers()
+            .by_name(new_name)
+            .is_some_and(|other| other != id)
+        {
+            return RenameEnd::Rejected(format!(
+                "レイヤ名の変更: 同名のレイヤ「{new_name}」が既にあります（別の名前にして Enter、やめるなら Esc）"
+            ));
+        }
+        return RenameEnd::Commit(new_name.to_owned());
+    }
+    RenameEnd::Dropped {
+        tell: changed && !escape,
+    }
 }
 
 impl LayerPanel {
@@ -80,6 +139,18 @@ impl LayerPanel {
     #[must_use]
     pub fn renaming(&self) -> Option<LayerId> {
         self.rename_target
+    }
+
+    /// 編集中の名前（テスト用）。
+    #[cfg(test)]
+    #[must_use]
+    pub fn rename_text(&self) -> &str {
+        &self.rename_buffer
+    }
+
+    /// コマンドラインへ出す案内を取り出す（描いた後に呼ぶ）。
+    pub fn take_notice(&mut self) -> Option<PanelNotice> {
+        self.notice.take()
     }
 
     /// 開閉を切り替える。
@@ -253,19 +324,45 @@ impl LayerPanel {
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.rename_buffer)
                         .id(edit_id)
-                        .desired_width(name_width.min(120.0)),
+                        .desired_width(name_width.min(120.0))
+                        // Tab は欄の中で何もしない（1 行の欄なのでタブ文字も入らない）。egui の既定では
+                        // 隣の部品（線種のドロップダウン）へフォーカスが移り、その後に打った文字は
+                        // どこにも入らず、コマンドラインも取り直さなかった（PR #71 のレビュー）。
+                        .event_filter(egui::EventFilter {
+                            tab: true,
+                            horizontal_arrows: true,
+                            vertical_arrows: true,
+                            escape: false,
+                        }),
                 );
                 // フォーカスが外れたら改名を終える。Enter なら確定、それ以外（Esc・ほかの場所の
-                // クリック・Tab）はやめる。Esc は egui がフレームの最初にフォーカスを外すので、
+                // クリック）はやめる。Esc は egui がフレームの最初にフォーカスを外すので、
                 // コマンドラインは奪わない（ADR-0035 の前フレームのフォーカスを見る判定）。
                 if response.lost_focus() {
-                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        let new_name = self.rename_buffer.trim().to_owned();
-                        if !new_name.is_empty() && new_name != layer.name {
+                    let (enter, escape) = ui.input(|i| {
+                        (
+                            i.key_pressed(egui::Key::Enter),
+                            i.key_pressed(egui::Key::Escape),
+                        )
+                    });
+                    match end_rename(doc, id, &self.rename_buffer, enter, escape) {
+                        RenameEnd::Commit(new_name) => {
                             commands.push(Box::new(RenameLayer::new(id, new_name)));
+                            self.rename_target = None;
+                        }
+                        RenameEnd::Rejected(message) => {
+                            // 欄を開いたまま、打った文字も残してフォーカスを戻す（直して Enter し直せる）。
+                            self.notice = Some(PanelNotice::Error(message));
+                            response.request_focus();
+                        }
+                        RenameEnd::Dropped { tell } => {
+                            if tell {
+                                self.notice =
+                                    Some(PanelNotice::Info(RENAME_DROPPED_NOTE.to_owned()));
+                            }
+                            self.rename_target = None;
                         }
                     }
-                    self.rename_target = None;
                 }
             } else {
                 let label = ui
@@ -438,6 +535,50 @@ mod tests {
         assert!(p.rename_target.is_none());
         assert!(!p.rename_focus_pending);
         assert!(p.color_picker_for.is_none());
+    }
+
+    /// 改名の欄からフォーカスが外れたときの結末。
+    #[test]
+    fn end_rename_decides_by_key_and_name() {
+        let mut doc = Document::new();
+        for name in ["L1", "L2"] {
+            doc.apply(Box::new(AddLayer::new(name, AciColor::WHITE)))
+                .expect("レイヤ");
+        }
+        let l1 = doc.layers().by_name("L1").expect("L1");
+        let end =
+            |buffer: &str, enter: bool, escape: bool| end_rename(&doc, l1, buffer, enter, escape);
+
+        assert_eq!(end(" WALL ", true, false), RenameEnd::Commit("WALL".into()));
+        assert!(
+            matches!(end("L2", true, false), RenameEnd::Rejected(m) if m.starts_with("レイヤ名の変更:")),
+            "同名は断る"
+        );
+        assert_eq!(
+            end("L1", true, false),
+            RenameEnd::Dropped { tell: false },
+            "元のまま"
+        );
+        assert_eq!(
+            end("  ", true, false),
+            RenameEnd::Dropped { tell: false },
+            "空"
+        );
+        assert_eq!(
+            end("WALL", false, true),
+            RenameEnd::Dropped { tell: false },
+            "Esc"
+        );
+        assert_eq!(
+            end("WALL", false, false),
+            RenameEnd::Dropped { tell: true },
+            "外のクリック"
+        );
+        assert_eq!(
+            end("L1", false, false),
+            RenameEnd::Dropped { tell: false },
+            "変えていない"
+        );
     }
 
     /// パレットは ACI の標準色を含むこと。

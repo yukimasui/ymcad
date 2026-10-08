@@ -1,5 +1,6 @@
 //! レイヤ名の改名（Issue #68）の見た目。ダブルクリック直後は名前全体が選ばれていて、
-//! 打った文字は改名の欄に入る（コマンドラインは空のまま）。
+//! 打った文字は改名の欄に入る（コマンドラインは空のまま）。同名のレイヤにしようとすると
+//! 欄は開いたままで、案内が出る。
 
 use cad_core::command::AddLayer;
 use cad_core::AciColor;
@@ -49,4 +50,13 @@ fn ui_snapshot_layer_rename() {
     shot(&mut h, "rename_a_whole_name_selected");
     type_text(&mut h, "LINE");
     shot(&mut h, "rename_b_typed_into_the_field");
+
+    // 同名のレイヤ（0）にしようとして Enter → 欄は開いたまま、打った文字も残り、
+    // コマンドラインに利用者向けの言葉で案内が出る。
+    press(&mut h, egui::Key::Escape);
+    double_click(&mut h, "壁");
+    hover(&mut h, CANVAS_CENTER);
+    type_text(&mut h, "0");
+    press(&mut h, egui::Key::Enter);
+    shot(&mut h, "rename_c_duplicate_keeps_the_field");
 }
