@@ -4,11 +4,11 @@
 
 <section class="card now" id="now">
 <h2>いまの状況</h2>
-<p class="stamp">2026-10-09 朝・夜間の自律作業を終えたところ</p>
+<p class="stamp">2026-10-09 朝・夜間の自律作業を終えて、今日の作業は終了</p>
 <ul>
-<li>#31 プロパティパネル・#34 選択プレビュー・#30 グリップ編集が<b>完了</b>し、develop に入った。追いかけ（#55 #59 #64 #65 #68 #73 #74 #78）も完了</li>
-<li>#70 MCP サーバーは 1a 骨組み・1b 編集・1c 描画が入り、<b>Claude Code から実際に使える</b>。1d（コンポーネント）と描画の上限（#94）を仕上げ中</li>
-<li>#85 のマージで、衝突による失敗の後に <code>;</code> でつないだ片付けが走り PR が閉じた。手元のブランチから戻して開き直し、失われたものは無い。以後は <code>&amp;&amp;</code> でつなぐ</li>
+<li>#31 プロパティパネル・#34 選択プレビュー・#30 グリップ編集・<b>#70 MCP サーバー段階 1</b> が完了し、develop に入った。進行中の作業は無い</li>
+<li>MCP は Claude Code から使える。開く・作図・変形・レイヤ・コンポーネント・Undo・PNG で見る・保存まで実機で確認済み（手順は <code>docs/MCP.md</code>）</li>
+<li>次に進めるには、下の「判断してほしいこと」（#36・#27 の計画の承認、#92 の不具合）が要る</li>
 </ul>
 </section>
 
@@ -20,7 +20,7 @@
 <tr><td>#27 の計画を承認するか</td><td><a href="https://github.com/yukimasui/ymcad/issues/27#issuecomment-6063744231">Issue #27 の計画案</a>。判断 9 つ。#36 に依存しないので先に始めるのを推奨</td></tr>
 <tr><td>#92 の不具合を直してよいか</td><td>cad-core の Redo の ID。Command の挙動の変更（依存・構造は変えない見込み）</td></tr>
 <tr><td>MCP の推奨 14 項目の見直し</td><td><a href="https://github.com/yukimasui/ymcad/issues/70#issuecomment-6062005870">Issue #70</a>。とくに ADR-0046 決定 9: PNG を作るとき px の値を usvg が f32 で読む（設計原則 1 の f32 の出口が 1 つ増えた）</td></tr>
-<tr><td>develop → main のマージ</td><td>10/8〜9 の分がすべて develop にある。main へは確認後</td></tr>
+<tr><td>develop → main のマージ</td><td>10/8〜9 の分（PR 25 本ほど）がすべて develop にある。main へは確認後。Issue の多くは main に入ったときに自動で閉じる</td></tr>
 </table></div>
 
 <h3>実機で確かめてほしいこと</h3>
@@ -46,7 +46,7 @@
 <tr><td>プロパティパネル（表示・数値・束縛）</td><td><a href="https://github.com/yukimasui/ymcad/issues/31">#31</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/62">#62</a> <a href="https://github.com/yukimasui/ymcad/pull/66">#66</a> <a href="https://github.com/yukimasui/ymcad/pull/75">#75</a> <a href="https://github.com/yukimasui/ymcad/pull/80">#80</a> <a href="https://github.com/yukimasui/ymcad/pull/82">#82</a></td><td class="note">Issue は main へのマージで閉じる</td></tr>
 <tr><td>選択プレビュー（ホバー・TRIM / EXTEND のプレビュー・全選択）</td><td><a href="https://github.com/yukimasui/ymcad/issues/34">#34</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/63">#63</a> <a href="https://github.com/yukimasui/ymcad/pull/67">#67</a> <a href="https://github.com/yukimasui/ymcad/pull/72">#72</a> <a href="https://github.com/yukimasui/ymcad/pull/88">#88</a></td><td class="note"></td></tr>
 <tr><td>グリップ編集（単一・重なる角・辺の中点）</td><td><a href="https://github.com/yukimasui/ymcad/issues/30">#30</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/81">#81</a> <a href="https://github.com/yukimasui/ymcad/pull/85">#85</a></td><td class="note"></td></tr>
-<tr><td>MCP サーバー 段階 1（骨組み・編集・描画・コンポーネント）</td><td><a href="https://github.com/yukimasui/ymcad/issues/70">#70</a></td><td><span class="pill run">進行中</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/84">#84</a> <a href="https://github.com/yukimasui/ymcad/pull/91">#91</a> <a href="https://github.com/yukimasui/ymcad/pull/89">#89</a> <a href="https://github.com/yukimasui/ymcad/pull/94">#94</a></td><td class="note">1d（コンポーネント）実装中。#94（描画の上限）レビュー中。ユーザーが自律的な実装を許可済み</td></tr>
+<tr><td>MCP サーバー 段階 1（骨組み・編集・描画・コンポーネント）</td><td><a href="https://github.com/yukimasui/ymcad/issues/70">#70</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/84">#84</a> <a href="https://github.com/yukimasui/ymcad/pull/91">#91</a> <a href="https://github.com/yukimasui/ymcad/pull/89">#89</a> <a href="https://github.com/yukimasui/ymcad/pull/94">#94</a> <a href="https://github.com/yukimasui/ymcad/pull/95">#95</a></td><td class="note">段階 2（起動中のアプリとつなぐ）は <a href="https://github.com/yukimasui/ymcad/issues/96">#96</a>、着手前に計画の承認が要る</td></tr>
 <tr><td>Shift で直交を一時反転</td><td><a href="https://github.com/yukimasui/ymcad/issues/36">#36</a></td><td><span class="pill wait">承認待ち</span></td><td>—</td><td class="note"><a href="https://github.com/yukimasui/ymcad/issues/36#issuecomment-6063729473">計画案</a>（判断 4 つ）</td></tr>
 <tr><td>動的入力のそばのヒント</td><td><a href="https://github.com/yukimasui/ymcad/issues/27">#27</a></td><td><span class="pill wait">承認待ち</span></td><td>—</td><td class="note"><a href="https://github.com/yukimasui/ymcad/issues/27#issuecomment-6063744231">計画案</a>（判断 9 つ。#36 より先を推奨）</td></tr>
 <tr><td>追いかけ・不具合の修正</td><td>#37 #44 #48 #51 #55 #59 #64 #65 #68 #73 #74 #78</td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/45">#45</a> <a href="https://github.com/yukimasui/ymcad/pull/49">#49</a> <a href="https://github.com/yukimasui/ymcad/pull/53">#53</a> <a href="https://github.com/yukimasui/ymcad/pull/54">#54</a> <a href="https://github.com/yukimasui/ymcad/pull/58">#58</a> <a href="https://github.com/yukimasui/ymcad/pull/76">#76</a> <a href="https://github.com/yukimasui/ymcad/pull/77">#77</a> <a href="https://github.com/yukimasui/ymcad/pull/71">#71</a> <a href="https://github.com/yukimasui/ymcad/pull/86">#86</a></td><td class="note"></td></tr>
@@ -105,6 +105,7 @@
 <div class="tablewrap"><table>
 <tr><th>Issue</th><th>種類</th><th>内容</th><th>必要なこと</th></tr>
 <tr><td><a href="https://github.com/yukimasui/ymcad/issues/92">#92</a></td><td><span class="pill bug">不具合</span></td><td>cad-core の AddEntities / AddLayer が Redo のたびに新しい ID を振り、後のコマンドの Redo が失敗する・図形が存在しないレイヤに付く（アプリでも起きる見込み）</td><td class="note">cad-core の変更。<b>直してよいか判断がほしい</b></td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/96">#96</a></td><td><span class="pill idea">候補</span></td><td>MCP 段階 2: 起動中のアプリと MCP サーバーをつなぐ（LLM の変更がその場で画面に出る）</td><td class="note">計画を立てて承認をもらう。#92 を先に直すと安全</td></tr>
 <tr><td><a href="https://github.com/yukimasui/ymcad/issues/93">#93</a></td><td><span class="pill bug">不具合</span></td><td>作図領域の下端近くで 1 文字目を打つと、候補が出たフレームで入力欄が上へ跳ねる</td><td class="note">#27 の後に判断</td></tr>
 <tr><td><a href="https://github.com/yukimasui/ymcad/issues/60">#60</a></td><td><span class="pill core">cad-core</span></td><td>インスタンスが TRIM / EXTEND の境界にならない</td><td class="note">cad-core の変更</td></tr>
 <tr><td><a href="https://github.com/yukimasui/ymcad/issues/61">#61</a></td><td><span class="pill core">cad-core</span></td><td>作図線があると空間インデックスが分割されず、ほぼ線形探索になる（結果は正しい）</td><td class="note">cad-core の変更</td></tr>
