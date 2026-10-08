@@ -66,4 +66,30 @@ pub mod limits {
 
     /// `undo` / `redo` の `steps` の上限。履歴の深さ（`UndoStack::DEFAULT_LIMIT`）と同じ。
     pub const MAX_HISTORY_STEPS: usize = cad_core::UndoStack::DEFAULT_LIMIT;
+
+    /// 1 回の呼び出しで作る・変える図形の数（`add_entities` の `entities`・`modify_entities` の `changes`）。
+    pub const MAX_SHAPES_PER_CALL: usize = 1000;
+
+    /// 1 本のポリラインの頂点の数。
+    pub const MAX_POLYLINE_VERTICES: usize = 10_000;
+
+    /// 図面に置ける図形の数。複製の道具が倍々に増やしても、メモリと保存の時間が青天井にならないように。
+    pub const MAX_DRAWING_ENTITIES: usize = 1_000_000;
+
+    /// 座標・長さの絶対値の上限（図面単位）。`1e300` のような値は有限でも、描画・スナップ・
+    /// トレランスの計算が成り立たない。10 億（mm なら 1000 km）あれば図面には足りる。
+    pub const MAX_COORDINATE: f64 = 1e9;
+
+    /// 数値に書ける式の文字列の長さ（バイト）。
+    pub const MAX_EXPR_BYTES: usize = 1024;
+
+    /// レイヤ名の長さ（文字数）。
+    pub const MAX_LAYER_NAME_CHARS: usize = 255;
+
+    /// 道具の結果（JSON の text）の最大バイト数。超えたら `isError` で絞り込みを促す。
+    ///
+    /// 入力を 1 行 4 MiB で止めるのと対にする。クライアントの側にも出力の上限がある
+    /// （Claude Code は既定で MCP の出力をおよそ 25,000 トークンで打ち切る）ので、それより
+    /// 少し大きいくらいに置き、超えたら一覧の `limit` や ID の数を減らしてもらう。
+    pub const MAX_RESULT_BYTES: usize = 256 * 1024;
 }

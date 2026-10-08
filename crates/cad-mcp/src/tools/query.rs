@@ -9,7 +9,8 @@ use serde_json::{json, Value};
 
 use super::{Args, Tool, ToolResult};
 use crate::convert::{
-    aabb_from_json, entity_summary_json, entity_to_json, geometry_type, point_to_json, ENTITY_TYPES,
+    aabb_from_json, component_to_json, entity_summary_json, entity_to_json, geometry_type,
+    layer_to_json, ENTITY_TYPES,
 };
 use crate::ids::resolve_ids;
 use crate::limits::{DEFAULT_LIST_LIMIT, MAX_IDS_PER_CALL, MAX_LIST_LIMIT};
@@ -89,7 +90,8 @@ pub(super) const LIST_COMPONENTS: Tool = Tool {
     name: "list_components",
     title: "コンポーネントの一覧",
     description: "コンポーネント（パラメトリックなブロック）定義の一覧: 名前・基点・中の図形の数・図面に直接置かれたインスタンスの数・\
-パラメータ（名前・型・既定値の式・範囲）・束縛（中の図形の添字・座標・式。式の中の角度は度）。",
+パラメータ（名前・型・既定値の式・範囲）・束縛（中の図形の添字 entity と種類 entity_type、対象の項目 field、式。\
+field は図形の JSON の項目名で start.x / center.y / radius / start_angle / vertices[3].x など。式の中の角度は度）。",
     schema: || (json!({}), &[]),
     read_only: true,
     destructive: false,
@@ -172,31 +174,26 @@ fn get_entities(s: &mut Server, a: &Args) -> ToolResult {
 
 fn list_layers(s: &mut Server, _: &Args) -> ToolResult {
     let doc = &s.doc;
-    let mut counts: HashMap<LayerId, usize> = HashMap::new();
-    for (_, e) in doc.entities().iter() {
-        *counts.entry(e.layer).or_default() += 1;
-    }
+    let counts = entity_counts_by_layer(doc);
     let current = doc.layers().current();
     let layers: Vec<Value> = doc
         .layers()
         .iter()
-        .map(|(id, l)| {
-            json!({
-                "name": l.name,
-                "color": l.color.0,
-                "visible": l.visible,
-                "locked": l.locked,
-                "linetype": l.linetype.dxf_name().to_ascii_lowercase(),
-                "current": id == current,
-                "entity_count": counts.get(&id).copied().unwrap_or(0),
-            })
-        })
+        .map(|(id, l)| layer_to_json(l, id == current, counts.get(&id).copied().unwrap_or(0)))
         .collect();
     Ok(json!({ "drawing": s.tag().name(), "layers": layers }))
 }
 
+/// レイヤごとの図形の数（図面に直接置かれたものだけ）。
+pub(super) fn entity_counts_by_layer(doc: &cad_core::Document) -> HashMap<LayerId, usize> {
+    let mut counts: HashMap<LayerId, usize> = HashMap::new();
+    for (_, e) in doc.entities().iter() {
+        *counts.entry(e.layer).or_default() += 1;
+    }
+    counts
+}
+
 fn list_components(s: &mut Server, _: &Args) -> ToolResult {
-    use cad_core::expr::ParamType;
     use cad_core::Geometry;
 
     let doc = &s.doc;
@@ -209,46 +206,7 @@ fn list_components(s: &mut Server, _: &Args) -> ToolResult {
     let components: Vec<Value> = doc
         .definitions()
         .iter()
-        .map(|(id, d)| {
-            let params: Vec<Value> = d
-                .params
-                .iter()
-                .map(|p| {
-                    let (ty, choices) = match &p.ty {
-                        ParamType::Number => ("number", None),
-                        ParamType::Bool => ("bool", None),
-                        ParamType::Choice(c) => ("choice", Some(c.clone())),
-                    };
-                    json!({
-                        "name": p.name,
-                        "type": ty,
-                        "choices": choices,
-                        "default": p.default.to_string(),
-                        "range": p.range.map(|(lo, hi)| json!([lo, hi])),
-                    })
-                })
-                .collect();
-            let bindings: Vec<Value> = d
-                .bindings
-                .iter()
-                .map(|b| {
-                    json!({
-                        "entity": b.entity,
-                        "slot": format!("{:?}", b.slot),
-                        "label": b.slot.label(),
-                        "expr": b.expr.to_string(),
-                    })
-                })
-                .collect();
-            json!({
-                "name": d.name,
-                "origin": point_to_json(d.origin),
-                "entity_count": d.entities.len(),
-                "instance_count": instances.get(&id).copied().unwrap_or(0),
-                "params": params,
-                "bindings": bindings,
-            })
-        })
+        .map(|(id, d)| component_to_json(d, instances.get(&id).copied().unwrap_or(0)))
         .collect();
     Ok(json!({ "drawing": s.tag().name(), "components": components }))
 }
@@ -258,8 +216,10 @@ mod tests {
     use super::super::test_support::{eid, err, ok, server};
     use super::*;
     use crate::test_util::TempDir;
-    use cad_core::command::{AddEntities, AddLayer, DefineComponent, InsertInstance};
-    use cad_core::component::Placement;
+    use cad_core::command::{
+        AddEntities, AddLayer, DefineComponent, InsertInstance, SetBinding, SetDefinitionParams,
+    };
+    use cad_core::component::{Binding, ParamDecl, Placement, Slot};
     use cad_core::geom::{Circle, Line, Point2, Xline};
     use cad_core::{AciColor, Entity, Geometry};
 
@@ -453,6 +413,20 @@ mod tests {
             .unwrap();
         let def = s.doc.definitions().by_name("BOLT").unwrap();
         s.doc
+            .apply(Box::new(SetDefinitionParams::new(
+                "PARAMS",
+                def,
+                vec![ParamDecl::number("長さ", 30.0)],
+            )))
+            .unwrap();
+        s.doc
+            .apply(Box::new(SetBinding::new(
+                "BIND",
+                def,
+                Binding::new(0, Slot::LineBx, cad_core::expr::parse("長さ + 1").unwrap()),
+            )))
+            .unwrap();
+        s.doc
             .apply(Box::new(InsertInstance::new(
                 "INSERT",
                 def,
@@ -465,6 +439,14 @@ mod tests {
         assert_eq!(c["name"], "BOLT");
         assert_eq!(c["entity_count"], 1);
         assert_eq!(c["instance_count"], 1);
+        assert_eq!(c["params"][0]["name"], "長さ");
+        assert_eq!(c["params"][0]["type"], "number");
+        // 束縛の対象は Debug の綴り（LineBx）ではなく、図形の JSON の項目名（PR #84 レビューの 5）。
+        let b = &c["bindings"][0];
+        assert_eq!(b["entity"], 0);
+        assert_eq!(b["entity_type"], "line");
+        assert_eq!(b["field"], "end.x");
+        assert_eq!(b["expr"], "長さ + 1");
 
         let list = ok(&mut s, "list_entities", json!({"type": "instance"}));
         let id = list["entities"][0]["id"].clone();
