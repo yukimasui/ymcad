@@ -42,9 +42,6 @@ const ROW_RIGHT_WIDTH: f32 = 90.0 + 30.0;
 /// 名前に最低限残す幅 [px]。
 const NAME_MIN_WIDTH: f32 = 40.0;
 
-/// 「移動」の行で、これより残りが狭いときは次の行へ送る [px]。
-const MOVE_BUTTON_MIN_WIDTH: f32 = 70.0;
-
 /// 色見本の一辺 [px]。
 const SWATCH_PX: f32 = 14.0;
 
@@ -252,10 +249,11 @@ impl LayerPanel {
                     self.rename_target = Some(id);
                     self.rename_buffer = layer.name.clone();
                 }
+                // ツールチップには常に全体の名前を出す。省略されたかどうかを幅で判定すると、
+                // 全角文字では文字の切れ目の余りで外れ、省略されているのに出ないことがあった。
                 if is_zero {
-                    label.on_hover_text("レイヤ 0 は名前を変更できません");
-                } else if label.rect.width() >= name_width - 1.0 {
-                    // 省略されている。
+                    label.on_hover_text(format!("{}\nレイヤ 0 は名前を変更できません", layer.name));
+                } else {
                     label.on_hover_text(&layer.name);
                 }
             }
@@ -338,20 +336,16 @@ impl LayerPanel {
                 ui.disable();
             }
             for (id, layer) in doc.layers().iter() {
-                // 長い名前は、この行の残りの幅までで省略してホバーで全体を出す（行を押し広げない）。
-                // 省略するボタンは勝手に折り返さないので、残りが少なければ先に改行する。
-                if ui.available_width() < MOVE_BUTTON_MIN_WIDTH {
-                    ui.end_row();
-                }
-                let max_width = ui.available_width();
+                // 長い名前は、この行の残りの幅までで省略する（行を押し広げない。全体はホバーで出る）。
                 let button = ui.add(egui::Button::new(&layer.name).truncate());
-                let truncated = button.rect.width() >= max_width - 1.0;
                 if button.clicked() {
                     commands.push(Box::new(MoveEntitiesToLayer::new(selection.to_vec(), id)));
                 }
-                if truncated {
-                    button.on_hover_text(&layer.name);
-                }
+                // 常に全体の名前を出す（省略の判定は全角文字で外れる）。実行中は無効のボタンなので、
+                // 無効のときのツールチップにも同じ名前を出す。
+                button
+                    .on_hover_text(&layer.name)
+                    .on_disabled_hover_text(&layer.name);
             }
         });
     }

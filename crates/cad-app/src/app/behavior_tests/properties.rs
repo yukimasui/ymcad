@@ -760,6 +760,106 @@ fn long_layer_names_do_not_push_the_row_out_of_the_layer_panel() {
     }
 }
 
+/// 長い名前の「移動」ボタンが、残りの狭い行の端で潰れずに（egui が先に折り返して）これ以上の幅になる。
+const MOVE_BUTTON_MIN_WIDTH: f32 = 70.0;
+
+/// 省略されうる長いレイヤ名は、レイヤの行の名前も「移動」の行のボタンも、ホバーで全体の名前が
+/// ツールチップに出る。日本語（全角は文字の切れ目で数 px の余りが出る）と英字、最小幅と既定幅で見る。
+/// 修正前は「幅いっぱいまで省略したか」で判定していて、全角の名前では出なかった。
+/// 「移動」の行の長い名前のボタンは、行の端の狭い残りに押し込まれず `MOVE_BUTTON_MIN_WIDTH` 以上の幅になる。
+/// （短い名前を先に足して、残り幅をいろいろに変えている。`end_row()` を手で呼ぶ必要は無かった。）
+#[test]
+fn long_layer_names_show_their_full_name_in_a_tooltip() {
+    for width in [1280.0, 730.0] {
+        let mut h = app_with_width(width);
+        let names = [
+            "外壁_RC造_耐火被覆あり_2F",
+            "外壁_RC造_耐火被覆あり_3F",
+            "A-WALL-EXTR-FIRE-RATED-2HR",
+        ];
+        // 短い名前を先に足して、長い名前のボタンの手前の「残り幅」をいろいろに変える
+        // （残りが狭いときは先に改行される）。
+        for filler in ["a", "bb", "ccc", "dddd", "eeeee", "ffffff", "ggggggg"] {
+            external(&mut h, Box::new(AddLayer::new(filler, AciColor::WHITE)));
+        }
+        for name in names {
+            external(&mut h, Box::new(AddLayer::new(name, AciColor::WHITE)));
+        }
+        let id = add_line(&mut h, LayerId::ZERO, 10.0);
+        open_layer_panel(&mut h);
+        select(&mut h, &[id]);
+
+        for name in names {
+            // 画面に現れる順は、レイヤの行の名前、「移動」の行のボタン。
+            let count = |h: &Harness<'_, CadApp>| h.query_all_by_label(name).count();
+            for (which, nth) in [("レイヤの行", 0), ("「移動」の行", 1)] {
+                let before = count(&h);
+                let node = h
+                    .query_all_by_label(name)
+                    .nth(nth)
+                    .unwrap_or_else(|| panic!("{width}px: {which}の {name} が無い"));
+                if nth == 1 {
+                    assert!(
+                        node.rect().width() >= MOVE_BUTTON_MIN_WIDTH,
+                        "{width}px: 「移動」の行の {name} が狭すぎる（改行されていない）: {:?}",
+                        node.rect()
+                    );
+                }
+                node.hover();
+                h.run_steps(20);
+                assert!(
+                    count(&h) > before,
+                    "{width}px: {which}の {name} にホバーしても全体の名前が出ない"
+                );
+                // ホバーを外してツールチップを消す（730px だと P1 はパネルの上なので、作図領域の左端へ）。
+                hover(&mut h, egui::pos2(20.0, 300.0));
+            }
+        }
+    }
+}
+
+/// コマンド実行中は「移動」の行のボタンが無効になるが、ホバーすれば全体の名前が出る。
+#[test]
+fn disabled_move_buttons_still_show_the_full_name() {
+    let mut h = app_with_width(1280.0);
+    let name = "外壁_RC造_耐火被覆あり_2F";
+    external(&mut h, Box::new(AddLayer::new(name, AciColor::WHITE)));
+    let id = add_line(&mut h, LayerId::ZERO, 10.0);
+    open_layer_panel(&mut h);
+    select(&mut h, &[id]);
+    hover(&mut h, egui::pos2(20.0, 300.0));
+    type_text(&mut h, "LINE");
+    press(&mut h, egui::Key::Enter);
+    assert!(h.state().session.active_command().is_some(), "前提: 実行中");
+    let before = h.query_all_by_label(name).count();
+    h.query_all_by_label(name)
+        .last()
+        .expect("「移動」の行のボタン")
+        .hover();
+    h.run_steps(20);
+    assert!(
+        h.query_all_by_label(name).count() > before,
+        "無効のボタンでも全体の名前が出る"
+    );
+}
+
+/// レイヤ 0 の名前のツールチップは、全体の名前と「名前を変更できません」の両方を伝える。
+#[test]
+fn layer_zero_tooltip_keeps_both_the_name_and_the_note() {
+    let mut h = app();
+    open_layer_panel(&mut h);
+    let node = h
+        .query_all_by_label("0")
+        .find(|n| n.rect().left() > h.state().viewport.rect().right())
+        .expect("レイヤ 0 の行の名前");
+    node.hover();
+    h.run_steps(20);
+    assert!(
+        has(&h, "0\nレイヤ 0 は名前を変更できません"),
+        "全体の名前と、変更できない旨の両方が出る"
+    );
+}
+
 /// 移して選択から外れた案内は、Undo で戻したら消える（図形は元のレイヤへ戻っている）。
 /// 修正前は選択の版番号だけを見ていたので、選択が空のまま進む Undo では残った。
 #[test]
