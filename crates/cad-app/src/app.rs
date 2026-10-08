@@ -865,6 +865,64 @@ fn own_width<R>(
 }
 
 impl CadApp {
+    /// 図面が丸ごと入れ替わった（NEW / OPEN）ので、前の図面に結びついた状態をすべて捨てる。
+    ///
+    /// **`Document::revision()` は同じ図面の中でしか比べられない。** 読み込んだ図面の版番号は
+    /// コマンドの適用回数で決まり中身によらないので、別の図面どうしで一致しうる。版番号だけを
+    /// キーにした派生データ（スナップ・ピックの索引、インスタンスの展開結果、プロパティの要約、
+    /// 境界の列）や、前の図面の ID を持つ状態（実行中のツール・選択・パネルの編集中）は、
+    /// 入れ替えのたびにここで捨てる（Issue #65、PR #63 の B1）。
+    ///
+    /// **`CadApp` のフィールドを足したら、ここで必ず扱いを決める。** 下の分解は `..` を使わず
+    /// 全フィールドを並べているので、足しただけではコンパイルが通らない。図面に結びつくなら捨てる処理を
+    /// 書き、図面によらない（見え方・設定・ファイル操作）なら `_` と理由で残す。
+    fn drop_derived_state(&mut self) {
+        let Self {
+            // 図面そのものは呼び出し側が入れ替え済み。
+            doc: _,
+            // 視点は入れ替えで動かさない（開いた直後の ZOOM は利用者の操作）。
+            viewport: _,
+            session,
+            snap,
+            // 直交・極トラッキングは利用者の設定。
+            drafting: _,
+            resolved,
+            layer_panel,
+            // 開閉と新しいパラメータ名の下書きだけで、図面の ID を持たない。
+            component_panel: _,
+            properties_panel,
+            ribbon: _,
+            files: _,
+            quitting: _,
+            snapped,
+            hover,
+            rect_drag,
+            // 次のフレームのポインタ位置で上書きされる。
+            cursor_model: _,
+            font_status: _,
+            draw_timer: _,
+            initialized: _,
+            coord_width,
+        } = self;
+        // 実行中のツール・選択・コンポーネントの編集・レイヤ名を出した案内（ADR-0039）。
+        session.document_replaced();
+        // スナップの索引と掴んでいた点。ON/OFF と種別の設定は残す。
+        snap.document_replaced();
+        *snapped = None;
+        // インスタンスの展開結果（版番号が重なると前の図面の定義で描かれる）。
+        *resolved = ResolvedInstances::new();
+        // ピック用の索引・ホバーの結果・結果プレビューの境界の列（PR #63 のレビュー B1）。
+        *hover = Hover::new();
+        // 改名中・色見本表示中のレイヤ ID。
+        layer_panel.document_replaced();
+        // 選択の要約。`document_replaced` が選択を空にして選択の版は進むが、版番号が
+        // 偶然重なっても古い要約が残らないよう明示的に捨てる。
+        properties_panel.invalidate();
+        *rect_drag = None;
+        // 座標の欄も最小の幅へ戻す（広がったままにしない）。
+        *coord_width = COORD_MIN_WIDTH;
+    }
+
     /// ファイル操作の結果をコマンドラインへ出す。
     fn report_file_outcome(&mut self, outcome: FileOutcome) {
         match outcome {
@@ -872,21 +930,8 @@ impl CadApp {
             // 保存。図面はそのままなので、選択・スナップ・座標の欄は変えない（Issue #41）。
             FileOutcome::Ok(msg) => self.session.cmdline.info(msg),
             FileOutcome::Replaced(msg) => {
-                // 図面が入れ替わったので、前の図面に結びついた状態（実行中のツール・選択・
-                // コンポーネントの編集）とスナップを捨てる（ADR-0039）。
-                // 座標の欄も最小の幅へ戻す（広がったままにしない）。
-                self.session.document_replaced();
-                // 念のための無効化。`document_replaced` が選択を空にして選択の版が進むので、
-                // 通常は要約のキャッシュのキーが変わって作り直される。版番号が前の図面と
-                // 偶然重なっても古い要約が残らないよう、明示的に捨てておく（必須の処理ではない）。
-                self.properties_panel.invalidate();
-                // ピック用の索引とホバーの結果、結果プレビューの境界の列も版番号をキーにしているので、
-                // 前の図面のものを捨てる（PR #63 のレビュー B1。残すとクリックでも新しい図面の図形を
-                // 拾えず、TRIM / EXTEND のプレビューは前の図面の境界で計算される）。
-                self.hover = Hover::new();
+                self.drop_derived_state();
                 self.session.cmdline.info(msg);
-                self.snap.release();
-                self.coord_width = COORD_MIN_WIDTH;
             }
             FileOutcome::Failed(msg) => self.session.cmdline.error(msg),
             FileOutcome::Quit => self.quitting = true,

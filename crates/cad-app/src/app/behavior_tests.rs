@@ -18,6 +18,7 @@ use crate::cmdline::LineKind;
 mod hover;
 mod properties;
 mod rename;
+mod replaced_caches;
 mod select_all;
 mod trim_preview;
 
