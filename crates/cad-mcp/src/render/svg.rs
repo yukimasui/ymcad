@@ -16,6 +16,9 @@
 //! - 円・円弧は `<circle>` / `A` コマンドで書く。ただし半径が [`MAX_NATIVE_ARC_RADIUS_PX`] を超えるとき
 //!   （拡大して大きな円の一部だけを見るとき）は折れ線にして切る。半径が桁違いに大きい円弧を
 //!   ラスタライザの精度に任せると、見えている部分が数 px ずれる
+//! - 出力の大きさの上限は [`draw`] の引数 `max_bytes`。**書きながら見て**、超えた時点で打ち切る
+//!   （頂点が数百万のポリライン 1 本でも、上限を大きく超えるぶんは書かない）
+//! - 円・円弧は、表示範囲が円の内側に丸ごと入って線が 1 本も見えないときは書かず、「描いた」にも数えない
 
 use std::f64::consts::{PI, TAU};
 use std::fmt::Write as _;
@@ -40,9 +43,6 @@ pub const MAX_NATIVE_ARC_RADIUS_PX: f64 = 1.0e5;
 
 /// 巨大な円弧の角度の窓を広げる割合（窓の両端に、窓の幅のこの割合ずつ）。
 const WINDOW_PAD_RATIO: f64 = 0.05;
-
-/// 出力する SVG の最大バイト数。超えたら範囲を絞らせる。
-pub const MAX_SVG_BYTES: usize = 8 * 1024 * 1024;
 
 /// 背景。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,17 +109,33 @@ pub struct Stats {
 ///
 /// `tag` は図面の印（各要素に `data-id`（図形 ID）を付けるため）。
 ///
+/// `max_bytes` は SVG の文字列の大きさの上限。書きながら見て、超えたら打ち切って拒む。
+///
 /// # Errors
 ///
-/// 出力が [`MAX_SVG_BYTES`] を超えたとき（範囲を絞らせる）。
+/// 出力が `max_bytes` を超えたとき（範囲を絞らせる）。
 pub fn draw(
     doc: &Document,
     tag: crate::ids::DrawingTag,
     fit: &Fit,
     background: Background,
+    max_bytes: usize,
 ) -> Result<(String, Stats), String> {
-    let (w, h) = (fit.width(), fit.height());
     let mut out = String::new();
+    let stats = write_svg(&mut out, doc, tag, fit, background, max_bytes)?;
+    Ok((out, stats))
+}
+
+/// [`draw`] の本体。`out` に書く（失敗したときは書きかけが残る。テストが打ち切りの位置を見る）。
+fn write_svg(
+    out: &mut String,
+    doc: &Document,
+    tag: crate::ids::DrawingTag,
+    fit: &Fit,
+    background: Background,
+    max_bytes: usize,
+) -> Result<Stats, String> {
+    let (w, h) = (fit.width(), fit.height());
     // 書式文字列への書き込みは String に対しては失敗しない。
     let _ = write!(
         out,
@@ -145,12 +161,13 @@ pub fn draw(
         let style = Style::of(doc, entity, background);
         let before = out.len();
         let mut ctx = Ctx {
-            out: &mut out,
+            out,
             fit,
             cull,
             style: &style,
             data_id: format_id(tag, id),
             defs,
+            max_bytes,
         };
         ctx.geometry(&entity.geom);
         // 作図線やポリラインは、範囲の中に何も書かないことがある。書いたものだけを「描いた」と数える。
@@ -159,15 +176,25 @@ pub fn draw(
         } else {
             stats.outside_view += 1;
         }
-        if out.len() > MAX_SVG_BYTES {
-            return Err(format!(
-                "SVG が {} MiB を超えました。region で範囲を絞るか、width / height を小さくしてください",
-                MAX_SVG_BYTES / (1024 * 1024)
-            ));
+        if out.len() > max_bytes {
+            return Err(too_large(max_bytes));
         }
     }
     out.push_str("</g>\n</svg>\n");
-    Ok((out, stats))
+    // 終わりのタグを足したぶんも含めて、上限を守る（ちょうど上限の大きさは通す）。
+    if out.len() > max_bytes {
+        return Err(too_large(max_bytes));
+    }
+    Ok(stats)
+}
+
+/// 上限を超えたときの説明。SVG の大きさは画像の大きさにほとんど依らない（桁が数文字変わるだけ）ので、
+/// 促すのは `region` で絞ることだけ。
+fn too_large(max_bytes: usize) -> String {
+    format!(
+        "SVG が上限 {} を超えました。region で範囲を絞ってください（図形の数が多すぎます）",
+        crate::render::format_bytes(max_bytes)
+    )
 }
 
 /// 図形の見た目。
@@ -206,6 +233,8 @@ struct Ctx<'a> {
     style: &'a Style,
     data_id: String,
     defs: &'a DefinitionTable,
+    /// `out` の大きさの上限。
+    max_bytes: usize,
 }
 
 impl Ctx<'_> {
@@ -223,12 +252,12 @@ impl Ctx<'_> {
                     self.line(&seg);
                 }
             }
-            Geometry::Polyline(p) => {
-                let points: Vec<Point2> = p.vertices.clone();
-                self.path_through(&points, p.closed);
-            }
+            Geometry::Polyline(p) => self.path_through(&p.vertices, p.closed),
             Geometry::Instance(i) => {
                 for inner in component::resolve(i, self.defs) {
+                    if self.is_full() {
+                        return;
+                    }
                     // 展開した図形ごとにも、表示範囲との交わりを見る（インスタンス全体の範囲は広い）。
                     if self.cull.intersects(&inner.bbox(self.defs)) {
                         self.geometry(&inner);
@@ -251,8 +280,13 @@ impl Ctx<'_> {
         );
     }
 
+    /// 上限に達したか（以降は何も書かない）。
+    fn is_full(&self) -> bool {
+        self.out.len() > self.max_bytes
+    }
+
     fn circle(&mut self, c: &Circle) {
-        if !self.cull.intersects(&c.bbox()) {
+        if !self.cull.intersects(&c.bbox()) || !ring_touches(c.center, c.radius, self.cull) {
             return;
         }
         if self.fit.len_to_px(c.radius) > MAX_NATIVE_ARC_RADIUS_PX {
@@ -271,7 +305,7 @@ impl Ctx<'_> {
     }
 
     fn arc(&mut self, a: &Arc) {
-        if !self.cull.intersects(&a.bbox()) {
+        if !self.cull.intersects(&a.bbox()) || !ring_touches(a.center, a.radius, self.cull) {
             return;
         }
         let sweep = a.sweep();
@@ -329,6 +363,9 @@ impl Ctx<'_> {
     }
 
     /// 点列を結ぶ折れ線。1 本ごとに表示範囲で切り、つながっている区間は 1 つの `<path>` にする。
+    ///
+    /// `out` へ直接書き、上限（`max_bytes`）を超えたらその場で打ち切る（頂点が数百万あっても、
+    /// 上限を超えたぶんは書かない）。
     fn path_through(&mut self, points: &[Point2], closed: bool) {
         let n = points.len();
         let count = match n {
@@ -336,10 +373,15 @@ impl Ctx<'_> {
             _ if closed => n,
             _ => n - 1,
         };
-        let mut d = String::new();
+        let start = self.out.len();
+        self.out.push_str("<path d=\"");
+        let body = self.out.len();
         let mut pen: Option<Point2> = None;
         let mut all_inside = true;
         for i in 0..count {
+            if self.is_full() {
+                return;
+            }
             let seg = Line::new(points[i], points[(i + 1) % n]);
             let Some(clipped) = seg.clip_to(self.cull) else {
                 all_inside = false;
@@ -349,26 +391,44 @@ impl Ctx<'_> {
             let continues = pen.is_some_and(|p| p.eq_tol(clipped.a));
             if !continues {
                 let a = self.fit.to_px(clipped.a);
-                let _ = write!(d, "M{} {}", num(a.x), num(a.y));
+                let _ = write!(self.out, "M{} {}", num(a.x), num(a.y));
             }
             let b = self.fit.to_px(clipped.b);
-            let _ = write!(d, "L{} {}", num(b.x), num(b.y));
+            let _ = write!(self.out, "L{} {}", num(b.x), num(b.y));
             // 端が切られていたら、ここでペンを上げる。
             all_inside &= clipped.a.eq_tol(seg.a) && clipped.b.eq_tol(seg.b);
             pen = clipped.b.eq_tol(seg.b).then_some(clipped.b);
         }
-        if d.is_empty() {
+        if self.out.len() == body {
+            // 範囲の中に何も書かなかった。
+            self.out.truncate(start);
             return;
         }
         if closed && all_inside {
-            d.push('Z');
+            self.out.push('Z');
         }
-        let _ = writeln!(
-            self.out,
-            "<path d=\"{d}\"{}/>",
-            self.style.attrs(&self.data_id)
-        );
+        let _ = writeln!(self.out, "\"{}/>", self.style.attrs(&self.data_id));
     }
+}
+
+/// 半径 `radius` の円周が、矩形 `rect` と交わりうるか（矩形が円の内側に丸ごと入るときと、
+/// 円が矩形から離れているときは `false`）。円周上の点までの距離は、矩形の最も近い点から
+/// 最も遠い角までの範囲を取る。
+///
+/// 円弧にも使う（弧の範囲までは見ない。円周が通らなければ弧も通らない、という十分条件）。
+fn ring_touches(center: Point2, radius: f64, rect: Aabb) -> bool {
+    let nearest = Point2::new(
+        center.x.clamp(rect.min.x, rect.max.x),
+        center.y.clamp(rect.min.y, rect.max.y),
+    );
+    let far_x = (center.x - rect.min.x)
+        .abs()
+        .max((center.x - rect.max.x).abs());
+    let far_y = (center.y - rect.min.y)
+        .abs()
+        .max((center.y - rect.max.y).abs());
+    let (near, far) = (center.dist(nearest), far_x.hypot(far_y));
+    near <= radius && radius <= far
 }
 
 /// 中心 `center` から矩形 `rect` が見える角度の窓 `(開始角, 掃引角)` [rad]。
@@ -428,6 +488,9 @@ mod tests {
         serial: 1,
     };
 
+    /// テストで使う、十分に大きい上限。
+    const TEST_MAX_BYTES: usize = 64 * 1024 * 1024;
+
     fn region(x0: f64, y0: f64, x1: f64, y1: f64) -> Aabb {
         Aabb::new(Point2::new(x0, y0), Point2::new(x1, y1))
     }
@@ -468,7 +531,7 @@ mod tests {
     }
 
     fn svg_of(doc: &Document, fit: &Fit, bg: Background) -> (String, Stats) {
-        let (svg, stats) = draw(doc, TAG, fit, bg).unwrap();
+        let (svg, stats) = draw(doc, TAG, fit, bg, TEST_MAX_BYTES).unwrap();
         raster::parse(&svg).unwrap_or_else(|e| panic!("SVG を読めない: {e}\n{svg}"));
         (svg, stats)
     }
@@ -996,6 +1059,140 @@ mod tests {
         ));
         let (svg, stats) = svg_of(&doc_with(vec![on_zero(away)]), &fit10(), Background::Dark);
         assert_eq!(stats.drawn, 0, "{svg}");
+    }
+
+    /// 書いた結果の大きさ（上限なしで書く）。
+    fn written_len(doc: &Document, fit: &Fit) -> usize {
+        draw(doc, TAG, fit, Background::Dark, TEST_MAX_BYTES)
+            .unwrap()
+            .0
+            .len()
+    }
+
+    /// 上限: ちょうどなら通り、1 バイト超えれば拒む。拒んでも図面は変わらない。
+    #[test]
+    fn size_limit_is_exact_and_explains_what_to_do() {
+        let doc = doc_with(
+            (0..50)
+                .map(|i| on_zero(line(0.0, f64::from(i) * 0.1, 9.0, 3.0)))
+                .collect(),
+        );
+        let fit = fit10();
+        let size = written_len(&doc, &fit);
+        let revision = doc.revision();
+        assert!(draw(&doc, TAG, &fit, Background::Dark, size).is_ok());
+        let e = draw(&doc, TAG, &fit, Background::Dark, size - 1).unwrap_err();
+        assert!(
+            e.contains("SVG") && e.contains("上限") && e.contains("region"),
+            "{e}"
+        );
+        assert!(
+            !e.contains("width"),
+            "SVG の大きさは width / height に依らない: {e}"
+        );
+        assert_eq!(doc.revision(), revision);
+    }
+
+    /// 頂点が数百万のポリライン 1 本でも、上限を超えたところで書くのをやめる
+    /// （書き終えてから数えるのではない）。
+    #[test]
+    fn huge_polyline_stops_being_written_at_the_limit() {
+        // 画像の中で上下に振れる 300 万頂点。
+        let vertices: Vec<Point2> = (0..3_000_000_u32)
+            .map(|i| Point2::new(f64::from(i % 10), f64::from(i % 7) + 1.0))
+            .collect();
+        let doc = doc_with(vec![on_zero(Geometry::Polyline(Polyline::new(
+            vertices, false,
+        )))]);
+        let limit = 100_000;
+        let mut out = String::new();
+        let e = write_svg(&mut out, &doc, TAG, &fit10(), Background::Dark, limit).unwrap_err();
+        assert!(e.contains("上限") && e.contains("region"), "{e}");
+        // 上限を超えた時点で止まる: 数百万頂点ぶん（数十 MB）を書いていない。
+        assert!(out.len() < limit + 200, "{} バイトまで書いた", out.len());
+    }
+
+    /// 展開すると大量になるインスタンスも、上限で止まる。
+    #[test]
+    fn many_geometries_stop_at_the_limit() {
+        let doc = doc_with(
+            (0..5000)
+                .map(|_| on_zero(line(0.0, 1.0, 9.0, 3.0)))
+                .collect(),
+        );
+        let mut out = String::new();
+        let e = write_svg(&mut out, &doc, TAG, &fit10(), Background::Dark, 10_000).unwrap_err();
+        assert!(e.contains("上限"), "{e}");
+        assert!(out.len() < 10_000 + 300, "{} バイト", out.len());
+    }
+
+    /// 表示範囲が円の内側に丸ごと入るとき、円周は 1 本も見えない: 書かず、「描いた」にも数えない。
+    #[test]
+    fn circle_around_the_view_is_not_drawn_or_counted() {
+        let around = |r: f64| Geometry::Circle(Circle::new(Point2::new(5.0, 5.0), r));
+        // 範囲（0..10、線幅ぶん広げて 0.15）の角までの距離は約 7.28。
+        for (r, drawn) in [(1.0, 1), (7.0, 1), (7.5, 0), (1.0e3, 0), (5.0e3, 0)] {
+            let (svg, stats) = svg_of(
+                &doc_with(vec![on_zero(around(r))]),
+                &fit10(),
+                Background::Dark,
+            );
+            assert_eq!(stats.drawn, drawn, "r={r}\n{svg}");
+            assert_eq!(stats.outside_view, 1 - drawn, "r={r}");
+            assert_eq!(elements(&svg).len(), drawn, "r={r}");
+        }
+        // 1e5 px（= 1e4 単位）を超える巨大な円（折れ線にする側）も数えない。
+        let (_, stats) = svg_of(
+            &doc_with(vec![on_zero(around(2.0e4))]),
+            &fit10(),
+            Background::Dark,
+        );
+        assert_eq!((stats.drawn, stats.outside_view), (0, 1));
+        // 円周が範囲を横切る位置に中心がある巨大な円は、これまでどおり描く。
+        let far = Geometry::Circle(Circle::new(Point2::new(5.0 - 2.0e4, 5.0), 2.0e4));
+        let (_, stats) = svg_of(&doc_with(vec![on_zero(far)]), &fit10(), Background::Dark);
+        assert_eq!(stats.drawn, 1);
+    }
+
+    #[test]
+    fn arc_around_the_view_is_not_counted() {
+        let (svg, stats) = svg_of(
+            &doc_with(vec![on_zero(arc(5.0, 5.0, 500.0, 0.0, 90.0))]),
+            &fit10(),
+            Background::Dark,
+        );
+        assert_eq!((stats.drawn, stats.outside_view), (0, 1), "{svg}");
+        assert!(elements(&svg).is_empty());
+    }
+
+    #[test]
+    fn ring_touches_covers_inside_crossing_and_outside() {
+        let rect = region(0.0, 0.0, 10.0, 10.0);
+        let c = Point2::new(5.0, 5.0);
+        assert!(ring_touches(c, 3.0, rect)); // 内側の円（範囲に収まる）
+        assert!(ring_touches(c, 6.0, rect)); // 辺を横切る
+        assert!(!ring_touches(c, 8.0, rect)); // 範囲を囲む
+        let outside = Point2::new(30.0, 5.0);
+        assert!(!ring_touches(outside, 10.0, rect)); // 離れている
+        assert!(ring_touches(outside, 25.0, rect)); // 範囲を横切る
+        assert!(!ring_touches(outside, 40.0, rect)); // 範囲を囲む
+    }
+
+    /// 白い背景で黒に寄せるのは白（ACI 7）だけにしてある。ほかの ACI に「白に近い色」が無いことを固定する
+    /// （`AciColor::rgb` の対応表が広がって白に近い色が増えたら、ここが落ちて見直しを促す。
+    /// Issue #90 の 5: ACI 255 は今の対応表では灰 160 で、白ではない）。
+    #[test]
+    fn only_aci_7_is_near_white_in_the_palette() {
+        let luma = |c: AciColor| {
+            let (r, g, b) = c.rgb();
+            0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)
+        };
+        // 黄（ACI 2、輝度 約 237）は色そのものが意味を持つので、白に寄せる側に含めない。
+        let near_white: Vec<u8> = (0..=255_u8)
+            .filter(|n| luma(AciColor(*n)) > 240.0)
+            .collect();
+        assert_eq!(near_white, [7]);
+        assert_eq!(Background::Light.stroke(AciColor(255)), "#a0a0a0");
     }
 
     #[test]

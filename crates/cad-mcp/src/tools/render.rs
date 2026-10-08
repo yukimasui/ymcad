@@ -22,7 +22,8 @@ pub(super) const RENDER: Tool = Tool {
 x = view.min.x + px / pixels_per_unit、y = view.max.y - py / pixels_per_unit（Y は上向きに描く）。\
 region を省くと、表示中の図形（インスタンスの中身を含む。作図線は除く）の範囲に余白を付けて収める。region を指定すると、その範囲が縦横比を保って画像の中央に収まる。\
 非表示のレイヤは描かない。色はレイヤ・図形の色（ACI）、破線は線種のとおり。light の背景では白（ACI 7）を黒で描く。文字は描かない。\
-SVG の各要素の data-id は図形 ID。図面を変えない。",
+SVG の各要素の data-id は図形 ID。図面を変えない。\
+返す大きさに上限がある（PNG は 3.5 MiB、SVG は 256 KiB）。超えたらエラーになるので、width / height を下げるか region で範囲を絞る（SVG は region だけが効く。図形が多い図面は PNG で見る）。",
     schema: || {
         (
             json!({
@@ -265,6 +266,42 @@ mod tests {
             let msg = err(&mut s, "render", args.clone());
             assert!(msg.contains(needle), "{args}: {msg}");
         }
+    }
+
+    /// 返す SVG が上限（256 KiB）を超える図面は `isError` で、`region` を促す。画像・SVG は残らず、図面も変わらない。
+    /// 同じ図面でも PNG だけなら通る（途中の SVG の上限は別）。
+    #[test]
+    fn oversized_svg_is_an_error_that_suggests_region() {
+        use cad_core::command::AddEntities;
+        use cad_core::geom::{Line, Point2};
+        use cad_core::{Entity, Geometry, LayerId};
+
+        let dir = TempDir::new("render-svg-limit");
+        let mut s = server(&dir);
+        let lines: Vec<Entity> = (0..4000)
+            .map(|i| {
+                let y = f64::from(i) * 0.01;
+                Entity::new(
+                    Geometry::Line(Line::new(Point2::new(0.0, y), Point2::new(100.0, y + 1.0))),
+                    LayerId::ZERO,
+                )
+            })
+            .collect();
+        s.doc
+            .apply(Box::new(AddEntities::many("ADD", lines)))
+            .unwrap();
+        let revision = s.doc.revision();
+        let r = call_raw(&mut s, "render", json!({"format": "svg"}));
+        assert_eq!(r["isError"], true, "{r}");
+        assert_eq!(content_types(&r), ["text"]);
+        let msg = r["content"][0]["text"].as_str().unwrap();
+        assert!(msg.contains("256 KiB") && msg.contains("region"), "{msg}");
+        assert_eq!(s.doc.revision(), revision);
+        let r = call_raw(&mut s, "render", json!({"format": "both"}));
+        assert_eq!(r["isError"], true, "{r}");
+        let r = call_raw(&mut s, "render", json!({"format": "png"}));
+        assert_eq!(r["isError"], false, "{r}");
+        assert_eq!(content_types(&r), ["text", "image"]);
     }
 
     #[test]
