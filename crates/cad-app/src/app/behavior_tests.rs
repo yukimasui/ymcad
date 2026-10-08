@@ -17,6 +17,7 @@ use crate::cmdline::LineKind;
 
 mod hover;
 mod properties;
+mod rename;
 mod trim_preview;
 
 /// 画面の大きさ [px]。

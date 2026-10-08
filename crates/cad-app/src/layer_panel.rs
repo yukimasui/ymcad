@@ -54,6 +54,8 @@ pub struct LayerPanel {
     rename_target: Option<LayerId>,
     /// 編集中の名前。
     rename_buffer: String,
+    /// 改名の入力欄を出した直後で、まだフォーカスを渡していないか。
+    rename_focus_pending: bool,
     /// 新規レイヤ名の入力。
     new_layer_name: String,
     /// 色見本を開いているレイヤ。
@@ -73,11 +75,19 @@ impl LayerPanel {
         self.open
     }
 
+    /// 名前を編集中のレイヤ（テスト用）。
+    #[cfg(test)]
+    #[must_use]
+    pub fn renaming(&self) -> Option<LayerId> {
+        self.rename_target
+    }
+
     /// 開閉を切り替える。
     pub fn toggle(&mut self) {
         self.open = !self.open;
         if !self.open {
             self.rename_target = None;
+            self.rename_focus_pending = false;
             self.color_picker_for = None;
         }
     }
@@ -101,6 +111,16 @@ impl LayerPanel {
         let mut commands: Vec<Box<dyn Command>> = Vec::new();
         if !self.open {
             return commands;
+        }
+
+        // 改名中のレイヤが Undo などで消えたら改名をやめる。行が描かれないまま残ると、
+        // 戻ってきたときにフォーカスの無い入力欄だけが出る。
+        if self
+            .rename_target
+            .is_some_and(|id| doc.layers().get(id).is_none())
+        {
+            self.rename_target = None;
+            self.rename_focus_pending = false;
         }
 
         ui.heading("レイヤ");
@@ -226,15 +246,24 @@ impl LayerPanel {
                 (ui.available_width() - ROW_RIGHT_WIDTH - ui.spacing().item_spacing.x * 2.0)
                     .max(NAME_MIN_WIDTH);
             if self.rename_target == Some(id) {
+                let edit_id = egui::Id::new(("layer_rename", id.index()));
+                if std::mem::take(&mut self.rename_focus_pending) {
+                    focus_with_all_selected(ui, edit_id, &self.rename_buffer);
+                }
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.rename_buffer)
+                        .id(edit_id)
                         .desired_width(name_width.min(120.0)),
                 );
-                let commit = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if commit {
-                    let new_name = self.rename_buffer.trim().to_owned();
-                    if !new_name.is_empty() && new_name != layer.name {
-                        commands.push(Box::new(RenameLayer::new(id, new_name)));
+                // フォーカスが外れたら改名を終える。Enter なら確定、それ以外（Esc・ほかの場所の
+                // クリック・Tab）はやめる。Esc は egui がフレームの最初にフォーカスを外すので、
+                // コマンドラインは奪わない（ADR-0035 の前フレームのフォーカスを見る判定）。
+                if response.lost_focus() {
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        let new_name = self.rename_buffer.trim().to_owned();
+                        if !new_name.is_empty() && new_name != layer.name {
+                            commands.push(Box::new(RenameLayer::new(id, new_name)));
+                        }
                     }
                     self.rename_target = None;
                 }
@@ -248,6 +277,7 @@ impl LayerPanel {
                 if label.double_clicked() && !is_zero {
                     self.rename_target = Some(id);
                     self.rename_buffer = layer.name.clone();
+                    self.rename_focus_pending = true;
                 }
                 // ツールチップには常に全体の名前を出す。省略されたかどうかを幅で判定すると、
                 // 全角文字では文字の切れ目の余りで外れ、省略されているのに出ないことがあった。
@@ -351,6 +381,26 @@ impl LayerPanel {
     }
 }
 
+/// 入力欄 `id` にフォーカスを渡し、中身 `text` を全部選んだ状態にする。打てばそのまま置き換わる。
+///
+/// **入力欄を描く前に呼ぶこと。** フォーカスの無い `TextEdit` は描くときに選択範囲を
+/// キャレット 1 つに縮めるので、描いた後にフォーカスを渡すと全選択が残らない。
+///
+/// フォーカスを渡さないと、キー入力はコマンドラインのものになる（コマンドラインは
+/// 誰もフォーカスを持っていなければ自分で取り直す）。打った名前がコマンドラインへ入り、
+/// Enter でコマンドとして実行されていた（Issue #68）。
+fn focus_with_all_selected(ui: &egui::Ui, id: egui::Id, text: &str) {
+    ui.memory_mut(|m| m.request_focus(id));
+    let mut state = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::two(
+            egui::text::CCursor::new(0),
+            egui::text::CCursor::new(text.chars().count()),
+        )));
+    state.store(ui.ctx(), id);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,9 +432,11 @@ mod tests {
         let mut p = LayerPanel::new();
         p.toggle();
         p.rename_target = Some(LayerId::ZERO);
+        p.rename_focus_pending = true;
         p.color_picker_for = Some(LayerId::ZERO);
         p.toggle();
         assert!(p.rename_target.is_none());
+        assert!(!p.rename_focus_pending);
         assert!(p.color_picker_for.is_none());
     }
 
