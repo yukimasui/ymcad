@@ -17,7 +17,7 @@ use crate::render;
 use crate::resolved::ResolvedInstances;
 use crate::ribbon::Ribbon;
 use crate::selection::WindowMode;
-use crate::session::{Session, UiAction};
+use crate::session::{ClickTarget, Session, UiAction};
 use crate::snap::SnapState;
 use crate::viewport::Viewport;
 
@@ -142,6 +142,11 @@ pub struct CadApp {
     hover: Hover,
     /// 矩形選択のドラッグ中の状態。
     rect_drag: Option<RectDrag>,
+    /// グリップの上で押してドラッグし、掴んだまま離すのを待っているか（Issue #30 ユーザー判断 2）。
+    ///
+    /// ドラッグを始めた時点で掴み、離したときのボタンの解放は確定のクリックにしない
+    /// （確定は次のクリック）。
+    grip_drag: bool,
     /// 直近フレームのカーソル位置（モデル座標）。
     cursor_model: Option<Point2>,
     /// 読み込めた日本語フォントの情報。読み込めなかった場合は `None`。
@@ -174,6 +179,7 @@ impl CadApp {
             snapped: None,
             hover: Hover::new(),
             rect_drag: None,
+            grip_drag: false,
             cursor_model: None,
             font_status,
             draw_timer: DrawTimer::new(),
@@ -245,7 +251,7 @@ impl CadApp {
                     tooltip: layer_tooltip,
                     ..InfoItem::new(format!("レイヤ {short_name}"))
                 },
-                InfoItem::new(format!("選択 {}", self.session.selection.len())),
+                self.selection_item(),
                 InfoItem::new(format!("要素 {}", self.doc.entities().len())),
                 InfoItem::new(format!("倍率 {:.6}", self.viewport.scale())),
             ];
@@ -265,6 +271,23 @@ impl CadApp {
             )));
             show_while_fits(ui, items, separator_width);
         });
+    }
+
+    /// ステータスバーの「選択」の項目。選択数が多くてグリップを出していないときは、そう添える
+    /// （Issue #30 ユーザー判断 4）。
+    fn selection_item(&self) -> InfoItem {
+        let n = self.session.selection.len();
+        if self.session.grips_suppressed() {
+            InfoItem {
+                tooltip: Some(format!(
+                    "グリップは選択が {MAX_GRIPS} 個以下のときだけ出ます",
+                    MAX_GRIPS = crate::session::MAX_GRIP_SELECTION
+                )),
+                ..InfoItem::new(format!("選択 {n}（グリップなし）"))
+            }
+        } else {
+            InfoItem::new(format!("選択 {n}"))
+        }
     }
 
     fn command_area(&mut self, ui: &mut egui::Ui) {
@@ -459,8 +482,9 @@ impl CadApp {
             None
         };
         let pick_tolerance = self.viewport.px_to_model_len(PICK_RADIUS_PX);
+        let shift = ui.input(|i| i.modifiers.shift);
         self.hover
-            .update(&self.session, &self.doc, hover_at, pick_tolerance);
+            .update(&self.session, &self.doc, hover_at, pick_tolerance, shift);
 
         painter.rect_filled(response.rect, 0.0, ui.visuals().extreme_bg_color);
         render::draw_grid(&painter, &self.viewport, ui.visuals());
@@ -504,6 +528,20 @@ impl CadApp {
                 self.doc.definitions(),
                 std::slice::from_ref(g),
             );
+        }
+
+        // グリップ（Issue #30）。図形と仮の形の上に描く。乗せているものは大きく、掴んでいるものは赤。
+        let grips = self.session.grips(&self.doc);
+        let hovered = self.hover.hovered_grip();
+        render::draw_grips(
+            &painter,
+            &self.viewport,
+            &grips,
+            hovered,
+            &self.session.hot_grips(),
+        );
+        if let Some(g) = hovered {
+            render::draw_grip_label(&painter, &self.viewport, &g);
         }
 
         if let Some(hit) = tracked.and_then(|t| t.polar) {
@@ -565,6 +603,22 @@ impl CadApp {
         // 押した位置を使うと、スナップ表示と入力結果がずれる。
         let released_pos = response.interact_pointer_pos();
 
+        // ---- グリップの上で押して始めたドラッグ（Issue #30 ユーザー判断 2） ----
+        //
+        // 押してドラッグした時点で掴んでいるので、離したときの解放は確定のクリックにしない
+        // （確定は次のクリック）。ドラッグの途中で Esc で取り消していても、解放は捨てる
+        // （待機中の解放として扱うと、離した位置で選択が変わる）。
+        if self.grip_drag {
+            if released {
+                self.grip_drag = false;
+                return None;
+            }
+            if !response.dragged_by(egui::PointerButton::Primary) {
+                // 解放を見届けられなかった（キャンバスの外で離したなど）。次のクリックを捨てない。
+                self.grip_drag = false;
+            }
+        }
+
         // ---- 点の入力待ち中 ----
         //
         // この状態では矩形選択に入らないので、離されたら常に点として拾ってよい。
@@ -580,6 +634,12 @@ impl CadApp {
 
         // ---- 左ドラッグによる矩形選択 ----
         if response.drag_started_by(egui::PointerButton::Primary) {
+            // グリップの上で押してドラッグしたら、矩形選択にせずにその場で掴む。
+            // 当たりは押した位置で見る（ドラッグと判定された時点ではもう数 px 動いている）。
+            if self.grab_grip_at_press(ui, shift, pick_tolerance) {
+                self.grip_drag = true;
+                return None;
+            }
             if let Some(from) = response.interact_pointer_pos() {
                 self.rect_drag = Some(RectDrag { from, shift });
             }
@@ -621,6 +681,22 @@ impl CadApp {
         }
 
         None
+    }
+
+    /// 押した位置がグリップの上なら掴んで `true`。クリックと同じ `Session::click_target` で決める。
+    fn grab_grip_at_press(&mut self, ui: &egui::Ui, shift: bool, pick_tolerance: f64) -> bool {
+        let Some(origin) = ui.input(|i| i.pointer.press_origin()) else {
+            return false;
+        };
+        let model = self.viewport.screen_to_model(origin);
+        let target =
+            self.session
+                .click_target(model, pick_tolerance, shift, &self.doc, self.hover.picker());
+        let ClickTarget::Grip(grip) = target else {
+            return false;
+        };
+        self.session.start_grip(&grip, &self.doc);
+        self.session.is_gripping()
     }
 
     /// スクリーン座標を入力点として `Session` へ渡す。
@@ -907,6 +983,7 @@ impl CadApp {
             snapped,
             hover,
             rect_drag,
+            grip_drag,
             // 次のフレームのポインタ位置で上書きされる。
             cursor_model: _,
             font_status: _,
@@ -932,6 +1009,8 @@ impl CadApp {
         // 偶然重なっても古い要約が残らないよう明示的に捨てる。
         properties_panel.invalidate();
         *rect_drag = None;
+        // 前の図面のグリップを掴んだドラッグ（`document_replaced` がグリップを取り消している）。
+        *grip_drag = false;
         // 座標の欄も最小の幅へ戻す（広がったままにしない）。
         *coord_width = COORD_MIN_WIDTH;
     }
@@ -1160,6 +1239,12 @@ impl CadApp {
     #[cfg(test)]
     pub fn ribbon(&self) -> &Ribbon {
         &self.ribbon
+    }
+
+    /// 表示範囲（スクリーンショットのテストが図形の画面上の位置を求めるため）。
+    #[cfg(test)]
+    pub fn viewport(&self) -> &Viewport {
+        &self.viewport
     }
 
     /// 画面上端のリボンを描き、押されたコマンドを始める。

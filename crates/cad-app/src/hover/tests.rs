@@ -232,7 +232,7 @@ fn grouped(lock_member: bool) -> (Document, Vec<EntityId>) {
 
 fn highlighted_at(s: &Session, doc: &Document, at: Point2) -> Vec<EntityId> {
     let mut h = Hover::new();
-    h.update(s, doc, Some(at), 1.0);
+    h.update(s, doc, Some(at), 1.0, false);
     h.highlighted().to_vec()
 }
 
@@ -288,9 +288,9 @@ fn no_position_highlights_nothing() {
     let (doc, ids) = grouped(false);
     let s = Session::new();
     let mut h = Hover::new();
-    h.update(&s, &doc, Some(Point2::new(5.0, 20.0)), 1.0);
+    h.update(&s, &doc, Some(Point2::new(5.0, 20.0)), 1.0, false);
     assert_eq!(h.highlighted(), [ids[2]]);
-    h.update(&s, &doc, None, 1.0);
+    h.update(&s, &doc, None, 1.0, false);
     assert!(h.highlighted().is_empty());
 }
 
@@ -302,21 +302,21 @@ fn the_result_is_reused_while_nothing_changes() {
     let mut h = Hover::new();
     let at = Point2::new(5.0, 20.0);
 
-    h.update(&s, &doc, Some(at), 1.0);
-    h.update(&s, &doc, Some(at), 1.0);
+    h.update(&s, &doc, Some(at), 1.0, false);
+    h.update(&s, &doc, Some(at), 1.0, false);
     assert_eq!(h.computed, 1, "同じなら使い回す");
     // 一度外へ出て戻っても、同じなら使い回す。
-    h.update(&s, &doc, None, 1.0);
-    h.update(&s, &doc, Some(at), 1.0);
+    h.update(&s, &doc, None, 1.0, false);
+    h.update(&s, &doc, Some(at), 1.0, false);
     assert_eq!(h.computed, 1);
 
-    h.update(&s, &doc, Some(Point2::new(5.0, 20.5)), 1.0);
+    h.update(&s, &doc, Some(Point2::new(5.0, 20.5)), 1.0, false);
     assert_eq!(h.computed, 2, "位置が変われば計算し直す");
-    h.update(&s, &doc, Some(Point2::new(5.0, 20.5)), 2.0);
+    h.update(&s, &doc, Some(Point2::new(5.0, 20.5)), 2.0, false);
     assert_eq!(h.computed, 3, "半径が変われば計算し直す");
 
     s.start_command_from_ui("TRIM", &mut doc);
-    h.update(&s, &doc, Some(Point2::new(5.0, 20.5)), 2.0);
+    h.update(&s, &doc, Some(Point2::new(5.0, 20.5)), 2.0, false);
     assert_eq!(h.computed, 4, "段階が変われば計算し直す");
     assert_eq!(h.highlighted(), [ids[2]]);
 
@@ -325,7 +325,7 @@ fn the_result_is_reused_while_nothing_changes() {
         vec![ids[2]],
     )))
     .expect("消せるはず");
-    h.update(&s, &doc, Some(Point2::new(5.0, 20.5)), 2.0);
+    h.update(&s, &doc, Some(Point2::new(5.0, 20.5)), 2.0, false);
     assert_eq!(h.computed, 5, "図面が変われば計算し直す");
     assert!(h.highlighted().is_empty(), "消えた図形は強調しない");
 }
@@ -377,7 +377,7 @@ fn hover_meets_the_frame_budget_with_ten_thousand_entities() {
         let mut rng = Lcg::new(7);
 
         let start = Instant::now();
-        h.update(&s, &doc, Some(Point2::ORIGIN), 5.0);
+        h.update(&s, &doc, Some(Point2::ORIGIN), 5.0, false);
         println!(
             "hover first update (index build) xline {with_xline}: {:?}",
             start.elapsed()
@@ -388,7 +388,7 @@ fn hover_meets_the_frame_budget_with_ten_thousand_entities() {
         for _ in 0..iterations {
             let at = Point2::new(rng.next_f64(-1e5, 1e5), rng.next_f64(-1e5, 1e5));
             let start = Instant::now();
-            h.update(&s, &doc, Some(at), 5.0);
+            h.update(&s, &doc, Some(at), 5.0, false);
             total += start.elapsed();
         }
         assert_eq!(h.computed, 1 + 200, "毎回計算している");
@@ -428,16 +428,16 @@ fn trim_hover_shows_the_part_that_goes_away() {
     let (mut doc, ids, at) = cross();
     let mut s = Session::new();
     let mut h = Hover::new();
-    h.update(&s, &doc, Some(at), 1.0);
+    h.update(&s, &doc, Some(at), 1.0, false);
     assert_eq!(h.highlighted(), [ids[0]], "前提: 待機中も強調はする");
     assert!(h.entity_preview().is_none(), "待機中は結果プレビューなし");
 
     s.start_command_from_ui("TRIM", &mut doc);
-    h.update(&s, &doc, Some(at), 1.0);
+    h.update(&s, &doc, Some(at), 1.0, false);
     assert_eq!(h.highlighted(), [ids[0]]);
     assert_eq!(removed_of(&h), vec![line(10.0, 0.0, 20.0, 0.0)]);
 
-    h.update(&s, &doc, None, 1.0);
+    h.update(&s, &doc, None, 1.0, false);
     assert!(h.entity_preview().is_none(), "カーソルが外なら出さない");
 }
 
@@ -458,12 +458,12 @@ fn switching_tools_in_place_updates_the_preview() {
     let mut s = Session::new();
     let mut h = Hover::new();
     s.start_command_from_ui("TRIM", &mut doc);
-    h.update(&s, &doc, Some(at), 1.0);
+    h.update(&s, &doc, Some(at), 1.0, false);
     assert_eq!(h.highlighted(), [ids[0]]);
     assert_eq!(removed_of(&h), vec![line(3.0, 0.0, 6.0, 0.0)]);
 
     s.start_command_from_ui("EXTEND", &mut doc);
-    h.update(&s, &doc, Some(at), 1.0);
+    h.update(&s, &doc, Some(at), 1.0, false);
     assert_eq!(h.computed, 1, "前提: 強調の結果は使い回している");
     let preview = h.entity_preview().expect("EXTEND のプレビュー");
     assert!(preview.removed.is_empty());
@@ -478,17 +478,17 @@ fn boundaries_are_built_once_per_target_and_revision() {
     s.start_command_from_ui("TRIM", &mut doc);
     let mut h = Hover::new();
     for x in [12.0, 14.0, 16.0, 18.0, 4.0] {
-        h.update(&s, &doc, Some(Point2::new(x, 0.0)), 1.0);
+        h.update(&s, &doc, Some(Point2::new(x, 0.0)), 1.0, false);
         assert!(h.entity_preview().is_some(), "x = {x}");
     }
     assert_eq!(h.boundaries().built, 1, "同じ線分の上では使い回す");
-    h.update(&s, &doc, Some(Point2::new(10.0, 3.0)), 1.0);
+    h.update(&s, &doc, Some(Point2::new(10.0, 3.0)), 1.0, false);
     assert_eq!(h.highlighted(), [ids[1]], "前提: 縦の線分");
     assert_eq!(h.boundaries().built, 2, "対象が変われば作り直す");
 
     // 横の線分の右側を切る（版番号が進む）。
     s.handle_click(Point2::new(15.0, 0.0), false, 1.0, &mut doc, &mut ScanAll);
-    h.update(&s, &doc, Some(Point2::new(10.0, 3.0)), 1.0);
+    h.update(&s, &doc, Some(Point2::new(10.0, 3.0)), 1.0, false);
     assert_eq!(h.boundaries().built, 3, "図面が変われば作り直す");
 }
 
@@ -505,7 +505,7 @@ fn trim_preview_meets_the_frame_budget_with_ten_thousand_entities() {
     let mut rng = Lcg::new(11);
 
     let start = Instant::now();
-    h.update(&s, &doc, Some(Point2::ORIGIN), 5.0);
+    h.update(&s, &doc, Some(Point2::ORIGIN), 5.0, false);
     println!("trim preview first update: {:?}", start.elapsed());
 
     let iterations = 200u32;
@@ -514,7 +514,7 @@ fn trim_preview_meets_the_frame_budget_with_ten_thousand_entities() {
     for _ in 0..iterations {
         let at = Point2::new(rng.next_f64(-1e5, 1e5), 0.0);
         let start = Instant::now();
-        h.update(&s, &doc, Some(at), 5.0);
+        h.update(&s, &doc, Some(at), 5.0, false);
         total += start.elapsed();
         shown += usize::from(h.highlighted() == [long] && h.entity_preview().is_some());
     }
