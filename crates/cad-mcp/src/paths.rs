@@ -340,12 +340,17 @@ mod tests {
         std::os::unix::fs::symlink(dir.path().join("real.ymc"), dir.path().join("link.ymc"))
             .unwrap();
         let r = roots(&dir);
-        assert!(r.resolve_for_read("link.ymc").is_err());
-        assert!(r.resolve_for_write("link.ymc").is_err());
+        // 「通常のファイルではない」で落ちても拒めるが、理由が伝わるようリンクだと言うこと。
+        let link = "シンボリックリンク";
+        assert!(r.resolve_for_read("link.ymc").unwrap_err().contains(link));
+        assert!(r.resolve_for_write("link.ymc").unwrap_err().contains(link));
         // 指す先の無いリンクも同じ。
         std::os::unix::fs::symlink(dir.path().join("none.ymc"), dir.path().join("dangling.ymc"))
             .unwrap();
-        assert!(r.resolve_for_write("dangling.ymc").is_err());
+        assert!(r
+            .resolve_for_write("dangling.ymc")
+            .unwrap_err()
+            .contains(link));
         assert!(r.resolve_for_read("real.ymc").is_ok());
     }
 

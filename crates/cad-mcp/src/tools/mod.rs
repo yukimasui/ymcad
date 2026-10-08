@@ -217,9 +217,15 @@ mod tests {
         let mut s = server(&dir);
         cad_core_add_line(&mut s);
         let msg = err(&mut s, "new_drawing", json!({"discard_change": true}));
-        assert!(msg.contains("discard_change"), "{msg}");
+        assert!(
+            msg.contains("知らない引数") && msg.contains("discard_change"),
+            "{msg}"
+        );
         assert!(s.doc.is_dirty(), "図面は捨てられていない");
         assert_eq!(s.serial, 1);
+        // 引数を取らない道具も同じ。
+        let msg = err(&mut s, "drawing_info", json!({"verbose": true}));
+        assert!(msg.contains("引数を取りません"), "{msg}");
     }
 
     /// 道具の中の panic はサーバーを止めず、`isError` になる。
