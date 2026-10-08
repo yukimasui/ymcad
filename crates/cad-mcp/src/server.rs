@@ -23,6 +23,13 @@ pub struct Server {
     pub(crate) session: u32,
     /// 図面の通し番号。新規・開くたびに増える。図形 ID の頭に入る（[`crate::ids`]）。
     pub(crate) serial: u64,
+    /// 図面を変える道具が panic した（図面が書きかけかもしれない）。その道具の名前。
+    ///
+    /// `Document::apply` はコマンドの途中で panic すると、図形を途中まで書き換えたまま止まる
+    /// （履歴にも積まれず、未保存の印も立たない）。`catch_unwind` でサーバーを生かした後に
+    /// そのまま保存すると、壊れた図面でファイルを上書きしうるので、**印がある間は保存を拒む**。
+    /// 新規・開くで外す。
+    pub(crate) poisoned: Option<&'static str>,
     /// 図面を読み書きしたファイル。新規なら `None`。
     pub(crate) file: Option<OpenedFile>,
     /// `initialize` で取り決めた版。取り決める前は `None`。
@@ -80,6 +87,7 @@ impl Server {
             doc: Document::new(),
             session: crate::ids::new_session(),
             serial: 1,
+            poisoned: None,
             file: None,
             protocol_version: None,
             initialized_notified: false,
@@ -131,10 +139,11 @@ impl Server {
         }
     }
 
-    /// 図面を入れ替える（新規・開く）。通し番号を進める。
+    /// 図面を入れ替える（新規・開く）。通し番号を進め、「壊れた」印を外す。
     pub(crate) fn replace_document(&mut self, doc: Document, file: Option<OpenedFile>) {
         self.doc = doc;
         self.file = file;
         self.serial += 1;
+        self.poisoned = None;
     }
 }

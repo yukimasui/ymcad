@@ -67,7 +67,7 @@ Claude Code 2.1.294 から `--mcp-config` でつなぎ、`sample.ymc`（`write_s
 |---|---|---|
 | `new_drawing{discard_changes?}` | 空の新規図面にする | 図面を捨てる |
 | `open_drawing{path, discard_changes?}` | `.ymc` / `.dxf` を開く | 図面を捨てる |
-| `save_drawing{path?, overwrite?}` | 保存する。`path` を省くと開いた（前に保存した）ファイルへ | **ファイルを書く** |
+| `save_drawing{path?, overwrite?}` | 保存する。`path` を省くと開いた（前に保存した）`.ymc` へ。**開いたのが `.dxf` なら `path` を省けない**（`.ymc` か、明示の `.dxf`） | **ファイルを書く** |
 | `drawing_info` | 図面名・パス・形式・未保存か・数・範囲・取り消せるか・ファイルが他で書き換えられたか・root | 読むだけ |
 | `list_entities{layer?, type?, bbox?, limit?, offset?}` | 図形の要約（id・type・layer・bbox）の一覧。既定 100 件・上限 1000 件。続きは `next_offset` | 読むだけ |
 | `get_entities{ids}` | 図形の全体（レイヤ・色・グループ・形）。1 つでも使えない ID があれば全体を拒む | 読むだけ |
@@ -92,6 +92,10 @@ Claude Code 2.1.294 から `--mcp-config` でつなぎ、`sample.ymc`（`write_s
   - 未保存の変更がある図面を `new_drawing` / `open_drawing` で捨てる → `discard_changes: true`
   - 開いている図面のファイル以外の既存ファイルへ保存する → `overwrite: true`
   - 開いた後に他のプログラムが書き換えたファイル（更新時刻か大きさが違う）へ保存する → `overwrite: true`
+- **開いた `.dxf` へ `path` なしで保存しない**（設計原則 9）。DXF は非可逆なので、確認なしに上書きすると
+  作図線・グループ・パラメータなどが黙って失われる。`.ymc` のパスか、DXF へ書くなら `.dxf` のパスを明示させる
+- **図面を変える道具が内部エラー（panic）で止まったら、その図面は保存できなくなる**（図面が書きかけかもしれないため）。
+  `drawing_info` の `poisoned` が `true` になる。`open_drawing` / `new_drawing` で外れる
 - 上限: 1 行 4 MiB（超えた行は読み捨てて `-32700`）、開くファイル 64 MiB、一覧 1000 件、ID 1000 個、undo / redo 256 回
 - ネットワークもシェルも使いません
 - 守れないもの: 検査と読み書きの間に他のプロセスがファイルを差し替える競合。同じ大きさで更新時刻の分解能の内に

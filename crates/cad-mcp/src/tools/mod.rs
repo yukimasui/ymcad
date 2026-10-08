@@ -7,7 +7,9 @@
 //!   （LLM が読んで直せるように。JSON-RPC のエラーは「知らない道具」「引数がオブジェクトでない」だけ）
 //! - **知らない引数は動かす前に拒む**（`discard_change` のような綴り違いを黙って無視しない）
 //! - 成功の結果は `structuredContent`（オブジェクト）と、同じ JSON の text の両方で返す
-//! - 道具の処理は `catch_unwind` で包む。panic してもサーバーは止まらず、`isError` を返す
+//! - 道具の処理は `catch_unwind` で包む。panic してもサーバーは止まらず、`isError` を返す。
+//!   図面を変える道具（`read_only: false`）が panic したら図面に「壊れた」印を付け、以後の保存を拒む
+//!   （`Server::poisoned`。新規・開くで外す）
 //! - 道具の説明は日本語、フィールド名は英語
 
 mod args;
@@ -136,8 +138,17 @@ fn run_tool(server: &mut Server, tool: &Tool, arguments: Map<String, Value>) -> 
                     .map(|s| (*s).to_owned())
                     .or_else(|| payload.downcast_ref::<String>().cloned())
                     .unwrap_or_default();
+                if tool.read_only {
+                    return Err(format!(
+                        "内部エラーが起きました（{}）。図面は変わっていません。{detail}",
+                        tool.name
+                    ));
+                }
+                // 図面を変える途中で止まったかもしれない。書きかけの図面を保存させない。
+                server.poisoned = Some(tool.name);
                 Err(format!(
-                    "内部エラーが起きました（{}）。drawing_info で図面の状態を確かめてください。{detail}",
+                    "内部エラーが起きました（{}）。図面が書きかけの状態かもしれないので、この図面の保存は\
+                     できなくなりました。open_drawing で開き直すか new_drawing で新規にしてください。{detail}",
                     tool.name
                 ))
             }),
@@ -212,7 +223,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{call_raw, err, server};
+    use super::test_support::{call_raw, err, ok, server};
     use super::*;
     use crate::test_util::TempDir;
 
@@ -259,9 +270,72 @@ mod tests {
             text.contains("内部エラー") && text.contains("わざと"),
             "{text}"
         );
-        // サーバーは続けて使える。
+        // サーバーは続けて使える。読むだけの道具の panic では保存を止めない。
         let r = call_raw(&mut s, "drawing_info", json!({}));
         assert_eq!(r["isError"], false);
+        assert_eq!(r["structuredContent"]["poisoned"], false);
+        assert!(s.poisoned.is_none());
+    }
+
+    /// 図面を変える道具が panic したら、書きかけかもしれない図面の保存を拒む。
+    /// 新規・開くで印が外れる（PR #84 レビューの非ブロッキング 2）。
+    #[test]
+    fn panics_in_editing_tools_block_saving() {
+        let dir = TempDir::new("tools-poison");
+        let mut s = server(&dir);
+        cad_core_add_line(&mut s);
+        ok(&mut s, "save_drawing", json!({"path": "a.ymc"}));
+        let before = std::fs::read(dir.path().join("a.ymc")).unwrap();
+        let tool = Tool {
+            name: "half_edit",
+            title: "",
+            description: "",
+            schema: || (json!({}), &[]),
+            read_only: false,
+            destructive: false,
+            idempotent: false,
+            run: |s, _| {
+                cad_core_add_line(s);
+                panic!("書きかけ")
+            },
+        };
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let r = run_tool(&mut s, &tool, Map::new());
+        std::panic::set_hook(hook);
+        assert_eq!(r["isError"], true, "{r}");
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("保存"));
+
+        let info = ok(&mut s, "drawing_info", json!({}));
+        assert_eq!(info["poisoned"], true);
+        assert_eq!(info["poisoned_by"], "half_edit");
+        for args in [
+            json!({}),
+            json!({"path": "b.ymc"}),
+            json!({"path": "a.ymc", "overwrite": true}),
+        ] {
+            let msg = err(&mut s, "save_drawing", args);
+            assert!(msg.contains("open_drawing"), "{msg}");
+        }
+        assert_eq!(
+            std::fs::read(dir.path().join("a.ymc")).unwrap(),
+            before,
+            "上書きしていない"
+        );
+        assert!(!dir.path().join("b.ymc").exists());
+
+        // 開き直すと印が外れ、保存できる。
+        ok(
+            &mut s,
+            "open_drawing",
+            json!({"path": "a.ymc", "discard_changes": true}),
+        );
+        assert_eq!(ok(&mut s, "drawing_info", json!({}))["poisoned"], false);
+        ok(&mut s, "save_drawing", json!({}));
+        // 新規でも外れる。
+        s.poisoned = Some("x");
+        ok(&mut s, "new_drawing", json!({}));
+        assert!(s.poisoned.is_none());
     }
 
     pub(super) fn cad_core_add_line(s: &mut Server) {
