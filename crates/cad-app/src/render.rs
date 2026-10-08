@@ -6,6 +6,7 @@
 
 use crate::drafting::PolarHit;
 use crate::editing::EditSession;
+use crate::grips::Grip;
 use crate::resolved::ResolvedInstances;
 use crate::selection::{Selection, WindowMode};
 use crate::tools::EntityPreview;
@@ -591,6 +592,97 @@ pub fn draw_selection_rect(painter: &egui::Painter, rect: egui::Rect, mode: Wind
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// グリップ（Issue #30、ADR-0045）
+// ---------------------------------------------------------------------------
+
+/// グリップの一辺 [px]。画面上で一定（ズームに左右されない）。
+pub const GRIP_PX: f32 = 8.0;
+/// 乗せているグリップの一辺 [px]。大きくして「掴める」ことを示す。
+pub const GRIP_HOVER_PX: f32 = 12.0;
+/// グリップの色（青）。選択色（水色）の線の上でも見分けられる濃さ。
+const GRIP_COLOR: egui::Color32 = egui::Color32::from_rgb(0x29, 0x62, 0xff);
+/// 乗せているグリップの色。ホバーの縁取り（紫）と同じ系統にして「乗せている」をそろえる。
+const GRIP_HOVER_COLOR: egui::Color32 = egui::Color32::from_rgb(0xe0, 0x40, 0xfb);
+/// 掴んでいる（ホット）グリップの色（赤）。
+const GRIP_HOT_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0x3d, 0x3d);
+/// グリップの縁の色。明るい線や背景の上でも四角の輪郭が読めるように。
+const GRIP_BORDER_COLOR: egui::Color32 = egui::Color32::from_rgb(0x10, 0x10, 0x10);
+
+/// 選択した図形のグリップを描く。乗せているもの（`hovered`）は大きく紫、掴んでいるもの（`hot`）は赤。
+///
+/// 図形・仮の形の**後**に描く（線に隠れないように）。
+pub fn draw_grips(
+    painter: &egui::Painter,
+    vp: &Viewport,
+    grips: &[Grip],
+    hovered: Option<Grip>,
+    hot: &[Grip],
+) {
+    let same = |a: &Grip, b: &Grip| a.id == b.id && a.handle == b.handle;
+    let clip = vp.rect().expand(GRIP_HOVER_PX);
+    for g in grips {
+        if hot.iter().any(|h| same(h, g)) {
+            continue;
+        }
+        let is_hovered = hovered.is_some_and(|h| same(&h, g));
+        let (size, color) = if is_hovered {
+            (GRIP_HOVER_PX, GRIP_HOVER_COLOR)
+        } else {
+            (GRIP_PX, GRIP_COLOR)
+        };
+        draw_grip_square(painter, vp.model_to_screen(g.at), size, color, clip);
+    }
+    for g in hot {
+        draw_grip_square(
+            painter,
+            vp.model_to_screen(g.at),
+            GRIP_PX,
+            GRIP_HOT_COLOR,
+            clip,
+        );
+    }
+}
+
+fn draw_grip_square(
+    painter: &egui::Painter,
+    c: egui::Pos2,
+    size: f32,
+    color: egui::Color32,
+    clip: egui::Rect,
+) {
+    if !clip.contains(c) {
+        return;
+    }
+    let rect = egui::Rect::from_center_size(c, egui::vec2(size, size));
+    painter.rect_filled(rect, 0.0, color);
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(1.0, GRIP_BORDER_COLOR),
+        egui::StrokeKind::Outside,
+    );
+}
+
+/// 乗せているグリップの横に、掴んで動かしたら何が起きるか（「端点を動かす」など）を出す。
+///
+/// グリップの右上に出す。右下はカーソル横の入力欄（ADR-0034）なので避ける。
+pub fn draw_grip_label(painter: &egui::Painter, vp: &Viewport, grip: &Grip) {
+    let at = vp.model_to_screen(grip.at);
+    let galley = painter.layout_no_wrap(
+        grip.handle.label().to_owned(),
+        egui::FontId::proportional(13.0),
+        egui::Color32::WHITE,
+    );
+    let pos = at + egui::vec2(GRIP_HOVER_PX, -GRIP_HOVER_PX - galley.size().y);
+    painter.rect_filled(
+        egui::Rect::from_min_size(pos, galley.size()).expand(3.0),
+        3.0,
+        egui::Color32::from_black_alpha(0xc0),
+    );
+    painter.galley(pos, galley, egui::Color32::WHITE);
 }
 
 // ---------------------------------------------------------------------------

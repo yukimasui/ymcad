@@ -16,6 +16,7 @@ pub mod component;
 pub mod draw;
 pub mod edit;
 pub mod entity_preview;
+pub mod grip;
 pub mod param;
 
 use cad_core::geom::{Aabb, Point2};
@@ -68,6 +69,9 @@ pub enum StepOutcome {
     Finish,
     /// 入力を受け付けず、メッセージを出して同じ状態のまま待つ。
     Reject(String),
+    /// 何も適用せず、エラーを出して終了する（前提が崩れて続けられないとき。
+    /// グリップ編集で、掴んだ後に図面が変わっていた場合など）。
+    Abort(String),
     /// コマンド間で覚える設定を更新し、同じツールのまま入力を続ける。
     Setting(ToolSettings),
     /// コマンドを適用し、**コンポーネントの編集セッションを始める**。
@@ -235,6 +239,15 @@ pub trait Tool: std::fmt::Debug {
         _at: Point2,
         _ctx: &mut PreviewCtx<'_>,
     ) -> Option<EntityPreview> {
+        None
+    }
+
+    /// グリップ編集（Issue #30、ADR-0045）のツールなら自身。既定は `None`。
+    ///
+    /// `Session` はこれで、グリップ編集だけの扱い（取り消しても選択を残す・空の Enter と `U` で
+    /// 取り消す・コマンド名を打ったら取り消して始める・掴んでいるグリップを描く）を決める。
+    /// コマンド名で分岐しない（名前を変えたときに黙って壊れる。ADR-0043）。
+    fn grip(&self) -> Option<&grip::GripTool> {
         None
     }
 }
