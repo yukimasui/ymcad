@@ -64,8 +64,8 @@ AI エージェントに実装を任せる以上、**「壊れてはいけない
 
 | 検査項目 | 内容 |
 |---|---|
-| 依存方向 | コアが egui / eframe / winit / wgpu / rfd に依存しないこと |
-| 精度 | コアの座標に `f32` が一切出てこないこと（`f64` 一貫） |
+| 依存方向 | コアの依存パッケージが 0 であること。MCP サーバーが GUI とアプリに依存しないこと |
+| 精度 | コアと MCP サーバーに `f32` が一切出てこないこと（`f64` 一貫） |
 | 縮小変換の局所化 | `as f32` が `viewport.rs`（描画直前の 1 箇所）の外に出ないこと |
 | トレランス | `1e-9` 等の直書きが `geom/tolerance.rs` の外に無いこと（テストコードも対象） |
 
@@ -135,6 +135,7 @@ WAYLAND_DISPLAY= cargo run --release
 | [`docs/MANUAL.md`](docs/MANUAL.md) | 操作マニュアル（コマンド一覧・キーバインド・ファイル形式） |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | アーキテクチャと死守する設計原則 |
 | [`docs/DECISIONS.md`](docs/DECISIONS.md) | ADR。**採らなかった選択肢とその理由**を必ず残しています |
+| [`docs/MCP.md`](docs/MCP.md) | MCP サーバー `ymcad-mcp`（Claude Code への登録・道具の一覧・安全策） |
 | [`docs/PROGRESS.md`](docs/PROGRESS.md) | 現在地・積み残し・既知の落とし穴 |
 | [`docs/ROADMAP.md`](docs/ROADMAP.md) | 非スコープの整理（3D / 幾何拘束ソルバ / 印刷 / DWG など） |
 
@@ -143,8 +144,9 @@ WAYLAND_DISPLAY= cargo run --release
 ```
 crates/
 ├── cad-core/   ジオメトリ・エンティティ・コマンド・ファイル入出力（UI 非依存・依存パッケージ 0）
-└── cad-app/    egui アプリケーション（入力処理・描画。リボンのアイコン SVG は assets/icons/）
-tools/          書き出したファイルを Rust とは別実装で検証する Python スクリプト
+├── cad-app/    egui アプリケーション（入力処理・描画。リボンのアイコン SVG は assets/icons/）
+└── cad-mcp/    MCP サーバー ymcad-mcp（LLM が図面ファイルを開いて調べ、保存する。docs/MCP.md）
+tools/          書き出したファイルや MCP サーバーを Rust とは別実装で検証する Python スクリプト
 docs/           マニュアル・アーキテクチャ・ADR・進捗
 ```
 
