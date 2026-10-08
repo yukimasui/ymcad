@@ -453,7 +453,9 @@ fn locking_the_layer_aborts_the_grip() {
     s.apply_external(Box::new(SetLayerProperties::new(l1).locked(true)), &mut doc);
     assert!(!s.is_gripping(), "中断した");
     assert!(
-        errors(&s).iter().any(|e| e.contains("GRIP: 対象の図形")),
+        errors(&s)
+            .iter()
+            .any(|e| e.contains("グリップ編集: 対象の図形")),
         "{:?}",
         errors(&s)
     );

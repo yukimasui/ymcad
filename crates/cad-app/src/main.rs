@@ -8,6 +8,7 @@
 
 mod app;
 mod cmdline;
+mod command_label;
 mod component_panel;
 mod drafting;
 mod editing;
