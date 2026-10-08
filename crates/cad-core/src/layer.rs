@@ -199,6 +199,32 @@ impl LayerTable {
         self.by_name.get(name).copied()
     }
 
+    /// `id` のレイヤを `new_name` に改名してよいかを、適用せずに調べる。
+    ///
+    /// `RenameLayer` コマンドの判定そのもの。レイヤパネルは改名の欄を開いたままにするために、
+    /// 適用の前に同じ判定を見る。**判定を 2 か所に写さず、ここに 1 つだけ置く**（Issue #73）。
+    /// 名前の空・前後の空白は呼び出し側の方針なのでここでは見ない（`"" ` も、`" A"` も別の名前として通る）。
+    ///
+    /// - レイヤ `"0"` は改名できない
+    /// - 存在しないレイヤは改名できない
+    /// - 別のレイヤと同じ名前にはできない（大文字小文字は区別する）。自分自身の名前への改名は通る（何も変わらない）
+    ///
+    /// # Errors
+    ///
+    /// 上のいずれかのとき。
+    pub fn check_rename(&self, id: LayerId, new_name: &str) -> Result<()> {
+        if id == LayerId::ZERO {
+            return Err(CadError::NotEditable("レイヤ \"0\" の名前は変更できません"));
+        }
+        if self.get(id).is_none() {
+            return Err(CadError::LayerNotFound);
+        }
+        if self.by_name(new_name).is_some_and(|other| other != id) {
+            return Err(CadError::NotEditable("同名のレイヤが既に存在します"));
+        }
+        Ok(())
+    }
+
     /// 現在レイヤ。新規に作図した要素はここへ入る。
     #[must_use]
     pub fn current(&self) -> LayerId {
@@ -528,5 +554,37 @@ mod tests {
         assert!(all.contains(&LineType::Dashed));
         assert!(all.contains(&LineType::Center));
         assert!(all.contains(&LineType::Hidden));
+    }
+
+    /// 改名の判定（`check_rename`）。0 と存在しないレイヤと他のレイヤとの衝突だけを断る。
+    #[test]
+    fn check_rename_refuses_zero_missing_and_taken_names() {
+        let mut t = LayerTable::new();
+        let a = t.insert(Layer::new("A", AciColor::WHITE));
+        let b = t.insert(Layer::new("B", AciColor::WHITE));
+
+        assert!(matches!(
+            t.check_rename(LayerId::ZERO, "X"),
+            Err(CadError::NotEditable(_))
+        ));
+        assert!(matches!(
+            t.check_rename(LayerId(999), "X"),
+            Err(CadError::LayerNotFound)
+        ));
+        assert!(matches!(
+            t.check_rename(a, "B"),
+            Err(CadError::NotEditable(_))
+        ));
+        assert!(
+            matches!(t.check_rename(a, "0"), Err(CadError::NotEditable(_))),
+            "レイヤ 0 の名前とも衝突する"
+        );
+
+        assert!(t.check_rename(a, "A").is_ok(), "自分の名前は通る");
+        assert!(t.check_rename(a, "C").is_ok());
+        assert!(t.check_rename(a, "b").is_ok(), "大文字小文字は区別する");
+        assert!(t.check_rename(a, "B ").is_ok(), "前後の空白も名前の一部");
+        assert!(t.check_rename(a, "").is_ok(), "空は呼び出し側の方針");
+        assert_eq!(t.get(b).unwrap().name, "B", "調べるだけで何も変えない");
     }
 }

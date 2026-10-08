@@ -163,18 +163,9 @@ impl RenameLayer {
 
 impl Command for RenameLayer {
     fn execute(&mut self, ctx: &mut EditCtx<'_>) -> Result<()> {
-        if self.target == LayerId::ZERO {
-            return Err(CadError::NotEditable("レイヤ \"0\" の名前は変更できません"));
-        }
-        if ctx.layers().get(self.target).is_none() {
-            return Err(CadError::LayerNotFound);
-        }
-        // 自分自身への改名（no-op）は許可し、別レイヤとの名前衝突だけ拒否する。
-        if let Some(existing) = ctx.layers().by_name(&self.new_name) {
-            if existing != self.target {
-                return Err(CadError::NotEditable("同名のレイヤが既に存在します"));
-            }
-        }
+        // 判定は `LayerTable::check_rename` に 1 つだけ置く（レイヤパネルも適用の前に同じものを見る）。
+        // 自分自身への改名（no-op）は通り、別レイヤとの名前衝突だけ拒否する。
+        ctx.layers().check_rename(self.target, &self.new_name)?;
         let old = ctx.rename_layer(self.target, self.new_name.clone())?;
         self.prev_name = Some(old);
         Ok(())
@@ -630,6 +621,49 @@ mod tests {
 
         assert_eq!(ctx.layers().get(a).unwrap().name, "A");
         assert_eq!(ctx.layers().by_name("A"), Some(a));
+    }
+
+    /// `RenameLayer` の成否と `LayerTable::check_rename` が、どの候補名でも一致すること。
+    /// （判定の二重管理を防ぐ。`RenameLayer` が判定を `check_rename` に任せている証拠でもある）
+    #[test]
+    fn rename_layer_agrees_with_check_rename_for_every_candidate() {
+        let candidates = [
+            "A",
+            "B",
+            "0",
+            "b",
+            "B ",
+            " B",
+            "",
+            " ",
+            "C",
+            "A ",
+            "レイヤ",
+            "ＡＢ",
+        ];
+        for target_name in ["A", "0"] {
+            for candidate in candidates {
+                let (mut entities, mut layers, mut groups, mut definitions) = new_parts();
+                let mut ctx =
+                    EditCtx::new(&mut entities, &mut layers, &mut groups, &mut definitions);
+                let a = ctx.add_layer(Layer::new("A", AciColor::WHITE));
+                let _b = ctx.add_layer(Layer::new("B", AciColor::WHITE));
+                let target = if target_name == "0" { LayerId::ZERO } else { a };
+
+                let expected = ctx.layers().check_rename(target, candidate);
+                let actual = RenameLayer::new(target, candidate).execute(&mut ctx);
+                assert_eq!(
+                    expected.is_ok(),
+                    actual.is_ok(),
+                    "{target_name} -> {candidate:?}"
+                );
+                assert_eq!(
+                    expected.err(),
+                    actual.err(),
+                    "{target_name} -> {candidate:?}"
+                );
+            }
+        }
     }
 
     #[test]
