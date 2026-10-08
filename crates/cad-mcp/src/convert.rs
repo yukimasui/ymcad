@@ -402,20 +402,7 @@ pub fn geometry_from_json(v: &Value, defs: &DefinitionTable) -> Result<Geometry,
             Geometry::Xline(xline.ok_or_else(|| "xline の向きが長さ 0 です".to_owned())?)
         }
         "polyline" => {
-            let vertices = get("vertices")?
-                .as_array()
-                .ok_or_else(|| "polyline の vertices は点の配列で指定してください".to_owned())?;
-            if vertices.len() > crate::limits::MAX_POLYLINE_VERTICES {
-                return Err(format!(
-                    "polyline の頂点が多すぎます（上限 {} 個）",
-                    crate::limits::MAX_POLYLINE_VERTICES
-                ));
-            }
-            let vertices = vertices
-                .iter()
-                .enumerate()
-                .map(|(i, p)| point_from_json(p, &format!("vertices[{i}]")))
-                .collect::<Result<Vec<_>, _>>()?;
+            let vertices = vertices_from_json(get("vertices")?)?;
             let closed = match m.get("closed") {
                 None => false,
                 Some(c) => c
@@ -458,6 +445,189 @@ pub fn geometry_from_json(v: &Value, defs: &DefinitionTable) -> Result<Geometry,
     };
     geom.validate().map_err(|e| e.to_string())?;
     Ok(geom)
+}
+
+/// 既存の図形の、`set` に書いた項目だけを変えた形を作る（`modify_entities`）。
+///
+/// **書かなかった項目は元の値をそのまま使う**（度 ↔ ラジアンの往復もしないので、変えない項目は
+/// ビット単位で元のまま）。項目名と書き方は [`geometry_from_json`] と同じで、別の書き方
+/// （円弧の 3 点・作図線の `through`）も使える。`type` は書いてもよいが、元と同じでなければ拒む。
+///
+/// 変えられないもの（`ReplaceGeometries` の約束。ADR-0040）は、ここで分かりやすい説明で拒む:
+/// 種類・ポリラインの頂点の数・インスタンスの参照する定義・インスタンスのパラメータの上書き。
+///
+/// 作った形は `Geometry::validate` に通す。大きさの上限（[`check_extent`]）は呼び出し側で見る。
+///
+/// # Errors
+///
+/// 知らない項目・変えられない項目・形として成立しない場合。
+pub fn apply_fields(
+    current: &Geometry,
+    set: &Map<String, Value>,
+    defs: &DefinitionTable,
+) -> Result<Geometry, String> {
+    let ty = geometry_type(current);
+    if let Some(t) = set.get("type") {
+        if t.as_str() != Some(ty) {
+            return Err(format!(
+                "図形の種類は変えられません（いまは {ty}）。種類を変えるなら delete_entities と add_entities で作り直してください（ID は変わります）"
+            ));
+        }
+    }
+    let allowed: &[&str] = match current {
+        Geometry::Line(_) => &["type", "start", "end"],
+        Geometry::Circle(_) => &["type", "center", "radius"],
+        Geometry::Arc(_) => &[
+            "type",
+            "center",
+            "radius",
+            "start_angle",
+            "end_angle",
+            "start",
+            "through",
+            "end",
+        ],
+        Geometry::Xline(_) => &["type", "origin", "angle", "direction", "through"],
+        Geometry::Polyline(_) => &["type", "vertices", "closed"],
+        Geometry::Instance(_) => &[
+            "type",
+            "component",
+            "origin",
+            "rotation",
+            "scale",
+            "flipped",
+            "overrides",
+        ],
+    };
+    if let Some(extra) = set.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(format!(
+            "{ty} に不明な項目 {extra} があります（使えるのは {}）",
+            allowed.join(", ")
+        ));
+    }
+    let point = |key: &str, old: Point2| match set.get(key) {
+        None => Ok(old),
+        Some(v) => point_from_json(v, key),
+    };
+    let number = |key: &str, old: f64| match set.get(key) {
+        None => Ok(old),
+        Some(v) => number_from_json(v, key),
+    };
+    let angle = |key: &str, old_rad: f64| match set.get(key) {
+        None => Ok(old_rad),
+        Some(v) => number_from_json(v, key).map(deg_to_rad),
+    };
+    let flag = |key: &str, old: bool| match set.get(key) {
+        None => Ok(old),
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| format!("{ty} の {key} は true か false で指定してください")),
+    };
+
+    let geom = match current {
+        Geometry::Line(l) => Geometry::Line(Line::new(point("start", l.a)?, point("end", l.b)?)),
+        Geometry::Circle(c) => Geometry::Circle(Circle::new(
+            point("center", c.center)?,
+            number("radius", c.radius)?,
+        )),
+        Geometry::Arc(a) => {
+            let by_points = ["start", "through", "end"];
+            if by_points.iter().any(|k| set.contains_key(*k)) {
+                // 3 点で書くなら丸ごと置き換える（一部の点だけでは形が決まらない）。
+                let mut whole = set.clone();
+                whole.insert("type".into(), json!("arc"));
+                geometry_from_json(&Value::Object(whole), defs)?
+            } else {
+                Geometry::Arc(Arc::new(
+                    point("center", a.center)?,
+                    number("radius", a.radius)?,
+                    angle("start_angle", a.start_angle)?,
+                    angle("end_angle", a.end_angle)?,
+                ))
+            }
+        }
+        Geometry::Xline(x) => {
+            let keeps_direction = !["angle", "direction", "through"]
+                .iter()
+                .any(|k| set.contains_key(*k));
+            if keeps_direction {
+                Geometry::Xline(Xline {
+                    origin: point("origin", x.origin)?,
+                    direction: x.direction,
+                })
+            } else {
+                let mut whole = set.clone();
+                whole.insert("type".into(), json!("xline"));
+                whole
+                    .entry("origin")
+                    .or_insert_with(|| point_to_json(x.origin));
+                geometry_from_json(&Value::Object(whole), defs)?
+            }
+        }
+        Geometry::Polyline(p) => {
+            let vertices = match set.get("vertices") {
+                None => p.vertices.clone(),
+                Some(v) => vertices_from_json(v)?,
+            };
+            if vertices.len() != p.vertices.len() {
+                return Err(format!(
+                    "ポリラインの頂点の数は変えられません（いまは {} 個、指定は {} 個）。\
+                     数を変えるなら delete_entities と add_entities で作り直してください（ID は変わります）",
+                    p.vertices.len(),
+                    vertices.len()
+                ));
+            }
+            Geometry::Polyline(Polyline::new(vertices, flag("closed", p.closed)?))
+        }
+        Geometry::Instance(i) => {
+            if let Some(c) = set.get("component") {
+                let now = defs.get(i.definition).map(|d| d.name.as_str());
+                if c.as_str() != now {
+                    return Err(
+                        "インスタンスの参照するコンポーネントは変えられません（置き換えるなら削除して挿し直してください）"
+                            .to_owned(),
+                    );
+                }
+            }
+            if let Some(o) = set.get("overrides") {
+                if overrides_from_json(o)? != i.overrides {
+                    return Err(
+                        "インスタンスのパラメータ（overrides）は modify_entities では変えられません。\
+                         同じ値を渡し返すのはかまいません（get_entities の出力をそのまま使えるように）"
+                            .to_owned(),
+                    );
+                }
+            }
+            let pl = i.placement;
+            let placement = Placement::new(
+                point("origin", pl.origin)?,
+                angle("rotation", pl.rotation)?,
+                number("scale", pl.scale)?,
+                flag("flipped", pl.flipped)?,
+            )
+            .map_err(|e| e.to_string())?;
+            Geometry::Instance(i.with_placement(placement))
+        }
+    };
+    geom.validate().map_err(|e| e.to_string())?;
+    Ok(geom)
+}
+
+/// ポリラインの頂点の配列を読む。数に上限（[`crate::limits::MAX_POLYLINE_VERTICES`]）。
+fn vertices_from_json(v: &Value) -> Result<Vec<Point2>, String> {
+    let list = v
+        .as_array()
+        .ok_or_else(|| "polyline の vertices は点の配列で指定してください".to_owned())?;
+    if list.len() > crate::limits::MAX_POLYLINE_VERTICES {
+        return Err(format!(
+            "polyline の頂点が多すぎます（上限 {} 個）",
+            crate::limits::MAX_POLYLINE_VERTICES
+        ));
+    }
+    list.iter()
+        .enumerate()
+        .map(|(i, p)| point_from_json(p, &format!("vertices[{i}]")))
+        .collect()
 }
 
 /// インスタンスのパラメータの上書きを JSON から読む。数値・真偽・選択肢（文字列）。
@@ -872,6 +1042,22 @@ mod tests {
         }
         assert!(number_from_json(&json!(f64::MAX), "v").is_ok());
         assert!(number_from_json(&json!(null), "v").is_err());
+    }
+
+    /// JSON の数値は最後のビットまで正確に読む（serde_json の float_roundtrip）。既定の読み取りは
+    /// 1 ULP ずれることがあり、get_entities の出力を modify_entities へ渡し返すと形が黙ってずれた。
+    #[test]
+    fn json_numbers_round_trip_exactly() {
+        for x in [
+            0.969_015_731_406_869_6_f64,
+            1.0 / 3.0,
+            std::f64::consts::PI * 1e5,
+            123.456_789_012_345_67,
+        ] {
+            let text = json!(x).to_string();
+            let back: Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(back.as_f64().unwrap().to_bits(), x.to_bits(), "{text}");
+        }
     }
 
     /// 数値の代わりに式の文字列を書ける。式の中の角度は度。
