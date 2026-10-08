@@ -13,7 +13,7 @@ use cad_core::command::{
     AddLayer, DeleteLayer, MoveEntitiesToLayer, RenameLayer, SetCurrentLayer, SetLayerProperties,
 };
 use cad_core::layer::LineType;
-use cad_core::{AciColor, Command, Document, LayerId};
+use cad_core::{AciColor, CadError, Command, Document, LayerId};
 
 use crate::properties_panel::{BUSY_COLOR, DROP_NOTE_COLOR};
 use crate::selection::Selection;
@@ -85,7 +85,7 @@ pub enum PanelNotice {
 enum RenameEnd {
     /// この名前で改名する。
     Commit(String),
-    /// 改名できない（同名のレイヤがある）。欄は開いたままにする。中身は利用者向けの案内。
+    /// 改名できない（同名のレイヤがあるなど。`LayerTable::check_rename` が断った）。欄は開いたままにする。中身は利用者向けの案内。
     Rejected(String),
     /// 改名をやめる。`tell` … 打った名前を捨てたことを案内するか。
     Dropped { tell: bool },
@@ -108,14 +108,15 @@ fn end_rename(doc: &Document, id: LayerId, buffer: &str, enter: bool, escape: bo
         if new_name.is_empty() || !changed {
             return RenameEnd::Dropped { tell: false };
         }
-        // `RenameLayer` と同じ判定。適用してから失敗を知るのでは欄を開いたままにできない。
-        if doc
-            .layers()
-            .by_name(new_name)
-            .is_some_and(|other| other != id)
-        {
+        // `RenameLayer` が適用の前に見るのと同じ判定（`LayerTable::check_rename`）。
+        // 適用してから失敗を知るのでは欄を開いたままにできない。判定を写さず同じ関数を呼ぶ。
+        if let Err(e) = doc.layers().check_rename(id, new_name) {
+            let why = match e {
+                CadError::NotEditable(why) => why.to_owned(),
+                other => other.to_string(),
+            };
             return RenameEnd::Rejected(format!(
-                "レイヤ名の変更: 同名のレイヤ「{new_name}」が既にあります（別の名前にして Enter、やめるなら Esc）"
+                "レイヤ名の変更: 「{new_name}」にできません。{why}（別の名前にして Enter、やめるなら Esc）"
             ));
         }
         return RenameEnd::Commit(new_name.to_owned());
@@ -619,6 +620,66 @@ mod tests {
             RenameEnd::Dropped { tell: false },
             "変えていない"
         );
+    }
+
+    /// 改名の欄が「確定」と判定する名前と、`RenameLayer` が成功する名前が一致すること。
+    ///
+    /// 判定は `LayerTable::check_rename` に 1 つだけ置いてあるが、パネルがそれを呼ばなくなった
+    /// （または手前で別の条件を足した）ときに、欄を閉じたのに改名が失敗する、のを捕まえる。
+    /// 空・元のまま・前後の空白だけの差は、パネルが先に「やめる」にする（コマンドを作らない）。
+    #[test]
+    fn end_rename_commits_exactly_the_names_rename_layer_accepts() {
+        let candidates = [
+            "L1",
+            "L2",
+            "0",
+            "l2",
+            "L2 ",
+            " L2 ",
+            "L3",
+            "WALL",
+            "",
+            "  ",
+            "ＷＡＬＬ",
+            "壁",
+        ];
+        for candidate in candidates {
+            let make = || {
+                let mut doc = Document::new();
+                for name in ["L1", "L2"] {
+                    doc.apply(Box::new(AddLayer::new(name, AciColor::WHITE)))
+                        .expect("レイヤ");
+                }
+                doc
+            };
+            let mut doc = make();
+            let l1 = doc.layers().by_name("L1").expect("L1");
+            let decided = end_rename(&doc, l1, candidate, true, false);
+            let applied = doc.apply(Box::new(RenameLayer::new(l1, candidate.trim())));
+            match decided {
+                RenameEnd::Commit(name) => {
+                    assert_eq!(name, candidate.trim());
+                    assert!(
+                        applied.is_ok(),
+                        "{candidate:?}: 確定と判定したのに失敗: {applied:?}"
+                    );
+                }
+                RenameEnd::Rejected(_) => {
+                    assert!(
+                        applied.is_err(),
+                        "{candidate:?}: 断ったのに RenameLayer は通る"
+                    );
+                }
+                RenameEnd::Dropped { .. } => {
+                    // パネルの方針でやめる名前（空・元のまま）。コマンドは作らないので、ここでは
+                    // 「断る名前」と取り違えていないことだけ見る。
+                    assert!(
+                        candidate.trim().is_empty() || candidate.trim() == "L1",
+                        "{candidate:?}: やめる理由が無い"
+                    );
+                }
+            }
+        }
     }
 
     /// パレットは ACI の標準色を含むこと。

@@ -10,6 +10,7 @@ use cad_core::{Document, Entity, EntityId, Geometry};
 
 use crate::cmdline::dimension::{self, DimKind};
 use crate::cmdline::{coord, CommandLine, LineKind, Submission};
+use crate::command_label::display_name;
 use crate::editing::EditSession;
 use crate::grips::{self, Grip, GripGroup};
 use crate::input::ViewAction;
@@ -381,16 +382,19 @@ impl Session {
         if held_lost || (uses_selection && dropped > 0 && self.selection.is_empty()) {
             self.cancel();
             self.cmdline.error(format!(
-                "{name}: 対象の図形が削除・ロック・非表示になったため中断しました"
+                "{}: 対象の図形が削除・ロック・非表示になったため中断しました",
+                display_name(name)
             ));
         } else if uses_selection && dropped > 0 {
             self.cmdline.info(format!(
-                "{name}: 削除・ロック・非表示になった {dropped} 個を対象から外しました"
+                "{}: 削除・ロック・非表示になった {dropped} 個を対象から外しました",
+                display_name(name)
             ));
         } else if self.awaiting_selection && dropped > 0 {
             // 選択待ちは選び直せるので中断しない（全部外れても）。外れたことだけ案内する。
             self.cmdline.info(format!(
-                "{name}: 削除・ロック・非表示になった {dropped} 個を選択から外しました"
+                "{}: 削除・ロック・非表示になった {dropped} 個を選択から外しました",
+                display_name(name)
             ));
         }
     }
@@ -822,7 +826,9 @@ impl Session {
             _ => unreachable!("直前に処理済み"),
         };
         match result {
-            Ok(Some(name)) => self.cmdline.info(format!("{}: {name}", cmd.name())),
+            Ok(Some(name)) => self
+                .cmdline
+                .info(format!("{}: {}", cmd.name(), display_name(name))),
             Ok(None) => self.cmdline.info(match cmd {
                 Immediate::Undo => "これ以上取り消せません",
                 _ => "やり直せる操作がありません",
@@ -899,7 +905,7 @@ impl Session {
                 self.cmdline
                     .info("コンポーネントを編集中です（ENDCOMP で確定）");
             }
-            StepOutcome::Abort(msg) => self.cmdline.error(format!("{name}: {msg}")),
+            StepOutcome::Abort(msg) => self.cmdline.error(format!("{}: {msg}", display_name(name))),
             StepOutcome::Finish => {}
         }
     }
@@ -907,7 +913,7 @@ impl Session {
     fn apply(&mut self, cmd: Box<dyn cad_core::Command>, name: &'static str, doc: &mut Document) {
         match doc.apply(cmd) {
             Ok(()) => {}
-            Err(e) => self.cmdline.error(format!("{name}: {e}")),
+            Err(e) => self.cmdline.error(format!("{}: {e}", display_name(name))),
         }
         self.selection.retain_existing(doc);
     }

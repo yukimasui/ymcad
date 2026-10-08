@@ -19,7 +19,7 @@ use crate::grips::{self, Grip, GripGroup, Handle};
 use crate::properties::kind_of;
 use crate::selection;
 
-/// ツールの名前（Undo の表示・案内に出る）。コマンド表には無い。
+/// ツールの名前（Undo の履歴に積む名前）。コマンド表には無い。案内に出すときは `command_label::display_name` を通す。
 pub const GRIP_COMMAND: &str = "GRIP";
 
 /// 掴んだ図形 1 つと、動かすグリップと、その図形の元の形。
