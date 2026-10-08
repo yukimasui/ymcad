@@ -15,6 +15,7 @@ use cad_core::command::{
 use cad_core::layer::LineType;
 use cad_core::{AciColor, Command, Document, LayerId};
 
+use crate::properties_panel::{BUSY_COLOR, DROP_NOTE_COLOR};
 use crate::selection::Selection;
 
 /// レイヤパネルの色見本で選べる ACI 色。
@@ -29,6 +30,17 @@ const PALETTE: [AciColor; 9] = [
     AciColor(8),
     AciColor(9),
 ];
+
+/// コマンド実行中に「移動」の行へ出す案内。表示・ロック・色・追加などは実行中も使えるので、
+/// パネル全体ではなく移動だけが使えないと読めるようにする。
+pub const MOVE_BUSY_NOTE: &str =
+    "コマンド実行中は移動できません（終えるか Esc で中断。中断すると選択も外れます）";
+
+/// 行の右端に必ず残す幅 [px]（線種のドロップダウン 90px と削除ボタン）。名前はこれを除いた
+/// 残りの幅までしか使わず、長ければ省略する。色・線種・削除は名前より先に幅を確保する。
+const ROW_RIGHT_WIDTH: f32 = 90.0 + 30.0;
+/// 名前に最低限残す幅 [px]。
+const NAME_MIN_WIDTH: f32 = 40.0;
 
 /// 色見本の一辺 [px]。
 const SWATCH_PX: f32 = 14.0;
@@ -73,12 +85,18 @@ impl LayerPanel {
     /// パネルを描画し、実行すべきコマンドを返す。
     ///
     /// 返り値が空でなければ、呼び出し側が `Document::apply` で適用する。
+    ///
+    /// `busy` … コマンド（選択待ちを含む）を実行中か。真の間は「移動」の行を押せなくする
+    /// （プロパティパネルと同じ規則。実行中のツールが覚えている図形を横から動かさない）。
+    /// `drop_note` … 図形をロック・非表示のレイヤへ移して選択から外れたときの案内。
     #[must_use]
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         doc: &Document,
         selection: &Selection,
+        busy: bool,
+        drop_note: Option<&str>,
     ) -> Vec<Box<dyn Command>> {
         let mut commands: Vec<Box<dyn Command>> = Vec::new();
         if !self.open {
@@ -103,7 +121,7 @@ impl LayerPanel {
             });
 
         ui.separator();
-        self.show_move_row(ui, doc, selection, &mut commands);
+        self.show_move_row(ui, doc, selection, busy, drop_note, &mut commands);
 
         commands
     }
@@ -202,10 +220,16 @@ impl LayerPanel {
                 };
             }
 
-            // 名前（ダブルクリックで編集）。
+            // 名前（ダブルクリックで編集）。長い名前は、右端の線種・削除ボタンの分を除いた
+            // 残りの幅で省略する（ホバーで全体）。
+            let name_width =
+                (ui.available_width() - ROW_RIGHT_WIDTH - ui.spacing().item_spacing.x * 2.0)
+                    .max(NAME_MIN_WIDTH);
             if self.rename_target == Some(id) {
-                let response = ui
-                    .add(egui::TextEdit::singleline(&mut self.rename_buffer).desired_width(120.0));
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.rename_buffer)
+                        .desired_width(name_width.min(120.0)),
+                );
                 let commit = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if commit {
                     let new_name = self.rename_buffer.trim().to_owned();
@@ -215,13 +239,22 @@ impl LayerPanel {
                     self.rename_target = None;
                 }
             } else {
-                let label = ui.selectable_label(is_current, &layer.name);
+                let label = ui
+                    .scope(|ui| {
+                        ui.set_max_width(name_width);
+                        ui.add(egui::Button::selectable(is_current, &layer.name).truncate())
+                    })
+                    .inner;
                 if label.double_clicked() && !is_zero {
                     self.rename_target = Some(id);
                     self.rename_buffer = layer.name.clone();
                 }
+                // ツールチップには常に全体の名前を出す。省略されたかどうかを幅で判定すると、
+                // 全角文字では文字の切れ目の余りで外れ、省略されているのに出ないことがあった。
                 if is_zero {
-                    label.on_hover_text("レイヤ 0 は名前を変更できません");
+                    label.on_hover_text(format!("{}\nレイヤ 0 は名前を変更できません", layer.name));
+                } else {
+                    label.on_hover_text(&layer.name);
                 }
             }
 
@@ -276,24 +309,43 @@ impl LayerPanel {
         }
     }
 
-    /// 選択中の要素を別レイヤへ移す行。
+    /// 選択中の図形を別レイヤへ移す行。
     fn show_move_row(
         &self,
         ui: &mut egui::Ui,
         doc: &Document,
         selection: &Selection,
+        busy: bool,
+        drop_note: Option<&str>,
         commands: &mut Vec<Box<dyn Command>>,
     ) {
+        if let Some(note) = drop_note {
+            ui.colored_label(DROP_NOTE_COLOR, note);
+        }
+        // 選択が空なら移すものが無い（「先に図形を選択してください」だけで足りる）。
+        if busy && !selection.is_empty() {
+            ui.colored_label(BUSY_COLOR, MOVE_BUSY_NOTE);
+        }
         ui.horizontal_wrapped(|ui| {
             if selection.is_empty() {
-                ui.weak("選択中の要素を別のレイヤへ移すには、先に要素を選択してください");
+                ui.weak("選択中の図形を別のレイヤへ移すには、先に図形を選択してください");
                 return;
             }
-            ui.label(format!("選択中の {} 要素を移動:", selection.len()));
+            ui.label(format!("選択中の {} 個を移動:", selection.len()));
+            if busy {
+                ui.disable();
+            }
             for (id, layer) in doc.layers().iter() {
-                if ui.button(&layer.name).clicked() {
+                // 長い名前は、この行の残りの幅までで省略する（行を押し広げない。全体はホバーで出る）。
+                let button = ui.add(egui::Button::new(&layer.name).truncate());
+                if button.clicked() {
                     commands.push(Box::new(MoveEntitiesToLayer::new(selection.to_vec(), id)));
                 }
+                // 常に全体の名前を出す（省略の判定は全角文字で外れる）。実行中は無効のボタンなので、
+                // 無効のときのツールチップにも同じ名前を出す。
+                button
+                    .on_hover_text(&layer.name)
+                    .on_disabled_hover_text(&layer.name);
             }
         });
     }

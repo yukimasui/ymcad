@@ -8,6 +8,7 @@ use crate::drafting::PolarHit;
 use crate::editing::EditSession;
 use crate::resolved::ResolvedInstances;
 use crate::selection::{Selection, WindowMode};
+use crate::tools::EntityPreview;
 use crate::viewport::{px_to_f32, Viewport};
 use cad_core::component::{self, DefinitionTable};
 use cad_core::geom::{Line, Point2};
@@ -367,6 +368,43 @@ pub fn draw_preview(
     for g in geoms {
         // ラバーバンドは常に実線。確定前だと分かればよく、線種は関係ない。
         draw_geometry(painter, vp, defs, g, stroke, LineType::Continuous);
+    }
+}
+
+/// 結果プレビューの破線の線幅 [px]。通常の線（[`ENTITY_STROKE_PX`]）より少し太くして目立たせる。
+const RESULT_PREVIEW_STROKE_PX: f32 = 2.0;
+/// TRIM で消える部分を下の線ごと消すときの線幅 [px]。選択中の線（[`SELECTED_STROKE_PX`]）の
+/// 縁のにじみまで覆う。ホバーの縁取り（[`HOVER_STROKE_PX`]）より細いので、縁取りの両脇は残る。
+const RESULT_ERASE_STROKE_PX: f32 = SELECTED_STROKE_PX + 1.0;
+/// TRIM で消える部分の色（赤）。選択色・ラバーバンド・スナップ・ホバーのどれとも違う。
+const REMOVED_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0x52, 0x52);
+
+/// 図形を指す段階の結果プレビュー（Issue #34 段階 2）を描く。
+///
+/// - 消える部分（TRIM）… 下の実線を背景色で消してから、赤の破線を重ねる。
+///   消さずに重ねると、破線の隙間に元の実線が見えて「消える」ように見えない
+/// - 増える部分（EXTEND）… ラバーバンドと同じ琥珀色の破線
+///
+/// [`draw_entities`] の**後**に呼ぶ（下の線を消すため）。`background` はキャンバスの背景色。
+pub fn draw_entity_preview(
+    painter: &egui::Painter,
+    vp: &Viewport,
+    defs: &DefinitionTable,
+    preview: Option<&EntityPreview>,
+    background: egui::Color32,
+) {
+    let Some(preview) = preview else {
+        return;
+    };
+    let erase = egui::Stroke::new(RESULT_ERASE_STROKE_PX, background);
+    let removed = egui::Stroke::new(RESULT_PREVIEW_STROKE_PX, REMOVED_COLOR);
+    for g in &preview.removed {
+        draw_geometry(painter, vp, defs, g, erase, LineType::Continuous);
+        draw_geometry(painter, vp, defs, g, removed, LineType::Dashed);
+    }
+    let added = egui::Stroke::new(RESULT_PREVIEW_STROKE_PX, PREVIEW_COLOR);
+    for g in &preview.added {
+        draw_geometry(painter, vp, defs, g, added, LineType::Dashed);
     }
 }
 

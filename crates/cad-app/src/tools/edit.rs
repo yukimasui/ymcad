@@ -1,5 +1,6 @@
 //! 編集コマンドとビュー操作コマンド。
 
+use cad_core::command::edit_geometry::{extend_line, trim_line};
 use cad_core::command::{
     CopyEntities, CornerEntities, CornerKind, CreateGroup, DeleteEntities, ExplodeEntities,
     ExtendEntity, MirrorCopyEntities, MirrorEntities, MoveEntities, RotateCopyEntities,
@@ -7,9 +8,10 @@ use cad_core::command::{
 };
 use cad_core::geom::tolerance::is_zero_len;
 use cad_core::geom::{Aabb, Line, Point2};
-use cad_core::Geometry;
+use cad_core::{EntityId, Geometry};
 
-use super::{StepInput, StepOutcome, Tool, ToolCtx, ToolSettings};
+use super::entity_preview::{extended_part, line_of, trimmed_away};
+use super::{EntityPreview, PreviewCtx, StepInput, StepOutcome, Tool, ToolCtx, ToolSettings};
 use crate::input::ViewAction;
 
 /// 選択したオブジェクトを削除する。
@@ -839,6 +841,22 @@ impl Tool for TrimTool {
             }
         }
     }
+
+    /// 消える部分。実行（`TrimEntity`）と同じ `trim_line` を、同じ条件の境界で呼ぶ。
+    fn entity_preview(
+        &self,
+        id: EntityId,
+        at: Point2,
+        ctx: &mut PreviewCtx<'_>,
+    ) -> Option<EntityPreview> {
+        let target = line_of(ctx.tool.doc, id)?;
+        let keep = trim_line(&target, ctx.boundaries_except(id), at)?;
+        let removed = trimmed_away(&target, &keep)?;
+        Some(EntityPreview {
+            removed: vec![Geometry::Line(removed)],
+            added: Vec::new(),
+        })
+    }
 }
 
 /// 線分を伸ばす。
@@ -873,6 +891,22 @@ impl Tool for ExtendTool {
                 StepOutcome::Reject("図形の上をクリックしてください".to_owned())
             }
         }
+    }
+
+    /// 伸びる部分（元の端から新しい端まで）。実行（`ExtendEntity`）と同じ `extend_line` を、
+    /// 同じ条件の境界で呼ぶ。
+    fn entity_preview(
+        &self,
+        id: EntityId,
+        at: Point2,
+        ctx: &mut PreviewCtx<'_>,
+    ) -> Option<EntityPreview> {
+        let target = line_of(ctx.tool.doc, id)?;
+        let extended = extend_line(&target, ctx.boundaries_except(id), at)?;
+        Some(EntityPreview {
+            removed: Vec::new(),
+            added: vec![Geometry::Line(extended_part(&target, &extended))],
+        })
     }
 }
 
