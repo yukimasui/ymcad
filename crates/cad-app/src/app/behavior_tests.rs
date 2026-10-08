@@ -17,6 +17,7 @@ use crate::cmdline::LineKind;
 
 mod hover;
 mod properties;
+mod trim_preview;
 
 /// 画面の大きさ [px]。
 const SCREEN: egui::Vec2 = egui::vec2(1280.0, 800.0);
