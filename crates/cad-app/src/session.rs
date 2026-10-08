@@ -100,6 +100,19 @@ const IDLE_PROMPT: &str = "コマンド:";
 /// 選択待ちのプロンプト。
 const SELECT_PROMPT: &str = "オブジェクトを選択 (Enter で確定):";
 
+/// 全選択が効かない段階（点や値の入力中・図形を指す段階）で Ctrl+A を押したときの案内（Issue #74 の 1）。
+///
+/// キーは消費される（入力欄の文字の全選択にもならない）ので、何も出さないと「効かなかった」のか
+/// 「押し損ねた」のか分からない。効く段階をプロンプトの言葉で示す。エラー（赤）ではなく案内（灰色）。
+pub(crate) const SELECT_ALL_UNAVAILABLE: &str =
+    "全選択: 「コマンド:」か「オブジェクトを選択」のときに使えます";
+
+/// 選択待ちで `SELECTALL` と同じに扱う語（AutoCAD の「オブジェクトを選択: ALL」。Issue #74 の 2）。
+///
+/// 選択待ちの間だけ。選択待ちではコマンド名を受け付けないので ARC の別名 `A` などとは衝突せず、
+/// ZOOM の `ALL` は ZOOM の実行中（点や値を待つ段階）にしか届かないので、これとも衝突しない。
+const SELECT_ALL_WORD: &str = "ALL";
+
 /// グリップを出す選択数の上限（Issue #30 ユーザー判断 4）。超えたら出さず、ステータスバーで知らせる。
 ///
 /// グリップの一覧は毎フレーム選択から作るので、全選択（1 万図形）でもフレーム時間が延びないように
@@ -547,7 +560,10 @@ impl Session {
         if self.awaiting_selection {
             // 全選択だけは選択待ちのまま受け付ける（Ctrl+A と同じ。ERASE → SELECTALL → Enter で
             // 全部を消せる）。ほかの文字入力は受け付けない（誤操作を防ぐ）。
-            if tools::immediate(text) == Some(Immediate::SelectAll) {
+            // `ALL` も同じ（AutoCAD の習慣。選択待ちの間だけ。Issue #74 の 2）。
+            if tools::immediate(text) == Some(Immediate::SelectAll)
+                || text.trim().eq_ignore_ascii_case(SELECT_ALL_WORD)
+            {
                 self.select_all(doc);
                 return;
             }
@@ -1093,32 +1109,46 @@ impl Session {
     /// レイヤの図形は入らず、グループのうちロック・非表示の一員も入らない（Issue #51 案 A）。
     /// インプレース編集中に薄く表示されている図形も入る（クリックで拾えるので。ユーザー判断 6）。
     ///
+    /// インプレース編集中は、選んだうち編集の外の図形の数を案内に添える（Issue #74 の 3。続けて
+    /// ERASE すると外も消えることが案内から読めるように）。
+    ///
     /// 選択は UI の状態なので `Command` にはしない（図面も Undo の履歴も変えない）。
     /// 選択待ちなら選択待ちのまま（Enter で確定すると ERASE などが全部に効く）。
-    /// 効かない段階（[`Self::can_select_all`] が偽）では何もせず `false` を返す。
+    /// 効かない段階（[`Self::can_select_all`] が偽）では選択を変えずに `false` を返し、使える段階を
+    /// 案内する（[`SELECT_ALL_UNAVAILABLE`]。直前の行が同じ案内なら積まない）。
     pub fn select_all(&mut self, doc: &Document) -> bool {
         if !self.can_select_all() {
+            self.notify_select_all_unavailable();
             return false;
         }
         let mut selected = 0;
+        let mut outside_edit = 0;
         for id in selection::selectable_ids(doc) {
             self.selection.insert(id);
             selected += 1;
+            if self.editing.as_ref().is_some_and(|e| !e.contains(id)) {
+                outside_edit += 1;
+            }
         }
         let excluded = doc.entities().len().saturating_sub(selected);
-        let note = if excluded > 0 {
-            format!("（非表示・ロック中のレイヤの {excluded} 個は除く）")
-        } else {
-            String::new()
-        };
-        if selected == 0 {
-            self.cmdline
-                .info(format!("全選択: 選べるオブジェクトがありません{note}"));
-        } else {
-            self.cmdline
-                .info(format!("全選択: {selected} 個のオブジェクトを選択{note}"));
-        }
+        self.cmdline
+            .info(select_all_notice(selected, outside_edit, excluded));
         true
+    }
+
+    /// 全選択が効かない段階で押されたことを案内する。
+    ///
+    /// Ctrl+A の押しっぱなし（キーリピート）や連打で同じ行が履歴（上限 200 行）を埋め、前の案内や
+    /// エラーが流れて消えないよう、直前の行が同じ案内なら積まない。間に別の行が入れば、また出す。
+    fn notify_select_all_unavailable(&mut self) {
+        let repeated = self
+            .cmdline
+            .history()
+            .last()
+            .is_some_and(|l| l.kind == LineKind::Info && l.text == SELECT_ALL_UNAVAILABLE);
+        if !repeated {
+            self.cmdline.info(SELECT_ALL_UNAVAILABLE);
+        }
     }
 
     /// キャンバス上で矩形ドラッグによる選択が行われた。
@@ -1162,6 +1192,29 @@ impl Session {
         self.cmdline
             .info(format!("{} 個のオブジェクトを選択", self.selection.len()));
         self.feed_tool(StepInput::SelectionReady, doc);
+    }
+}
+
+/// 全選択の案内（選んだ数、インプレース編集の外の数、除いた数）。
+///
+/// 添え書きは 1 組の括弧にまとめる（「（A）（B）」と並ぶと読みにくい）。
+fn select_all_notice(selected: usize, outside_edit: usize, excluded: usize) -> String {
+    let mut notes = Vec::new();
+    if outside_edit > 0 {
+        notes.push(format!("編集の外の {outside_edit} 個を含む"));
+    }
+    if excluded > 0 {
+        notes.push(format!("非表示・ロック中のレイヤの {excluded} 個は除く"));
+    }
+    let note = if notes.is_empty() {
+        String::new()
+    } else {
+        format!("（{}）", notes.join("。"))
+    };
+    if selected == 0 {
+        format!("全選択: 選べるオブジェクトがありません{note}")
+    } else {
+        format!("全選択: {selected} 個のオブジェクトを選択{note}")
     }
 }
 
