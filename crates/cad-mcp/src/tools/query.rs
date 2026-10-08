@@ -9,8 +9,8 @@ use serde_json::{json, Value};
 
 use super::{Args, Tool, ToolResult};
 use crate::convert::{
-    aabb_from_json, component_to_json, entity_summary_json, entity_to_json, geometry_type,
-    layer_to_json, ENTITY_TYPES,
+    aabb_from_json, component_to_json, definition_contents_json, entity_summary_json,
+    entity_to_json, geometry_type, layer_to_json, ENTITY_TYPES,
 };
 use crate::ids::resolve_ids;
 use crate::limits::{DEFAULT_LIST_LIMIT, MAX_IDS_PER_CALL, MAX_LIST_LIMIT};
@@ -91,8 +91,18 @@ pub(super) const LIST_COMPONENTS: Tool = Tool {
     title: "コンポーネントの一覧",
     description: "コンポーネント（パラメトリックなブロック）定義の一覧: 名前・基点・中の図形の数・図面に直接置かれたインスタンスの数・\
 パラメータ（名前・型・既定値の式・範囲）・束縛（中の図形の添字 entity と種類 entity_type、対象の項目 field、式。\
-field は図形の JSON の項目名で start.x / center.y / radius / start_angle / vertices[3].x など。式の中の角度は度）。",
-    schema: || (json!({}), &[]),
+field は図形の JSON の項目名で start.x / center.y / radius / start_angle / vertices[3].x など。式の中の角度は度）。\
+name で 1 つに絞れる。contents: true で定義の中の図形（index と geometry。定義座標）も返す（bind の entity_index を選ぶため）。\
+作る・変える・置くのは define_component / set_component_params / bind / insert_component / set_instance_params。",
+    schema: || {
+        (
+            json!({
+                "name": { "type": "string", "description": "このコンポーネントだけ" },
+                "contents": { "type": "boolean", "description": "定義の中の図形も返すか（既定 false）" },
+            }),
+            &[],
+        )
+    },
     read_only: true,
     destructive: false,
     idempotent: true,
@@ -193,10 +203,19 @@ pub(super) fn entity_counts_by_layer(doc: &cad_core::Document) -> HashMap<LayerI
     counts
 }
 
-fn list_components(s: &mut Server, _: &Args) -> ToolResult {
+fn list_components(s: &mut Server, a: &Args) -> ToolResult {
     use cad_core::Geometry;
 
     let doc = &s.doc;
+    let only = a.opt_str("name")?;
+    if let Some(name) = only {
+        if doc.definitions().by_name(name).is_none() {
+            return Err(format!(
+                "コンポーネント {name} はありません（name を省くと一覧を見られます）"
+            ));
+        }
+    }
+    let contents = a.bool_or("contents", false)?;
     let mut instances = HashMap::new();
     for (_, e) in doc.entities().iter() {
         if let Geometry::Instance(i) = &e.geom {
@@ -206,7 +225,14 @@ fn list_components(s: &mut Server, _: &Args) -> ToolResult {
     let components: Vec<Value> = doc
         .definitions()
         .iter()
-        .map(|(id, d)| component_to_json(d, instances.get(&id).copied().unwrap_or(0)))
+        .filter(|(_, d)| only.is_none_or(|n| d.name == n))
+        .map(|(id, d)| {
+            let mut c = component_to_json(d, instances.get(&id).copied().unwrap_or(0));
+            if contents {
+                c["contents"] = definition_contents_json(d, doc.definitions());
+            }
+            c
+        })
         .collect();
     Ok(json!({ "drawing": s.tag().name(), "components": components }))
 }

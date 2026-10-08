@@ -14,6 +14,7 @@
 //! - 道具の説明は日本語、フィールド名は英語
 
 mod args;
+mod components;
 mod draw;
 mod file;
 mod history;
@@ -73,6 +74,12 @@ const TOOLS: &[Tool] = &[
     layers::ADD_LAYER,
     layers::UPDATE_LAYER,
     layers::DELETE_LAYER,
+    // 段階 1d: コンポーネント（図面を変える。1 回の呼び出しが undo 1 回ぶん）
+    components::DEFINE_COMPONENT,
+    components::SET_COMPONENT_PARAMS,
+    components::BIND,
+    components::INSERT_COMPONENT,
+    components::SET_INSTANCE_PARAMS,
     history::UNDO,
     history::REDO,
     render::RENDER,
