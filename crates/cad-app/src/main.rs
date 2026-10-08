@@ -12,6 +12,7 @@ mod component_panel;
 mod drafting;
 mod editing;
 mod file_ops;
+mod hover;
 mod input;
 mod jp_font;
 mod layer_panel;

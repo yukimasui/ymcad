@@ -15,6 +15,8 @@ use egui_kittest::Harness;
 use super::CadApp;
 use crate::cmdline::LineKind;
 
+mod hover;
+
 /// 画面の大きさ [px]。
 const SCREEN: egui::Vec2 = egui::vec2(1280.0, 800.0);
 /// キャンバスの中央付近。

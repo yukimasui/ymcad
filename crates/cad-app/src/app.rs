@@ -9,6 +9,7 @@ use crate::cmdline::Submission;
 use crate::component_panel::{ComponentPanel, PanelRequest};
 use crate::drafting::{self, Drafting};
 use crate::file_ops::{self, FileOps, FileOutcome};
+use crate::hover::Hover;
 use crate::input::{self, ViewAction};
 use crate::layer_panel::LayerPanel;
 use crate::render;
@@ -115,6 +116,8 @@ pub struct CadApp {
     quitting: bool,
     /// このフレームで吸着したスナップ候補。
     snapped: Option<cad_core::snap::SnapCandidate>,
+    /// ホバーで強調する選択プレビュー（Issue #34、ADR-0042）。クリックもここの索引で拾う。
+    hover: Hover,
     /// 矩形選択のドラッグ中の状態。
     rect_drag: Option<RectDrag>,
     /// 直近フレームのカーソル位置（モデル座標）。
@@ -146,6 +149,7 @@ impl CadApp {
             files: FileOps::new(),
             quitting: false,
             snapped: None,
+            hover: Hover::new(),
             rect_drag: None,
             cursor_model: None,
             font_status,
@@ -393,7 +397,10 @@ impl CadApp {
 
         // スナップは点の入力を待っているときだけ効かせる。
         // 選択操作中にマーカーが出ると邪魔になるため。
-        self.snapped = match (raw_cursor, self.session.wants_point()) {
+        // 図形を指す段階（TRIM / EXTEND / FILLET / CHAMFER など）でも効かせない。交点へ吸い付くと
+        // 指した位置がずれ、TRIM がどちら側を切るか決められなくなる（ADR-0042）。
+        let snap_wanted = self.session.wants_point() && !self.session.wants_entity();
+        self.snapped = match (raw_cursor, snap_wanted) {
             (Some(c), true) => {
                 self.snap
                     .update_px(&self.doc, c, &self.viewport, self.session.last_point())
@@ -417,7 +424,19 @@ impl CadApp {
         let active_drag = self.handle_pointer(&response, ui);
 
         // ---- 描画 ----
+        // ホバーの強調の計算も描画時間に入れる（Issue #34。1 万図形で重くならないかを見る）。
         let started = Instant::now();
+
+        // クリックと同じ位置（`cursor_model`）・同じ拾い半径で、クリックしたら拾われるものを決める。
+        // 矩形選択のドラッグ中は強調しない（離したら矩形で選ばれるので、乗せた図形とは関係ない）。
+        let hover_at = if active_drag.is_none() && self.rect_drag.is_none() {
+            self.cursor_model
+        } else {
+            None
+        };
+        let pick_tolerance = self.viewport.px_to_model_len(PICK_RADIUS_PX);
+        self.hover
+            .update(&self.session, &self.doc, hover_at, pick_tolerance);
 
         painter.rect_filled(response.rect, 0.0, ui.visuals().extreme_bg_color);
         render::draw_grid(&painter, &self.viewport, ui.visuals());
@@ -429,6 +448,13 @@ impl CadApp {
             &self.session.selection,
             &mut self.resolved,
             self.session.editing(),
+        );
+        render::draw_hover(
+            &painter,
+            &self.doc,
+            &self.viewport,
+            self.hover.highlighted(),
+            &mut self.resolved,
         );
 
         let preview = self.session.preview(self.cursor_model, &self.doc);
@@ -561,9 +587,14 @@ impl CadApp {
         // 見えている線の先とクリックで入る点が一致する。固定値から点が決まらない位置
         // （角度だけ固定してその反対側など）では、`Enter` と同じく点を入れずにエラーにする。
         match self.session.constrain(model) {
-            Ok(model) => self
-                .session
-                .handle_click(model, shift, pick_tolerance, &mut self.doc),
+            // ホバーの強調と同じ索引で拾う（`Session::click_target` を通る）。
+            Ok(model) => self.session.handle_click(
+                model,
+                shift,
+                pick_tolerance,
+                &mut self.doc,
+                self.hover.picker(),
+            ),
             Err(e) => self.session.cmdline.error(e.message()),
         }
         self.snap.release();

@@ -110,32 +110,76 @@ impl WindowMode {
     }
 }
 
-/// クリック位置にあるエンティティを 1 つ拾う。
+/// クリック位置にあるエンティティを 1 つ拾う（図面の全図形を走査する）。
 ///
 /// `tolerance` はモデル空間での拾い半径（画面上で一定になるよう、
 /// 呼び出し側が `Viewport::px_to_model_len` で換算して渡すこと）。
 ///
-/// 複数が範囲内にある場合は **最も近いもの**、距離が同じなら後から作られた
-/// （= 手前に描かれる）ものを選ぶ。
+/// 採点は [`pick_among`] と同じ。アプリは空間インデックスで候補を絞る
+/// `hover::PickIndex` を使い、こちらはテストで結果を突き合わせる基準に使う。
+#[cfg(test)]
 #[must_use]
 pub fn pick_at(doc: &Document, pos: Point2, tolerance: f64) -> Option<EntityId> {
+    pick_among(doc, doc.entities().ids(), pos, tolerance)
+}
+
+/// 候補の列から、クリック位置で拾われるエンティティを 1 つ選ぶ。
+///
+/// - 非表示・ロックされたレイヤの要素、存在しない ID は対象外
+/// - 拾い半径 `tolerance` の内側で **最も近いもの**
+/// - 距離が同じなら **`EntityId` の大きいもの**（後から作られた = 手前に描かれるもの）
+///
+/// 同じ距離の決め方を候補の並び順に頼らないので、空間インデックスが返す順序
+/// （木の形で変わる）でも全走査でも同じ結果になる（ADR-0042）。候補に重複があってもよい。
+#[must_use]
+pub fn pick_among(
+    doc: &Document,
+    candidates: impl IntoIterator<Item = EntityId>,
+    pos: Point2,
+    tolerance: f64,
+) -> Option<EntityId> {
     let mut best: Option<(EntityId, f64)> = None;
-    for (id, entity) in doc.entities().iter() {
-        // 非表示・ロックされたレイヤの要素は選択対象外。
+    for id in candidates {
+        let Some(entity) = doc.entities().get(id) else {
+            continue;
+        };
         if !doc.layers().is_entity_editable(entity) {
             continue;
         }
         let d = entity.geom.dist_to(doc.definitions(), pos);
-        if d > tolerance {
+        if d.is_nan() || d > tolerance {
             continue;
         }
-        match best {
-            // 同距離なら後勝ち = 手前のものが選ばれる。
-            Some((_, bd)) if d > bd => {}
-            _ => best = Some((id, d)),
+        let better = match best {
+            None => true,
+            Some((bid, bd)) => d < bd || (d == bd && id > bid),
+        };
+        if better {
+            best = Some((id, d));
         }
     }
     best.map(|(id, _)| id)
+}
+
+/// クリック位置で拾われる図形を 1 つ返すもの。
+///
+/// `Session::click_target` はこれを通して拾う。ホバーの強調とクリックで同じものを
+/// 渡すので、強調された図形とクリックで拾われる図形が一致する（ADR-0042）。
+pub trait Picker {
+    /// `pos` で拾われる図形。採点は [`pick_among`] と同じでなければならない。
+    fn pick(&mut self, doc: &Document, pos: Point2, tolerance: f64) -> Option<EntityId>;
+}
+
+/// 図面の全図形を走査して拾う（[`pick_at`]）。テスト用。
+#[cfg(test)]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ScanAll;
+
+#[cfg(test)]
+impl Picker for ScanAll {
+    fn pick(&mut self, doc: &Document, pos: Point2, tolerance: f64) -> Option<EntityId> {
+        pick_at(doc, pos, tolerance)
+    }
 }
 
 /// `id` と同じグループに属する要素のうち、**編集できるものだけ**を返す。
