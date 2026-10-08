@@ -1,62 +1,157 @@
-<section class="card">
-<h3 style="margin-top:0">いまの状況（まず読むところ）— 10/7、別のマシンへ移る準備</h3>
-<ul id="now">
-<li><b>✅ develop にマージ済み（10/7）</b>: PR #45（#37 パネル操作）/ #49（#44 入れ忘れ検査）/ #50（#46 リボン 44px）/ #52（汎用の書き換えコマンド <code>ReplaceGeometries</code>）</li>
-<li><b>✅ 続けてマージ</b>: PR #53（#48 選択待ちの案内）/ PR #54（#51 グループのロックされた一員、ご主人の判断 A）。2 本を合わせた木でもテスト通過</li>
-<li><b>引き継ぎの準備</b>（ブランチ <code>chore/clone-ready</code>）: 作業ツリーは <code>tools/wt.sh</code> で <code>.worktrees/</code> の中に作る（ビルド先の共有は古いバイナリが走るのでやめた） / 委譲のルールを <code>docs/agents/</code> に / メモリの中身を <code>CLAUDE.md</code> に / この報告書を Artifact に</li>
-<li><b>新しいマシンでの次の順番</b>: #55（書き換えコマンドの追いかけ）→ #31 プロパティ ＋ #34 選択プレビュー → #30 グリップ → #36 → #27</li>
-<li><b>お願い</b>: 下の「C3. 実機で確かめてほしいこと（10/7 追加）」</li>
+<nav class="toc" aria-label="目次">
+<a href="#now">いまの状況</a><a href="#asks">お願い</a><a href="#features">機能の状態</a><a href="#judge">ジャッジ用メモ</a><a href="#backlog">課題</a><a href="#shots">画面</a><a href="#history">履歴</a>
+</nav>
+
+<section class="card now" id="now">
+<h2>いまの状況</h2>
+<p class="stamp">2026-10-09 朝・夜間の自律作業を終えて、今日の作業は終了</p>
+<ul>
+<li>#31 プロパティパネル・#34 選択プレビュー・#30 グリップ編集・<b>#70 MCP サーバー段階 1</b> が完了し、develop に入った。進行中の作業は無い</li>
+<li>MCP は Claude Code から使える。開く・作図・変形・レイヤ・コンポーネント・Undo・PNG で見る・保存まで実機で確認済み（手順は <code>docs/MCP.md</code>）</li>
+<li>次に進めるには、下の「判断してほしいこと」（#36・#27 の計画の承認、#92 の不具合）が要る</li>
 </ul>
 </section>
 
-<h2>A. 最終ジャッジ用メモ（レビュアーの意見で決めたこと・朝に直せる点）</h2>
-<p>レビュアーの意見を正として進めたうち、ご主人の好みで変えたくなりそうなものを残す。</p>
-<table id="judge">
-<tr><th>#</th><th>機能</th><th>レビュアーの意見で決めたこと</th><th>別の選択肢</th></tr>
-<tr><td>1</td><td>寸法入力（#28）</td><td>動的入力オフで Tab を押すと、押すたびに履歴へ案内を 1 行出す（抑止しない）</td><td>同じ基準点では 2 回目以降黙る</td></tr>
-<tr><td>2</td><td>寸法入力（#25）</td><td>打ちかけの座標（<code>@10</code> 等）があるときの Esc は 1 回目で入力を消すだけ（ご主人も同意済み）</td><td>—</td></tr>
-<tr><td>3</td><td>リボン（#32）</td><td>ボタン下の名前は<b>英語のコマンド名のまま</b></td><td>日本語名にして英語はツールチップへ / 設定で切り替え</td></tr>
-<tr><td>4</td><td>リボン（#32）</td><td><b>LAYER をホームタブへ移す</b>（AutoCAD 利用者がホームで探すため）</td><td>「表示・ファイル」タブに置く（当初案）</td></tr>
-<tr><td>5</td><td>リボン（#32）</td><td><b>UNDO / REDO / SAVE をタブの行の右端に常に表示</b>（AutoCAD のクイックアクセス相当。ホーム以外でも押せる）</td><td>ホームタブだけに置く</td></tr>
-<tr><td>6</td><td>リボン（#32）</td><td>分かりにくいと判定されたアイコン（STRETCH / REDEFINE / EXPLODE）と調整 6 個を<b>この PR で描き直し</b></td><td>別 Issue に分ける</td></tr>
-<tr><td>7</td><td>リボン（#32）</td><td>LAYER / COMPONENTS（パネルの開閉だけ）は実行中のコマンドを中断しない。それ以外のボタンは中断して始める</td><td>すべて中断（Issue の当初の文言）</td></tr>
-<tr><td>8</td><td>リボン（#32）</td><td>日本語の変換中にボタンを押しても何もせず、確定か取り消しを促す</td><td>変換を捨てて始める</td></tr>
-<tr><td>9</td><td>直交・極（#35）</td><td>直交と極は<b>排他にしない</b>。両方オンなら直交が優先（POLAR は控えめの色）</td><td>AutoCAD と同じく排他</td></tr>
-<tr><td>10</td><td>直交・極（#35）</td><td>極の刻みは 15°。吸い付きは<b>画面上 10px 以内かつ角度の差 ±3° 以内</b></td><td>刻み 45° / 90°（AutoCAD の既定）、角度の上限なし</td></tr>
-<tr><td>11</td><td>直交・極（#35）</td><td>RECTANGLE は直交・極の対象外（対角を直交にすると面積 0 になるため）</td><td>対象にする</td></tr>
-<tr><td>12</td><td>直交・極（#35）</td><td>日本語の変換中は F8 / F10 に反応しない（IME の半角カナ・半角英数キーと重なるため）</td><td>常に反応</td></tr>
-<tr><td>13</td><td>リボン（#32）</td><td>クイックアクセス（UNDO / REDO / SAVE）は<b>タブの直後</b>に区切り線を挟んで置く</td><td>タブ行の右端（当初の修正案）</td></tr>
-<tr><td>14</td><td>リボン（#32）</td><td>用語を<b>「レイヤ」に統一</b>（ステータスバーの「画層 0」も「レイヤ 0」に）</td><td>AutoCAD 日本語版と同じ「画層」に統一</td></tr>
-<tr><td>15a</td><td>リボン（#32）</td><td>リボンがはみ出す幅では、左右の「‹ ›」帯を常に置き、ボタン列の両端に 28px の余白を足す（端のボタンが帯に隠れないように。実装担当の追加判断をレビュアーが妥当と判定）</td><td>送れる側だけに帯を置く</td></tr>
-<tr><td>15</td><td>リボン（#32）</td><td>EXPLODE のアイコンは「切り離した 2 本の片 + 角からの火花」（操作レビュアーが 6 案を試作して選んだもの）</td><td>—</td></tr>
-<tr><td>18</td><td>ステータスバー（#39）</td><td>切り替え部品（OSNAP / ORTHO / POLAR / DYN）を<b>座標の直後</b>へ。情報表示は <b>レイヤ / 選択 / 要素 / 倍率</b> の順にし、入らない項目は右から丸ごと省く</td><td>元の並び（倍率・要素・画層・選択の後に切り替え）</td></tr>
-<tr><td>19a</td><td>ステータスバー（#39）</td><td>CI に日本語フォント（<code>fonts-noto-cjk</code>）を入れ、幅のテストはフォント必須（無ければ理由つきで落ちる）</td><td>フォントの有無でテストの期待値を変える</td></tr>
-<tr><td>19b</td><td>ステータスバー（#39）</td><td>座標の欄は一度広がったら縮めない（図面の入れ替えで戻す）。座標の固定幅は 12 文字。長いレイヤ名は 16 文字で「…」</td><td>毎フレーム桁数に合わせる</td></tr>
-<tr><td>19</td><td>ステータスバー（#39）</td><td>「コマンド実行中」と「OSNAP:端点」の欄は幅を固定して、表示が跳ねないようにする</td><td>幅を内容に合わせる</td></tr>
-<tr><td>16</td><td>未保存確認（#33）</td><td><b>Esc = キャンセル、Enter = 保存する</b>（「保存する (Enter)」「キャンセル (Esc)」と表示）。「保存しない」には 1 文字キーを割り当てない</td><td>キーでは閉じない（修正前）</td></tr>
-<tr><td>17</td><td>未保存確認（#33）</td><td>確認画面の外のクリックではキャンセルしない（誤クリック防止）</td><td>外のクリックでキャンセル</td></tr>
-<tr><td>17a</td><td>未保存確認（#33）</td><td><b>Enter はフォーカスの位置に関係なく必ず「保存する」</b>、Space は何もしない、「保存しない」はクリックでしか押せない（Tab → Enter で図面が捨てられる不具合を操作レビュアーが発見したため）</td><td>egui の既定（フォーカスのあるボタンが Enter / Space で押される）</td></tr>
-<tr><td>17c</td><td>未保存確認（#33）</td><td>確認画面の間は <b>Tab で枠を動かさない</b>（枠は常に「保存する」。Enter の結果と枠を必ず一致させる）</td><td>Tab で移動できるが Enter は常に保存（前回の修正。枠と結果が食い違った）</td></tr>
-<tr><td>17b</td><td>テスト（#33）</td><td>テストで保存ダイアログを開こうとしたら理由つきで落とす。CI のジョブに 30 分の制限時間</td><td>各テストが保存先を与える約束だけで守る</td></tr>
-<tr><td>20</td><td>保存（#42）</td><td>保存では選択・スナップ・座標の欄を変えない。<b>リボン・クイックアクセスの保存ボタンも実行中のコマンドを中断しない</b>（Ctrl+S とそろえる）</td><td>保存ボタンは他のボタンと同じく中断する</td></tr>
-<tr><td>21</td><td>リボン（#50）</td><td>アイコンは<b>全ボタン一律 44px</b>、クイックアクセスは 16px のまま。名前 10.5pt・グループ名 11pt。高さ 72→98px。<b>ホームタブが全部見える幅が約 830→1210px に増えた</b>（1024px では GROUP / UNGROUP / LAYER が「›」の先になる）のは受け入れた</td><td>LAYER・グループを左へ並べ替え / 頻度の低いボタンだけ小さくする（大小混在）</td></tr>
-<tr><td>22</td><td>書き換えコマンド（#52）</td><td><b>同じ種類どうしの置き換えだけ</b>許す（線分→円は不可）。インスタンスは配置だけ変えられる（定義と上書きは不可）。不正な値は黙って直さずエラー</td><td>種類の変更も許す / インスタンスは対象外</td></tr>
-<tr><td>23</td><td>案内（#48）</td><td>Issue の 2 番（「選び直すと対象に戻せます」を足す）は採らない（ロックを外すだけでは戻らないので誤解を招く）</td><td>文言を足す</td></tr>
-<tr><td>24</td><td>入れ忘れ検査（#49）</td><td>種別を末尾に足し、テストの match だけ直して <code>all()</code> を忘れた場合は検出できない（安定版の Rust に列挙子を数える手段が無い）。コンパイルエラーとコメントで促す</td><td>マクロで enum と <code>all()</code> を同じリストから作る</td></tr>
-</table>
+<h2 id="asks">お願い</h2>
+<h3>判断してほしいこと</h3>
+<div class="tablewrap"><table>
+<tr><th>何を</th><th>どこを見るか・中身</th></tr>
+<tr><td>#36 の計画を承認するか</td><td><a href="https://github.com/yukimasui/ymcad/issues/36#issuecomment-6063729473">Issue #36 の計画案</a>。判断 4 つ（グリップ中も効かせる・押している間のステータスバー・Shift＋ホイール・打ちかけの文字）</td></tr>
+<tr><td>#27 の計画を承認するか</td><td><a href="https://github.com/yukimasui/ymcad/issues/27#issuecomment-6063744231">Issue #27 の計画案</a>。判断 9 つ。#36 に依存しないので先に始めるのを推奨</td></tr>
+<tr><td>#92 の不具合を直してよいか</td><td>cad-core の Redo の ID。Command の挙動の変更（依存・構造は変えない見込み）</td></tr>
+<tr><td>MCP の推奨 14 項目の見直し</td><td><a href="https://github.com/yukimasui/ymcad/issues/70#issuecomment-6062005870">Issue #70</a>。とくに ADR-0046 決定 9: PNG を作るとき px の値を usvg が f32 で読む（設計原則 1 の f32 の出口が 1 つ増えた）</td></tr>
+<tr><td>develop → main のマージ</td><td>10/8〜9 の分（PR 25 本ほど）がすべて develop にある。main へは確認後。Issue の多くは main に入ったときに自動で閉じる</td></tr>
+</table></div>
 
-<h2>C3. 実機で確かめてほしいこと（10/7 追加）</h2>
-<ul>
-<li>[ ] リボンのアイコン 44px（PR #50 のマージ後）: 大きさ・文字の釣り合い、HiDPI（1.25 / 2.0）での鮮明さ、1024〜1200px 幅や画面を左右に分けたときに右端のグループが横スクロールの先になっても困らないか、クイックアクセス（16px のまま）が押しにくくないか</li>
-<li>[ ] パネルでレイヤをロック → 解除 → 図形を選ぶ → UNDO（ロックに戻る）で、選択から外れること（PR #45）</li>
-</ul>
-<h3>リボンのアイコン 44px（PR #50）</h3>
-<p>1280px 幅</p>
-<img src="img/ribbon44_a_home_1280.png" alt="44px のリボン、1280px 幅">
-<p>800px 幅（右端の「›」で送る）</p>
-<img src="img/ribbon44_d_home_800.png" alt="44px のリボン、800px 幅">
+<h3>実機で確かめてほしいこと</h3>
+<p class="lead">自動のテストでは確かめられない手触り・見え方。確かめたら PROGRESS か Issue に一言。</p>
+<div class="checkgrid">
+<div class="checkgroup"><h3>MCP（#70）</h3><ul class="checks"><li>Claude Code に <code>claude mcp add ymcad -- &lt;repo&gt;/target/release/ymcad-mcp --root &lt;図面のフォルダ&gt;</code> で登録し、「100×50 の矩形を描いて PNG で見せて」などと話しかける（手順は <code>docs/MCP.md</code>）</li></ul></div>
+<div class="checkgroup"><h3>グリップ（#30）</h3><ul class="checks"><li>乗せたときの反応と追従</li><li>実マウスで「押す → 少し動く → 離す」が掴みになる感触</li><li>HiDPI での 8px / 12px</li><li>重なった角（矩形の 2 本）を狙う感触</li></ul></div>
+<div class="checkgroup"><h3>プロパティパネル（#31）</h3><ul class="checks"><li>数値のドラッグの速さ（ズームを大きく変えたとき）</li><li>「クリックで入力・ドラッグで増減」の切り分け</li><li>IME で全角数字</li><li>1366px 前後でレイヤとプロパティの 2 枚を開いたときの作図領域</li><li>Ctrl+1 が OS・JIS 配列に取られないか</li><li>ライトテーマでの案内の色（シアン・琥珀）、パネルの横スクロールバーと Shift＋ホイール</li></ul></div>
+<div class="checkgroup"><h3>選択（#34・#68）</h3><ul class="checks"><li>ホバーの紫の濃さ・追従・1 万図形での描画時間</li><li>実機の Ctrl+A、Ctrl+Shift+A で何も起きないこと</li><li>改名欄の IME（変換候補の位置と確定）</li></ul></div>
+<div class="checkgroup"><h3>リボン（#26・#46）</h3><ul class="checks"><li>アイコンが何のコマンドか分かるか（とくに EXPLODE・STRETCH・REDEFINE）</li><li>44px の釣り合い、98px の高さが作図領域を取りすぎないか</li><li>HiDPI（1.25 / 2.0）</li><li>1024〜1200px や画面の左右分割での「‹ ›」と横スクロール</li><li>変換中にリボンを押したとき</li></ul></div>
+<div class="checkgroup"><h3>直交・極（#29）</h3><ul class="checks"><li>45° 付近で水平・垂直が切り替わる感じ</li><li>極の吸い付き（10px かつ ±3°）の強さ、補助線と角度表示</li><li>F8 / F10 がデスクトップ環境・メディアキーに取られないか</li><li>日本語の変換中に F8 / F10 で ORTHO / POLAR が変わらないこと</li></ul></div>
+<div class="checkgroup"><h3>未保存確認・保存（#24・#41）</h3><ul class="checks"><li>変更ありで NEW / OPEN / ✕ → Enter で保存、Esc でキャンセル、Tab で枠が動かない</li><li>コマンドの実行中にリボンの保存を押しても元のコマンドが続く</li><li>パネルでレイヤをロック → 解除 → 図形を選ぶ → UNDO で選択から外れる（#45）</li></ul></div>
+<div class="checkgroup"><h3>動的入力（#20）</h3><ul class="checks"><li>マウス追従の滑らかさ</li><li>試作 <code>spikes/dyn-input-ime</code> の「常に追従」モード（優先度低）</li></ul></div>
+</div>
 
-<h2>B. 朝の判断待ち（自律では進めないもの）</h2>
+<h2 id="features">機能の状態</h2>
+<div class="tablewrap"><table>
+<tr><th>機能</th><th>Issue</th><th>状態</th><th>PR</th><th>メモ</th></tr>
+<tr><td>動的入力（カーソル横の入力・寸法入力）</td><td><a href="https://github.com/yukimasui/ymcad/issues/20">#20</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/21">#21</a> <a href="https://github.com/yukimasui/ymcad/pull/23">#23</a> <a href="https://github.com/yukimasui/ymcad/pull/25">#25</a> <a href="https://github.com/yukimasui/ymcad/pull/28">#28</a></td><td class="note">段階 C（オプションのクリック選択）は未着手</td></tr>
+<tr><td>リボン（タブ・SVG アイコン 44px）</td><td><a href="https://github.com/yukimasui/ymcad/issues/26">#26</a> <a href="https://github.com/yukimasui/ymcad/issues/46">#46</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/32">#32</a> <a href="https://github.com/yukimasui/ymcad/pull/40">#40</a> <a href="https://github.com/yukimasui/ymcad/pull/50">#50</a></td><td class="note">1280px ではホームの右端 2 つが「›」の先（受け入れ済み）</td></tr>
+<tr><td>直交 F8・極トラッキング F10</td><td><a href="https://github.com/yukimasui/ymcad/issues/29">#29</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/35">#35</a></td><td class="note"></td></tr>
+<tr><td>ステータスバー・未保存確認・保存</td><td><a href="https://github.com/yukimasui/ymcad/issues/38">#38</a> <a href="https://github.com/yukimasui/ymcad/issues/24">#24</a> <a href="https://github.com/yukimasui/ymcad/issues/41">#41</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/39">#39</a> <a href="https://github.com/yukimasui/ymcad/pull/33">#33</a> <a href="https://github.com/yukimasui/ymcad/pull/42">#42</a></td><td class="note"></td></tr>
+<tr><td>プロパティパネル（表示・数値・束縛）</td><td><a href="https://github.com/yukimasui/ymcad/issues/31">#31</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/62">#62</a> <a href="https://github.com/yukimasui/ymcad/pull/66">#66</a> <a href="https://github.com/yukimasui/ymcad/pull/75">#75</a> <a href="https://github.com/yukimasui/ymcad/pull/80">#80</a> <a href="https://github.com/yukimasui/ymcad/pull/82">#82</a></td><td class="note">Issue は main へのマージで閉じる</td></tr>
+<tr><td>選択プレビュー（ホバー・TRIM / EXTEND のプレビュー・全選択）</td><td><a href="https://github.com/yukimasui/ymcad/issues/34">#34</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/63">#63</a> <a href="https://github.com/yukimasui/ymcad/pull/67">#67</a> <a href="https://github.com/yukimasui/ymcad/pull/72">#72</a> <a href="https://github.com/yukimasui/ymcad/pull/88">#88</a></td><td class="note"></td></tr>
+<tr><td>グリップ編集（単一・重なる角・辺の中点）</td><td><a href="https://github.com/yukimasui/ymcad/issues/30">#30</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/81">#81</a> <a href="https://github.com/yukimasui/ymcad/pull/85">#85</a></td><td class="note"></td></tr>
+<tr><td>MCP サーバー 段階 1（骨組み・編集・描画・コンポーネント）</td><td><a href="https://github.com/yukimasui/ymcad/issues/70">#70</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/84">#84</a> <a href="https://github.com/yukimasui/ymcad/pull/91">#91</a> <a href="https://github.com/yukimasui/ymcad/pull/89">#89</a> <a href="https://github.com/yukimasui/ymcad/pull/94">#94</a> <a href="https://github.com/yukimasui/ymcad/pull/95">#95</a></td><td class="note">段階 2（起動中のアプリとつなぐ）は <a href="https://github.com/yukimasui/ymcad/issues/96">#96</a>、着手前に計画の承認が要る</td></tr>
+<tr><td>Shift で直交を一時反転</td><td><a href="https://github.com/yukimasui/ymcad/issues/36">#36</a></td><td><span class="pill wait">承認待ち</span></td><td>—</td><td class="note"><a href="https://github.com/yukimasui/ymcad/issues/36#issuecomment-6063729473">計画案</a>（判断 4 つ）</td></tr>
+<tr><td>動的入力のそばのヒント</td><td><a href="https://github.com/yukimasui/ymcad/issues/27">#27</a></td><td><span class="pill wait">承認待ち</span></td><td>—</td><td class="note"><a href="https://github.com/yukimasui/ymcad/issues/27#issuecomment-6063744231">計画案</a>（判断 9 つ。#36 より先を推奨）</td></tr>
+<tr><td>追いかけ・不具合の修正</td><td>#37 #44 #48 #51 #55 #59 #64 #65 #68 #73 #74 #78</td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/45">#45</a> <a href="https://github.com/yukimasui/ymcad/pull/49">#49</a> <a href="https://github.com/yukimasui/ymcad/pull/53">#53</a> <a href="https://github.com/yukimasui/ymcad/pull/54">#54</a> <a href="https://github.com/yukimasui/ymcad/pull/58">#58</a> <a href="https://github.com/yukimasui/ymcad/pull/76">#76</a> <a href="https://github.com/yukimasui/ymcad/pull/77">#77</a> <a href="https://github.com/yukimasui/ymcad/pull/71">#71</a> <a href="https://github.com/yukimasui/ymcad/pull/86">#86</a></td><td class="note"></td></tr>
+</table></div>
+
+<h2 id="judge">最終ジャッジ用メモ</h2>
+<p class="lead">レビュアーの意見を正として決めたうち、好みで変えたくなりそうなもの。機能ごとに並べてある。変えたいものは番号で伝えてもらえれば直す。</p>
+<div class="tablewrap"><table class="judge">
+<tr><th>#</th><th>機能</th><th>決めたこと</th><th>別の選択肢</th></tr>
+<tr><td class="num">1</td><td><span class="area">寸法入力</span><br><span class="sub">#28</span></td><td>動的入力オフで Tab を押すと、押すたびに履歴へ案内を 1 行出す（抑止しない）</td><td>同じ基準点では 2 回目以降黙る</td></tr>
+<tr><td class="num">2</td><td><span class="area">寸法入力</span><br><span class="sub">#25</span></td><td>打ちかけの座標（<code>@10</code> 等）があるときの Esc は 1 回目で入力を消すだけ（ご主人も同意済み）</td><td>—</td></tr>
+<tr><td class="num">3</td><td><span class="area">リボン</span><br><span class="sub">#32</span></td><td>ボタン下の名前は<b>英語のコマンド名のまま</b></td><td>日本語名にして英語はツールチップへ / 設定で切り替え</td></tr>
+<tr><td class="num">4</td><td><span class="area">リボン</span><br><span class="sub">#32</span></td><td><b>LAYER をホームタブへ移す</b>（AutoCAD 利用者がホームで探すため）</td><td>「表示・ファイル」タブに置く（当初案）</td></tr>
+<tr><td class="num">5</td><td><span class="area">リボン</span><br><span class="sub">#32</span></td><td><b>UNDO / REDO / SAVE をタブの行の右端に常に表示</b>（AutoCAD のクイックアクセス相当。ホーム以外でも押せる）</td><td>ホームタブだけに置く</td></tr>
+<tr><td class="num">6</td><td><span class="area">リボン</span><br><span class="sub">#32</span></td><td>分かりにくいと判定されたアイコン（STRETCH / REDEFINE / EXPLODE）と調整 6 個を<b>この PR で描き直し</b></td><td>別 Issue に分ける</td></tr>
+<tr><td class="num">7</td><td><span class="area">リボン</span><br><span class="sub">#32</span></td><td>LAYER / COMPONENTS（パネルの開閉だけ）は実行中のコマンドを中断しない。それ以外のボタンは中断して始める</td><td>すべて中断（Issue の当初の文言）</td></tr>
+<tr><td class="num">8</td><td><span class="area">リボン</span><br><span class="sub">#32</span></td><td>日本語の変換中にボタンを押しても何もせず、確定か取り消しを促す</td><td>変換を捨てて始める</td></tr>
+<tr><td class="num">9</td><td><span class="area">リボン</span><br><span class="sub">#32</span></td><td>クイックアクセス（UNDO / REDO / SAVE）は<b>タブの直後</b>に区切り線を挟んで置く</td><td>タブ行の右端（当初の修正案）</td></tr>
+<tr><td class="num">10</td><td><span class="area">リボン</span><br><span class="sub">#32</span></td><td>用語を<b>「レイヤ」に統一</b>（ステータスバーの「画層 0」も「レイヤ 0」に）</td><td>AutoCAD 日本語版と同じ「画層」に統一</td></tr>
+<tr><td class="num">11</td><td><span class="area">リボン</span><br><span class="sub">#32</span></td><td>リボンがはみ出す幅では、左右の「‹ ›」帯を常に置き、ボタン列の両端に 28px の余白を足す（端のボタンが帯に隠れないように。実装担当の追加判断をレビュアーが妥当と判定）</td><td>送れる側だけに帯を置く</td></tr>
+<tr><td class="num">12</td><td><span class="area">リボン</span><br><span class="sub">#32</span></td><td>EXPLODE のアイコンは「切り離した 2 本の片 + 角からの火花」（操作レビュアーが 6 案を試作して選んだもの）</td><td>—</td></tr>
+<tr><td class="num">13</td><td><span class="area">リボン</span><br><span class="sub">#50</span></td><td>アイコンは<b>全ボタン一律 44px</b>、クイックアクセスは 16px のまま。名前 10.5pt・グループ名 11pt。高さ 72→98px。<b>ホームタブが全部見える幅が約 830→1210px に増えた</b>（1024px では GROUP / UNGROUP / LAYER が「›」の先になる）のは受け入れた</td><td>LAYER・グループを左へ並べ替え / 頻度の低いボタンだけ小さくする（大小混在）</td></tr>
+<tr><td class="num">14</td><td><span class="area">直交・極</span><br><span class="sub">#35</span></td><td>直交と極は<b>排他にしない</b>。両方オンなら直交が優先（POLAR は控えめの色）</td><td>AutoCAD と同じく排他</td></tr>
+<tr><td class="num">15</td><td><span class="area">直交・極</span><br><span class="sub">#35</span></td><td>極の刻みは 15°。吸い付きは<b>画面上 10px 以内かつ角度の差 ±3° 以内</b></td><td>刻み 45° / 90°（AutoCAD の既定）、角度の上限なし</td></tr>
+<tr><td class="num">16</td><td><span class="area">直交・極</span><br><span class="sub">#35</span></td><td>RECTANGLE は直交・極の対象外（対角を直交にすると面積 0 になるため）</td><td>対象にする</td></tr>
+<tr><td class="num">17</td><td><span class="area">直交・極</span><br><span class="sub">#35</span></td><td>日本語の変換中は F8 / F10 に反応しない（IME の半角カナ・半角英数キーと重なるため）</td><td>常に反応</td></tr>
+<tr><td class="num">18</td><td><span class="area">ステータスバー</span><br><span class="sub">#39</span></td><td>切り替え部品（OSNAP / ORTHO / POLAR / DYN）を<b>座標の直後</b>へ。情報表示は <b>レイヤ / 選択 / 要素 / 倍率</b> の順にし、入らない項目は右から丸ごと省く</td><td>元の並び（倍率・要素・画層・選択の後に切り替え）</td></tr>
+<tr><td class="num">19</td><td><span class="area">ステータスバー</span><br><span class="sub">#39</span></td><td>CI に日本語フォント（<code>fonts-noto-cjk</code>）を入れ、幅のテストはフォント必須（無ければ理由つきで落ちる）</td><td>フォントの有無でテストの期待値を変える</td></tr>
+<tr><td class="num">20</td><td><span class="area">ステータスバー</span><br><span class="sub">#39</span></td><td>座標の欄は一度広がったら縮めない（図面の入れ替えで戻す）。座標の固定幅は 12 文字。長いレイヤ名は 16 文字で「…」</td><td>毎フレーム桁数に合わせる</td></tr>
+<tr><td class="num">21</td><td><span class="area">ステータスバー</span><br><span class="sub">#39</span></td><td>「コマンド実行中」と「OSNAP:端点」の欄は幅を固定して、表示が跳ねないようにする</td><td>幅を内容に合わせる</td></tr>
+<tr><td class="num">22</td><td><span class="area">未保存確認</span><br><span class="sub">#33</span></td><td><b>Esc = キャンセル、Enter = 保存する</b>（「保存する (Enter)」「キャンセル (Esc)」と表示）。「保存しない」には 1 文字キーを割り当てない</td><td>キーでは閉じない（修正前）</td></tr>
+<tr><td class="num">23</td><td><span class="area">未保存確認</span><br><span class="sub">#33</span></td><td>確認画面の外のクリックではキャンセルしない（誤クリック防止）</td><td>外のクリックでキャンセル</td></tr>
+<tr><td class="num">24</td><td><span class="area">未保存確認</span><br><span class="sub">#33</span></td><td><b>Enter はフォーカスの位置に関係なく必ず「保存する」</b>、Space は何もしない、「保存しない」はクリックでしか押せない（Tab → Enter で図面が捨てられる不具合を操作レビュアーが発見したため）</td><td>egui の既定（フォーカスのあるボタンが Enter / Space で押される）</td></tr>
+<tr><td class="num">25</td><td><span class="area">未保存確認</span><br><span class="sub">#33</span></td><td>確認画面の間は <b>Tab で枠を動かさない</b>（枠は常に「保存する」。Enter の結果と枠を必ず一致させる）</td><td>Tab で移動できるが Enter は常に保存（前回の修正。枠と結果が食い違った）</td></tr>
+<tr><td class="num">26</td><td><span class="area">未保存確認</span><br><span class="sub">#33</span></td><td>テストで保存ダイアログを開こうとしたら理由つきで落とす。CI のジョブに 30 分の制限時間</td><td>各テストが保存先を与える約束だけで守る</td></tr>
+<tr><td class="num">27</td><td><span class="area">保存</span><br><span class="sub">#42</span></td><td>保存では選択・スナップ・座標の欄を変えない。<b>リボン・クイックアクセスの保存ボタンも実行中のコマンドを中断しない</b>（Ctrl+S とそろえる）</td><td>保存ボタンは他のボタンと同じく中断する</td></tr>
+<tr><td class="num">28</td><td><span class="area">スナップ</span><br><span class="sub">#49</span></td><td>種別を末尾に足し、テストの match だけ直して <code>all()</code> を忘れた場合は検出できない（安定版の Rust に列挙子を数える手段が無い）。コンパイルエラーとコメントで促す</td><td>マクロで enum と <code>all()</code> を同じリストから作る</td></tr>
+<tr><td class="num">29</td><td><span class="area">cad-core</span><br><span class="sub">#52</span></td><td><b>同じ種類どうしの置き換えだけ</b>許す（線分→円は不可）。インスタンスは配置だけ変えられる（定義と上書きは不可）。不正な値は黙って直さずエラー</td><td>種類の変更も許す / インスタンスは対象外</td></tr>
+<tr><td class="num">30</td><td><span class="area">案内</span><br><span class="sub">#48</span></td><td>Issue の 2 番（「選び直すと対象に戻せます」を足す）は採らない（ロックを外すだけでは戻らないので誤解を招く）</td><td>文言を足す</td></tr>
+<tr><td class="num">31</td><td><span class="area">案内</span><br><span class="sub">#66</span></td><td>数え方を<b>「個」に統一</b>（「1 要素を移動」→「1 個を移動」）。ステータスバーの「要素 6」（図面の総数）はそのまま</td><td>「要素」に統一</td></tr>
+<tr><td class="num">32</td><td><span class="area">案内</span><br><span class="sub">#86</span></td><td>パネル操作の案内・履歴は利用者向けの言葉（「UNDO: レイヤの移動」）。<code>PSET</code> / <code>PARAM</code> も日本語に。操作レビュアーは「図形のレイヤの変更」「プロパティの変更」への言い換えを推奨（未反映、#73 のコメント）</td><td>内部名のまま</td></tr>
+<tr><td class="num">33</td><td><span class="area">ホバー強調</span><br><span class="sub">#63</span></td><td>縁取りは半透明の紫（アルファ 0x90・幅 7px）を<b>線の下に敷く</b>（線の上に重ねると選択済みの水色やレイヤ色が変わって見えたため）</td><td>線の上に重ねる（最初の実装）/ 別の色</td></tr>
+<tr><td class="num">34</td><td><span class="area">ホバー強調</span><br><span class="sub">#63</span></td><td>図形を指す段階で OSNAP を効かせないのは、TRIM / EXTEND / FILLET / CHAMFER に加えて EDITCOMP・BIND・PSET・XLINE のオフセットにも広げた（どれも点ではなく図形を求める段階）。OSNAP のツールチップに「点を指定するときに効く」</td><td>TRIM 系の 4 つだけ</td></tr>
+<tr><td class="num">35</td><td><span class="area">プロパティ</span><br><span class="sub">#62</span></td><td>リボンのホームに<b>「プロパティ」グループを新設</b>（「レイヤ」グループに混ぜると名前と食い違う）。Ctrl+1 は履歴に残さず、打ちかけの文字も捨てない</td><td>「レイヤ」グループに置く</td></tr>
+<tr><td class="num">36</td><td><span class="area">プロパティ</span><br><span class="sub">#66</span></td><td>作図領域の最小幅 400px を保証。レイヤ・コンポーネントの既定幅 460 → 370px、プロパティ 300px</td><td>開く枚数で幅を制限する（画面幅に追従しない）</td></tr>
+<tr><td class="num">37</td><td><span class="area">プロパティ</span><br><span class="sub">#75・#80</span></td><td>数値の欄の外をクリックしたら<b>確定する</b>（数値はすぐ図形が変わって見えるので、改名と逆。AutoCAD と同じ）。入力中にリボンの元に戻すを押すと入力値が取り消される</td><td>外のクリックではやめる</td></tr>
+<tr><td class="num">38</td><td><span class="area">プロパティ</span><br><span class="sub">#82</span></td><td>束縛された項目の横に「← 式「幅」」（ラベンダー）。長い式は式の部分だけ省略、狭いときは値の下の行に。回したインスタンスでは軸の対応を変える</td><td>—</td></tr>
+<tr><td class="num">39</td><td><span class="area">全選択</span><br><span class="sub">#72・#88</span></td><td>選択待ちでも Ctrl+A が効き、<code>ALL</code> も使える。効かない段階では灰色の案内を 1 行（連打で増えない）。リボンのホームに「選択」グループ</td><td>待機中だけ</td></tr>
+<tr><td class="num">40</td><td><span class="area">改名</span><br><span class="sub">#71</span></td><td>改名欄の外をクリックしたら<b>確定せずやめる</b>（名前を変えていたら「やめました（確定は Enter）」と出す）。Tab は欄の中で何もしない</td><td>エクスプローラのように外のクリックで確定</td></tr>
+<tr><td class="num">41</td><td><span class="area">グリップ</span><br><span class="sub">#81・#85</span></td><td>青 #2962ff 8px → 乗せると紫 #e040fb 12px＋案内 → 掴むと赤 #ff3d3d。操作レビュアーは<b>このまま</b>を推奨。重なったグリップはまとめて動き「（2 個）」と出る</td><td>AutoCAD の緑系 / 辺の中点だけ別の形（#87 に候補）</td></tr>
+<tr><td class="num">42</td><td><span class="area">グリップ</span><br><span class="sub">#85</span></td><td>掴んでいる間の中断は「掴んだ図形の形が変わった・編集できなくなった」ときだけ（別レイヤの色の変更などでは中断しない）</td><td>図面が少しでも変わったら中断（段階 1）</td></tr>
+<tr><td class="num">43</td><td><span class="area">MCP</span><br><span class="sub">#84・#89・#91</span></td><td>SDK（rmcp）を使わず自前の JSON-RPC、依存は serde_json と resvg だけ、MCP の版は initialize の形（2026-07-28 の新しい形は後回し）、ID は起動ごとの印つき、読み書きは <code>--root</code> の中だけ。<b>推奨で決めた 14 項目は Issue #70 に一覧</b></td><td>rmcp を使う / 新しい形に対応</td></tr>
+</table></div>
+
+<h2 id="backlog">起票した課題（未着手）</h2>
+<div class="tablewrap"><table>
+<tr><th>Issue</th><th>種類</th><th>内容</th><th>必要なこと</th></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/92">#92</a></td><td><span class="pill bug">不具合</span></td><td>cad-core の AddEntities / AddLayer が Redo のたびに新しい ID を振り、後のコマンドの Redo が失敗する・図形が存在しないレイヤに付く（アプリでも起きる見込み）</td><td class="note">cad-core の変更。<b>直してよいか判断がほしい</b></td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/96">#96</a></td><td><span class="pill idea">候補</span></td><td>MCP 段階 2: 起動中のアプリと MCP サーバーをつなぐ（LLM の変更がその場で画面に出る）</td><td class="note">計画を立てて承認をもらう。#92 を先に直すと安全</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/93">#93</a></td><td><span class="pill bug">不具合</span></td><td>作図領域の下端近くで 1 文字目を打つと、候補が出たフレームで入力欄が上へ跳ねる</td><td class="note">#27 の後に判断</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/60">#60</a></td><td><span class="pill core">cad-core</span></td><td>インスタンスが TRIM / EXTEND の境界にならない</td><td class="note">cad-core の変更</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/61">#61</a></td><td><span class="pill core">cad-core</span></td><td>作図線があると空間インデックスが分割されず、ほぼ線形探索になる（結果は正しい）</td><td class="note">cad-core の変更</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/69">#69</a></td><td><span class="pill idea">候補</span></td><td>TRIM / EXTEND: 理由の先出し・U オプション・Shift で切り替え・端点の交点のテスト</td><td class="note">採否を判断</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/79">#79</a></td><td><span class="pill idea">候補</span></td><td>図面の入れ替え: 改名中の入れ替えのテスト・パネル内部の全フィールド分解</td><td class="note">採否を判断</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/83">#83</a></td><td><span class="pill idea">候補</span></td><td>グリップの束縛判定をハンドルごとに（パネルと同じ細かさに）</td><td class="note">採否を判断</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/87">#87</a></td><td><span class="pill idea">候補</span></td><td>グリップ: 辺の中点の形・小さな図形での間引き・混在した束の案内</td><td class="note">採否を判断</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/73">#73</a></td><td><span class="pill idea">候補</span></td><td>案内の言葉: 「レイヤの移動」→「図形のレイヤの変更」、「プロパティ」→「プロパティの変更」</td><td class="note">好みの判断</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/15">#15</a></td><td><span class="pill idea">候補</span></td><td>コンポーネントの操作をパネルへ寄せる</td><td class="note">以前からの残り</td></tr>
+</table></div>
+
+<h2 id="shots">画面</h2>
+<div class="grid">
+<figure><img src="img/grips1009_shared.png" alt="グリップ"><figcaption>グリップ（#30）: 矩形の角は 1 つの四角で、掴むと 2 本が一緒に動く。ポリラインには辺の中点のグリップ</figcaption></figure>
+<figure><img src="img/props1009_bound.png" alt="プロパティパネルの束縛の表示"><figcaption>プロパティ（#31）: インプレース編集中、束縛された項目は表示だけで「← 式「…」」</figcaption></figure>
+<figure><img src="img/mcp1009_render.png" alt="MCP の render の出力"><figcaption>MCP（#70）: render の道具が描いた PNG（write_sample の図面）</figcaption></figure>
+<figure><img src="img/hover1008_selected_line.png" alt="ホバー強調"><figcaption>ホバー強調（#34）: 選択済みの水色の線に乗せても色は変わらず、下に紫の帯</figcaption></figure>
+<figure><img src="img/props1008_hover_and_panel.png" alt="プロパティパネル"><figcaption>プロパティ（#31）: クリックで拾った図形がそのままパネルに出る</figcaption></figure>
+<figure><img src="img/ribbon44_a_home_1280.png" alt="リボン"><figcaption>リボン（#46）: アイコン 44px、1280px 幅</figcaption></figure>
+<figure><img src="img/polar_b_snapped_45.png" alt="極トラッキング"><figcaption>極トラッキング（#29）: 45° に吸い付くと補助線と「45°」</figcaption></figure>
+<figure><img src="img/a_dyn_c_line_running_prompt_beside_cursor.png" alt="動的入力"><figcaption>動的入力（#20）: LINE 実行中、プロンプトがカーソル横に追従</figcaption></figure>
+</div>
+
+<h2 id="history">履歴</h2>
+<p class="lead">過去の報告。新しいものが上。</p>
+<details>
+<summary>2026-10-08〜09 — 新しいマシンで再開、夜間の自律作業</summary>
+<div class="detailbody">
+<p>新しいマシン（24 コア・60GB）で再開。同時に走らせる委譲・レビューを 4 本までに緩めた。#55 → #31 ＋ #34 → #30 → MCP の順に進め、PR 20 本以上を develop にマージ。夜間はユーザーの許可で MCP の自律実装を進めた。詳しくは <code>docs/PROGRESS.md</code>「次のセッションへ」。</p>
+<p>ジャッジ用メモの元の番号（10/8 時点の 1〜37）は並べ替えで振り直した。</p>
+</div>
+</details>
+<details>
+<summary>2026-10-07 — 別のマシンへ移る準備</summary>
+<div class="detailbody">
+<p>PR #45・#49・#50・#52・#53・#54・#56 をマージ。作業ツリーを <code>tools/wt.sh</code> で <code>.worktrees/</code> に作る運用、委譲のルールを <code>docs/agents/</code> に、この報告書を Artifact に移した。</p>
+<div class="grid">
+<figure><img src="img/ribbon44_a_home_1280.png" alt="44px のリボン、1280px 幅"><figcaption>リボンのアイコン 44px（PR #50）、1280px 幅</figcaption></figure>
+<figure><img src="img/ribbon44_d_home_800.png" alt="44px のリボン、800px 幅"><figcaption>800px 幅では右端の「›」で送る</figcaption></figure>
+</div>
+</div>
+</details>
+<details>
+<summary>2026-10-05 夜〜10-06 — 夜間の自律作業（リボン・直交極・ステータスバー・未保存確認）</summary>
+<div class="detailbody">
+<h4>B. 朝の判断待ち（自律では進めないもの）</h4>
 <table id="pending">
 <tr><th>項目</th><th>理由</th></tr>
 <tr><td>Issue #9 寸法作成 / #10 文字入力</td><td>CLAUDE.md の非スコープ（寸法記入・文字要素）。新しい図形の種類（エンティティモデルの変更）も要る</td></tr>
@@ -68,7 +163,7 @@
 <tr><td>#30 グリップ・#31 プロパティ</td><td><code>cad-core</code> に「既存の図形を書き換える汎用 Command」を足す必要がある。<code>cad-core</code> の中核への変更なので、ご主人の確認を取りたい</td></tr>
 </table>
 
-<h2>C. 今夜の作業リスト</h2>
+<h4>C. 今夜の作業リスト</h4>
 <table id="queue">
 <tr><th>Issue</th><th>内容</th><th>状況</th></tr>
 <tr><td><a href="https://github.com/yukimasui/ymcad/issues/26">#26</a></td><td>リボン（タブつき、SVG アイコン）</td><td class="ok">✅ マージ済み（PR #32、レビュー 4 往復）</td></tr>
@@ -80,7 +175,7 @@
 </table>
 <p>このあとも尽きたら、計測（DIST・LIST）、選択の改善（ホバーで強調・Shift で選択解除・全選択）、配列複写（ARRAY）などを、不満を調べて追加していく予定。</p>
 
-<h2>C2. 朝に実機で確かめてほしいこと</h2>
+<h4>C2. 朝に実機で確かめてほしいこと</h4>
 <ul>
 <li><b>リボン</b>: アイコンが何のコマンドか分かるか（とくに EXPLODE・STRETCH・REDEFINE）、押してすぐ座標を打てるか、狭い幅での「‹ ›」、HiDPI での見え方</li>
 <li><b>直交（F8）・極（F10）</b>: 吸い付きの強さ（基準点の近くの短い線）、補助線と角度表示、F8 / F10 がデスクトップ環境やメディアキーに取られないか、<b>日本語の変換中に F8 / F10 が変換に使われて ORTHO / POLAR が変わらないこと</b></li>
@@ -89,7 +184,7 @@
 <li><b>保存</b>: コマンドの実行中にリボンの保存・SAVEAS を押しても、元のコマンドが続くこと</li>
 </ul>
 
-<h2>E. 今夜できたもの（スクリーンショット）</h2>
+<h4>E. 今夜できたもの（スクリーンショット）</h4>
 <div class="grid">
 <figure><img src="img/ribbon_a_home_1280.png" alt=""><figcaption>リボン（ホーム）。タブの直後に UNDO / REDO / SAVE、右端に「レイヤ」グループ。押すとコマンド名を打ったのと同じ動き</figcaption></figure>
 <figure><img src="img/ribbon_icon_sheet.png" alt=""><figcaption>アイコン一覧（全 37 個、SVG）。操作レビュアーが「名前を隠して当てられるか」で判定し、STRETCH・REDEFINE・EXPLODE など 10 個を描き直した</figcaption></figure>
@@ -98,8 +193,14 @@
 <figure><img src="img/ortho_a_line_horizontal.png" alt=""><figcaption>直交（F8）: 斜めに指しても水平・垂直に拘束。寸法入力の角度欄も 0.00°</figcaption></figure>
 </div>
 
-<h2>D. これまで（10/5 日中）の記録</h2>
-<h2>1. 決まったこと</h2>
+
+</div>
+</details>
+<details>
+<summary>2026-10-05 日中 — 動的入力（段階 A）と試作</summary>
+<div class="detailbody">
+
+<h4>1. 決まったこと</h4>
 <table>
 <tr><th>項目</th><th>決定</th><th>決めた人</th></tr>
 <tr><td>実装範囲</td><td>案 B: カーソル横のコマンド入力（段階 A）＋寸法入力（段階 B）。PR は段階ごとに 1 本</td><td>ご主人</td></tr>
@@ -110,7 +211,7 @@
 </table>
 <p>詳細と受け入れ基準: <a href="https://github.com/yukimasui/ymcad/issues/20">Issue #20</a></p>
 
-<h2>2. 調査した世間の不満と対策</h2>
+<h4>2. 調査した世間の不満と対策</h4>
 <table>
 <tr><th>AutoCAD Dynamic Input への不満</th><th>ymcad での対策</th></tr>
 <tr><td>2 点目以降に打った座標が勝手に相対扱いになり、線が変な位置に引かれる（絶対には <code>#</code> が要る）</td><td>既定は絶対のまま。長さ・角度は名前つきの欄で入れる（段階 B）</td></tr>
@@ -121,18 +222,18 @@
 <tr><td>マルチモニタで表示が張り付く</td><td>位置は毎フレーム計算し、キャンバスの中に収める</td></tr>
 </table>
 
-<h2>3. 着手前の試作</h2>
-<h3>3-1. 画面を自動で撮る仕組み <span class="ok">✅ 成功</span></h3>
+<h4>3. 着手前の試作</h4>
+<h5>3-1. 画面を自動で撮る仕組み <span class="ok">✅ 成功</span></h5>
 <p><code>egui_kittest</code> をテスト用の依存として <code>cad-app</code> に追加。アプリを画面に出さずに、マウス移動とキー入力を流し込んで PNG に撮れることを確認した（環境変数の指定は不要、撮影 1 回あたり約 2〜5 秒）。<code>cad-core</code> には何も足していない。以後の見た目の確認はこれで行う。</p>
 <div class="grid">
 <figure><img src="img/before_typed_l.png" alt="変更前: L を打った状態"><figcaption>変更前: <code>L</code> を打つと、候補は画面下に出る（カーソルは中央）</figcaption></figure>
 <figure><img src="img/before_line_started.png" alt="変更前: LINE 実行中"><figcaption>変更前: LINE 実行中。プロンプト「線分の始点を指定:」は画面下</figcaption></figure>
 </div>
 
-<h3>3-2. 日本語入力の試作 <span class="warn">⏳ ご主人の確認待ち</span></h3>
+<h5>3-2. 日本語入力の試作 <span class="warn">⏳ ご主人の確認待ち</span></h5>
 <p>マウスに追従する入力欄で ibus + mozc の変換が壊れないかを見るための小さなアプリ（<code>spikes/dyn-input-ime/</code>）。ビルドと lint は通過済み。変換は自動では試せないので手で確かめてほしい。</p>
 
-<h2>4. 段階 A: カーソル横のコマンド入力 <span class="ok">✅ develop にマージ済み</span></h2>
+<h4>4. 段階 A: カーソル横のコマンド入力 <span class="ok">✅ develop にマージ済み</span></h4>
 <p>実装は Opus。オーケストレーターがテスト・lint・ビルドを手元で流し直し、スクリーンショットを目で確かめた。以下はすべてアプリを画面に出さずに自動で撮ったもの（マウスは画面中央、矢印がカーソル位置）。</p>
 <div class="grid">
 <figure><img src="img/a_dyn_a_idle_nothing_beside_cursor.png" alt=""><figcaption>① 何もしていないとき: カーソル横には何も出ない。ステータスバーに <code>DYN</code></figcaption></figure>
@@ -143,7 +244,7 @@
 <figure><img src="img/a_dyn_f_unknown_command_error.png" alt=""><figcaption>⑥ エラー: カーソル横に赤で数秒出し、画面下の履歴にも残す</figcaption></figure>
 <figure><img src="img/a_dyn_g_composing.png" alt=""><figcaption>⑦ 変換中: <code>[変換中]</code> と下線つきの未確定文字（入力は疑似イベント。実機の IME は未確認）</figcaption></figure>
 </div>
-<h3>受け入れ基準</h3>
+<h5>受け入れ基準</h5>
 <table>
 <tr><th>基準</th><th>状況</th><th>根拠</th></tr>
 <tr><td>実行中・入力中はカーソル横に出て、何もしていないときは出ない</td><td class="ok">✅</td><td>単体テスト + ①②③</td></tr>
@@ -155,13 +256,13 @@
 <tr><td>座標の解釈は従来どおり</td><td class="ok">✅</td><td>座標の解釈部分は無変更、既存テスト全通過</td></tr>
 </table>
 <p>自動検証: fmt / clippy（警告をエラー扱い）/ テスト 1,054 件（cad-app 286・cad-core 690 ほか）/ リリースビルド すべて通過。うち 8 本はアプリを実際に動かして「Enter の確定が 1 回だけ」「変換開始で入力欄が 1px も動かない」「カーソル横の欄の上をクリックしても点が入る」などを検査する振る舞いテスト。</p>
-<h3>実装で分かった落とし穴（記録済み）</h3>
+<h5>実装で分かった落とし穴（記録済み）</h5>
 <ul>
 <li>egui の入力欄は「見えないように隠す」と日本語入力が始まらなくなる → 透明度 0 で消す方法を採った</li>
 <li>描かなかった入力欄はキー入力を受け取れなくなる → 何もしていないときも透明のまま描き続ける</li>
 </ul>
 
-<h2>5. お願い（戻ったら）</h2>
+<h4>5. お願い（戻ったら）</h4>
 <div class="card">
 <p style="margin-top:0"><b>日本語入力の試作を試す</b>（5 分ほど）</p>
 <pre><code>cd ~/projects/ymcad/spikes/dyn-input-ime && cargo run --release</code></pre>
@@ -189,7 +290,7 @@
 </ol>
 </div>
 
-<h2>6. 作業ログ</h2>
+<h4>6. 作業ログ</h4>
 <table>
 <tr><th>時刻</th><th>内容</th></tr>
 <tr><td>—</td><td>PR #19: CLAUDE.md にオーケストレーター運用を追加。Opus レビュー NG → 修正 → OK で <code>develop</code> へマージ</td></tr>
@@ -224,3 +325,6 @@
 <tr><td>—</td><td>PR #33（#24）: 実際に起きていた不具合（未保存確認の画面で Enter を押すと直前のコマンドが再実行）を修正。コード・操作レビュー OK。Esc でキャンセル・Enter で保存などの改善を反映中</td></tr>
 <tr><td>—</td><td>PR #35 直交・極トラッキング: 1 回目コード OK・操作 OK → 非ブロッキング 10 件を反映 → 2 回目も両方 OK → <b>develop へマージ</b>（eaa9db5）</td></tr>
 </table>
+
+</div>
+</details>
