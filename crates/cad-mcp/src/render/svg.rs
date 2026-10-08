@@ -1126,6 +1126,60 @@ mod tests {
         assert!(out.len() < 10_000 + 300, "{} バイト", out.len());
     }
 
+    /// 中身の多いインスタンスを多数置いた図面は、**インスタンスを展開する途中でも**上限で止まる
+    /// （図形ごとの検査だけだと、上限を超えるのはインスタンスを 1 つ書き終えてから。中身 2000 本なら数百 KB 書き過ぎる）。
+    #[test]
+    fn instances_stop_being_expanded_at_the_limit() {
+        let mut doc = Document::new();
+        let contents: Vec<Entity> = (0..2000_u32)
+            .map(|i| on_zero(line(0.0, f64::from(i % 9) + 0.5, 9.0, 3.0)))
+            .collect();
+        doc.apply(Box::new(DefineComponent::new(
+            "DEF",
+            "密",
+            Point2::ORIGIN,
+            contents,
+        )))
+        .unwrap();
+        let def = doc.definitions().by_name("密").unwrap();
+        for _ in 0..20 {
+            doc.apply(Box::new(InsertInstance::new(
+                "INSERT",
+                def,
+                Placement::at(Point2::ORIGIN),
+                LayerId::ZERO,
+            )))
+            .unwrap();
+        }
+        // インスタンス 1 個ぶん（中身 2000 本）の SVG の大きさ。
+        let one = {
+            let mut single = String::new();
+            let _ = write_svg(
+                &mut single,
+                &doc,
+                TAG,
+                &fit10(),
+                Background::Dark,
+                usize::MAX,
+            );
+            single.len() / 20
+        };
+        let limit = 10_000;
+        assert!(
+            one > limit,
+            "インスタンス 1 個が上限より大きいこと（{one}）"
+        );
+        let mut out = String::new();
+        let e = write_svg(&mut out, &doc, TAG, &fit10(), Background::Dark, limit).unwrap_err();
+        assert!(e.contains("上限") && e.contains("region"), "{e}");
+        // 上限 + 要素 1 つぶんで止まる（インスタンス 1 個ぶんも書き過ぎない）。
+        assert!(
+            out.len() < limit + 300,
+            "{} バイトまで書いた（インスタンス 1 個は {one} バイト）",
+            out.len()
+        );
+    }
+
     /// 表示範囲が円の内側に丸ごと入るとき、円周は 1 本も見えない: 書かず、「描いた」にも数えない。
     #[test]
     fn circle_around_the_view_is_not_drawn_or_counted() {

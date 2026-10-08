@@ -23,6 +23,7 @@ x = view.min.x + px / pixels_per_unit、y = view.max.y - py / pixels_per_unit（
 region を省くと、表示中の図形（インスタンスの中身を含む。作図線は除く）の範囲に余白を付けて収める。region を指定すると、その範囲が縦横比を保って画像の中央に収まる。\
 非表示のレイヤは描かない。色はレイヤ・図形の色（ACI）、破線は線種のとおり。light の背景では白（ACI 7）を黒で描く。文字は描かない。\
 SVG の各要素の data-id は図形 ID。図面を変えない。\
+LLM が見るなら width / height は 1024〜1568 px で十分（Claude の API は長辺が約 1568 px を超える画像を縮小して読む）。\
 返す大きさに上限がある（PNG は 3.5 MiB、SVG は 256 KiB）。超えたらエラーになるので、width / height を下げるか region で範囲を絞る（SVG は region だけが効く。図形が多い図面は PNG で見る）。",
     schema: || {
         (
