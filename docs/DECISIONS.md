@@ -3399,6 +3399,52 @@ Ctrl+A を知らなくても見つけられるように、ホームの末尾に�
 全図形を選ぶ（11 本）、編集の外の図形を除く、選択待ちのボタンで中断する、選択待ちで打った名前を断る、
 確定の後に選ぶ（同じフレームの Ctrl+A と Enter）、要約のキャッシュを外す（1 万図形）。
 
+### 追記（2026-10-09、Issue #74）: 効かない段階の案内・選択待ちの `ALL`・編集の外の数・修飾キー
+
+PR #72 のレビューの非ブロッキング指摘を入れた（ユーザー承認 2026-10-08）。決定 1〜4 の枠組みは変えない。
+
+- **効かない段階の案内**（決定 1 に追加）: 点や値の入力中・図形を指す段階の Ctrl+A は、キーを消費する
+  （入力欄の文字の全選択にもならない）のに何も出ず、「効かなかった」のか「押し損ねた」のか分からなかった。
+  `select_all` が偽を返すときに灰色の案内を 1 行出す（`SELECT_ALL_UNAVAILABLE`「全選択: 「コマンド:」か
+  「オブジェクトを選択」のときに使えます」）。エラー（赤）にはしない（操作の誤りではないので、カーソル横に
+  赤く出すほどではない）。
+  - **連打・押しっぱなしで履歴を埋めない**: 直前の行が同じ案内なら積まない。キーリピートでは 1 秒に
+    数十回届き、履歴（上限 200 行）の前の案内やエラーが流れて消える。間に別の行が入れば、また出す
+  - 採らなかった案: 毎回積む（上のとおり）。時刻で間引く（`Session` は時刻を持たず、テストも書きにくい）。
+    呼び出し元（アプリの Ctrl+A）で出す（決定 3 の「段階の判定は `select_all` だけ」に反する）
+- **選択待ちの `ALL`**（決定 4 に追加）: 「オブジェクトを選択」で `ALL` と打つのは AutoCAD の習慣。
+  選択待ちの間だけ `SELECTALL` と同じに扱う（大文字・小文字は問わない）。選択待ちではコマンド名を
+  受け付けないので ARC の別名 `A` などとは衝突せず、ZOOM の `A` / `ALL` は ZOOM の実行中（点や値を待つ
+  段階）にしか届かないので、これとも衝突しない。待機中は今までどおり不明なコマンド、点の入力中は
+  座標として読めないエラー（テストで固定）。
+  - 採らなかった案: 選択待ちのエラー文に「全部を選ぶなら Ctrl+A」を添えるだけ（Issue の最低限の案）。
+    `ALL` が通るなら添える必要が無い
+- **インプレース編集中の案内**（決定 2 に追加）: 編集の外の図形も入る（ユーザー判断 6）が、続けて
+  ERASE すると外も消えることが案内から読めなかった。編集中だけ、選んだうち編集の外
+  （`EditSession::contains` が偽）の数を「（編集の外の N 個を含む）」と添える。除いた数の添え書きと
+  並ぶときは 1 組の括弧に「。」でまとめる（「（A）（B）」は読みにくい）。
+- **修飾キーを厳密に**（決定 3 の修正）: `consume_key(COMMAND, A)` は `matches_logically` で比べるので、
+  Ctrl+Shift+A・Ctrl+Alt+A も全選択になっていた（実害は無かったが、将来その組み合わせを使うと黙って
+  全選択になる）。`matches_exact` で比べる `consume_key_exact`（`cmdline/mod.rs`）にした。Ctrl と Command
+  の違いは `matches_exact` が吸収するので、Linux の Ctrl+A（`ctrl` と `command` の両方が立つ）は
+  これまでどおり。厳密に比べて奪わなかった Ctrl+Shift+A は入力欄に届くが、空の欄の全選択で何も起きない。
+- **改名欄の Ctrl+A**: 欄の文字の全選択になり図形は選ばれないことを behavior テストで固定した
+  （#68 の「欄にフォーカスが無いとキーがコマンドラインへ流れる」穴が戻ったとき、全選択の側でも気づける）。
+- アイコン（Issue #74 の 4、好み）は変えない。
+
+テスト: 単体 `does_nothing_while_a_point_or_an_entity_is_wanted`（「案内も出ない」から「案内を 1 行・
+連打で増えない」に変えた）、`the_unavailable_notice_comes_back_after_another_line`、
+`typing_all_while_waiting_for_a_selection_selects_everything`、`all_outside_a_selection_wait_keeps_its_meaning`、
+`includes_entities_dimmed_by_in_place_editing`（案内の文言）、`the_notice_puts_the_notes_in_one_pair_of_brackets`。
+behavior `ctrl_a_does_nothing_while_a_point_is_wanted`（案内と連打）、`ctrl_a_explains_itself_while_trim_wants_an_entity`、
+`ctrl_a_with_shift_or_alt_does_not_select_everything`、`erase_then_typing_all_erases_everything`、
+`typing_all_when_idle_is_still_an_unknown_command`、`ctrl_a_while_editing_in_place_counts_the_entities_outside`、
+`ctrl_a_in_the_rename_field_selects_its_text_not_the_drawing`。
+
+わざと壊して落ちることを確かめたもの: 案内を出さない（4 本）、同じ案内を毎回積む（2 本）、選択待ちの `ALL` を
+読み替えない（2 本）、`ALL` をどの段階でも全選択にする（2 本）、編集の外を数えない（2 本）、修飾キーを緩く比べる、
+キーの持ち主でないときも Ctrl+A を奪う・改名欄にフォーカスを渡さない（改名欄のテスト）。
+
 ---
 
 ## ADR-0045: グリップ編集は「グリップの点が P へ行く」純粋関数と、`Session` のツール 1 つで作る
