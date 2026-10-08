@@ -104,6 +104,18 @@ impl SnapState {
         self.held = None;
     }
 
+    /// 図面が丸ごと入れ替わった（NEW / OPEN）。索引と掴んでいた点を捨てる。
+    ///
+    /// 版番号は同じ図面の中でしか比べられない。入れ替えた図面の版番号が前の図面と
+    /// 偶然一致すると、[`Self::refresh_index`] が前の図面の索引を使い回してしまう（Issue #65）。
+    /// ON/OFF とスナップ種別の設定は利用者の設定なので残す。
+    pub fn document_replaced(&mut self) {
+        self.index = SpatialIndex::default();
+        self.index_revision = 0;
+        self.index_valid = false;
+        self.held = None;
+    }
+
     /// インデックスを必要なら作り直す。
     fn refresh_index(&mut self, doc: &Document) {
         if self.index_valid && self.index_revision == doc.revision() {
@@ -293,6 +305,34 @@ mod tests {
         s.update(&doc, Point2::new(2.0, 0.0), 5.0, 8.0, None);
         assert_eq!(s.index_revision, rev, "版が同じなら再構築しない");
         assert_eq!(rev, doc.revision());
+    }
+
+    /// 図面の入れ替えで索引を捨てること。版番号が同じでも新しい図面の点を引く（Issue #65）。
+    #[test]
+    fn document_replaced_drops_the_index_even_if_the_revision_matches() {
+        let old = doc_with_line();
+        let mut new = Document::new();
+        new.apply(Box::new(AddEntities::one(
+            "LINE",
+            Entity::new(
+                Geometry::Line(Line::new(Point2::new(0.0, 50.0), Point2::new(100.0, 50.0))),
+                LayerId::ZERO,
+            ),
+        )))
+        .unwrap();
+        assert_eq!(old.revision(), new.revision(), "前提: 版番号が同じ");
+
+        let mut s = SnapState::new();
+        s.update(&old, Point2::new(1.0, 0.0), 5.0, 8.0, None)
+            .unwrap();
+        s.document_replaced();
+
+        assert!(s.held().is_none(), "掴んでいた点は捨てる");
+        assert!(s.is_enabled(), "ON/OFF は利用者の設定なので残す");
+        let got = s
+            .update(&new, Point2::new(1.0, 50.0), 5.0, 8.0, None)
+            .expect("新しい図面の端点に吸い付く");
+        assert!(got.point.eq_tol(Point2::new(0.0, 50.0)), "{got:?}");
     }
 
     #[test]

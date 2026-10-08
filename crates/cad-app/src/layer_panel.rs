@@ -157,10 +157,23 @@ impl LayerPanel {
     pub fn toggle(&mut self) {
         self.open = !self.open;
         if !self.open {
-            self.rename_target = None;
-            self.rename_focus_pending = false;
-            self.color_picker_for = None;
+            self.clear_transient();
         }
+    }
+
+    /// 図面が丸ごと入れ替わった（NEW / OPEN）。レイヤの ID を覚えている編集中の状態を捨てる。
+    ///
+    /// レイヤの ID は図面ごとに振られるので、残すと新しい図面の別のレイヤを指しうる
+    /// （改名の確定が別のレイヤに掛かる）。開閉と、新規レイヤ名の下書きは残す。
+    pub fn document_replaced(&mut self) {
+        self.clear_transient();
+    }
+
+    /// 改名中・色見本表示中の状態を捨てる。
+    fn clear_transient(&mut self) {
+        self.rename_target = None;
+        self.rename_focus_pending = false;
+        self.color_picker_for = None;
     }
 
     /// パネルを描画し、実行すべきコマンドを返す。
@@ -535,6 +548,21 @@ mod tests {
         assert!(p.rename_target.is_none());
         assert!(!p.rename_focus_pending);
         assert!(p.color_picker_for.is_none());
+    }
+
+    /// 図面が入れ替わったら、前の図面のレイヤ ID を指す編集中の状態を捨てること（Issue #65）。
+    #[test]
+    fn document_replaced_clears_transient_state_but_keeps_the_panel_open() {
+        let mut p = LayerPanel::new();
+        p.toggle();
+        p.rename_target = Some(LayerId::ZERO);
+        p.rename_focus_pending = true;
+        p.color_picker_for = Some(LayerId::ZERO);
+        p.document_replaced();
+        assert!(p.rename_target.is_none());
+        assert!(!p.rename_focus_pending);
+        assert!(p.color_picker_for.is_none());
+        assert!(p.is_open(), "開閉は利用者の設定なので残す");
     }
 
     /// 改名の欄からフォーカスが外れたときの結末。
