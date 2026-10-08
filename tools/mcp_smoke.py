@@ -15,9 +15,11 @@ JSON-RPC を話し、保存されたファイルを validate_ymc.py に通す。
 3. sample.dxf を開いて from_dxf.ymc へ保存（DXF → ネイティブの変換）
 4. sample.ymc を開き、図形・レイヤ・コンポーネントを照会し、roundtrip.ymc へ保存
    （開いて保存しただけの .ymc は元とバイト単位で一致すること）
-5. root の外・.. を含むパス・上書きの確認が isError になること
-6. stdin を閉じ、正常終了すること。stdout にプロトコル以外が出ていないこと
-7. 保存したファイルを validate_ymc.py に通す
+5. root の外・.. を含むパス・上書きの確認・開いた .dxf への path なしの保存が isError になること
+6. 新規図面に、レイヤを作り、図形を描き、変え、動かし・回し・拡大し・鏡に映し（複製も）、
+   レイヤを移し、消し、undo / redo し、レイヤを変え・消して edited.ymc へ保存（段階 1b）
+7. stdin を閉じ、正常終了すること。stdout にプロトコル以外が出ていないこと
+8. 保存したファイルを validate_ymc.py に通す（edited.ymc は図形の種類ごとの件数まで）
 
 使い方
 ------
@@ -42,6 +44,9 @@ VALIDATE_YMC = HERE / "validate_ymc.py"
 # write_sample の中身（CI の validate_ymc.py --expect と同じ）。
 SAMPLE_EXPECT = "arc=1,xline=1,polyline=1,instance=3,circle=2"
 
+# 段階 1b の通しで描いた図面の中身（edit_session の手順から数えた値）。
+EDITED_EXPECT = "line=5,circle=1,arc=2,xline=0,polyline=2,instance=0"
+
 EXPECTED_TOOLS = {
     "new_drawing",
     "open_drawing",
@@ -53,7 +58,22 @@ EXPECTED_TOOLS = {
     "list_components",
     "undo",
     "redo",
+    # 段階 1b
+    "add_entities",
+    "modify_entities",
+    "delete_entities",
+    "move_entities",
+    "rotate_entities",
+    "scale_entities",
+    "mirror_entities",
+    "set_entity_layer",
+    "add_layer",
+    "update_layer",
+    "delete_layer",
 }
+
+# 図面を変える道具（readOnlyHint が false であること）。
+EDITING_TOOLS = EXPECTED_TOOLS - {"drawing_info", "list_entities", "get_entities", "list_layers", "list_components"}
 
 
 class SmokeError(Exception):
@@ -151,6 +171,115 @@ def check_tool_list(tools: list) -> None:
         ann = t.get("annotations", {})
         check(isinstance(ann.get("readOnlyHint"), bool), f"{t['name']}: readOnlyHint が無い")
         check(isinstance(ann.get("destructiveHint"), bool), f"{t['name']}: destructiveHint が無い")
+        if t["name"] in EDITING_TOOLS:
+            check(ann["readOnlyHint"] is False, f"{t['name']}: 図面を変えるのに readOnlyHint が true")
+
+
+def count(c: Client) -> int:
+    return c.ok("drawing_info", {})["entity_count"]
+
+
+def edit_session(c: Client) -> None:
+    """段階 1b: 新規図面に描いて変え、edited.ymc へ保存する。
+
+    件数は EDITED_EXPECT と突き合わせる。各手順の後の図形の数も見る。
+    """
+    c.ok("new_drawing", {})
+    info = c.ok("drawing_info", {})
+    drawing = info["drawing"]
+
+    # --- レイヤ ---------------------------------------------------------------
+    wall = c.ok("add_layer", {"name": "WALL", "color": 1, "linetype": "dashed"})["layer"]
+    check(wall["linetype"] == "dashed" and wall["color"] == 1, f"add_layer: {wall}")
+    c.fails("add_layer", {"name": "WALL", "color": 2}, "既に")
+    c.ok("add_layer", {"name": "LOCKED", "color": 2})
+    c.ok("update_layer", {"name": "LOCKED", "locked": True})
+
+    # --- 作図（1 回の呼び出しで 5 つ）-----------------------------------------
+    drawn = c.ok(
+        "add_entities",
+        {
+            "layer": "WALL",
+            "entities": [
+                {"type": "line", "start": [0, 0], "end": [100, 0]},
+                {"type": "circle", "center": {"x": 50, "y": 50}, "radius": "5*2"},
+                {"type": "arc", "start": [10, 0], "through": [0, 10], "end": [-10, 0]},
+                {"type": "xline", "origin": [0, 0], "through": [1, 1]},
+                {"type": "polyline", "vertices": [[0, 0], [10, 0], [10, 10]], "closed": True},
+            ],
+        },
+    )
+    ids = drawn["ids"]
+    check(len(ids) == 5 and all(i.startswith(f"{drawing}e") for i in ids), f"add_entities の ID: {drawn}")
+    line, circle, arc, xline, poly = ids
+    check(count(c) == 5, "5 つ描けていない")
+    got = c.ok("get_entities", {"ids": [circle, arc, xline]})["entities"]
+    check(got[0]["geometry"]["radius"] == 10 and got[0]["layer"] == "WALL", f"式の半径・レイヤ: {got[0]}")
+    a = got[1]["geometry"]
+    # 3 点の円弧は中心 (0,0)・半径 10・0°→180°。度は Python の math で別に求めて比べる。
+    check(
+        math.isclose(a["radius"], 10)
+        and math.isclose(a["start_angle"] % 360, 0, abs_tol=1e-6)
+        and math.isclose(a["end_angle"], math.degrees(math.pi)),
+        f"3 点の円弧: {a}",
+    )
+    check(math.isclose(got[2]["geometry"]["angle"], 45), f"2 点の作図線: {got[2]}")
+
+    # 拒まれる呼び出しは何も変えない。
+    c.fails("add_entities", {"layer": "LOCKED", "entities": [{"type": "line", "start": [0, 0], "end": [1, 0]}]}, "ロック中")
+    c.fails(
+        "add_entities",
+        {"entities": [{"type": "line", "start": [0, 0], "end": [1, 0]}, {"type": "circle", "center": [0, 0], "radius": 0}]},
+        "entities[1]",
+    )
+    c.fails("modify_entities", {"changes": [{"id": poly, "set": {"vertices": [[0, 0], [1, 1]]}}]}, "頂点の数")
+    c.fails("scale_entities", {"ids": [circle], "center": [0, 0], "factor": 0}, "0 より大きい")
+    check(count(c) == 5, "拒まれた呼び出しで図形の数が変わった")
+
+    # --- 変更・変形 -------------------------------------------------------------
+    c.ok("modify_entities", {"changes": [{"id": circle, "set": {"radius": 20}}]})
+    moved = c.ok("move_entities", {"ids": [line], "delta": [0, 10], "copy": True})
+    check(len(moved["created"]) == 1, f"move の複製: {moved}")
+    line_copy = moved["created"][0]
+    check(c.ok("get_entities", {"ids": [line_copy]})["entities"][0]["geometry"]["start"] == {"x": 0, "y": 10}, "複製の位置")
+    rotated = c.ok("rotate_entities", {"ids": [poly], "center": [0, 0], "angle_deg": 90, "copy": True})
+    check(len(rotated["created"]) == 1, f"rotate の複製: {rotated}")
+    c.ok("scale_entities", {"ids": [circle], "center": [50, 50], "factor": 2})
+    check(c.ok("get_entities", {"ids": [circle]})["entities"][0]["geometry"]["radius"] == 40, "拡大した半径")
+    mirrored = c.ok("mirror_entities", {"ids": [arc], "axis_a": [0, -1], "axis_b": [0, 1], "keep_original": True})
+    check(len(mirrored["created"]) == 1, f"mirror の複製: {mirrored}")
+    c.ok("set_entity_layer", {"ids": [line_copy], "layer": "0"})
+    c.ok("delete_entities", {"ids": [xline]})
+    c.fails("get_entities", {"ids": [xline]}, "ありません")
+    check(count(c) == 7, "変形の後の図形の数")
+
+    # --- undo / redo: 1 回の呼び出しが undo 1 回ぶん -----------------------------
+    three = [{"type": "line", "start": [0, y], "end": [5, y]} for y in (100, 110, 120)]
+    c.ok("add_entities", {"entities": three})
+    check(count(c) == 10, "3 本描けていない")
+    undone = c.ok("undo", {})
+    check(undone["undone"] == ["ADD"] and count(c) == 7, f"undo 1 回で 3 本とも消えない: {undone}")
+    c.ok("redo", {})
+    check(count(c) == 10, "redo で戻らない")
+
+    # --- レイヤの変更と削除 -------------------------------------------------------
+    renamed = c.ok("update_layer", {"name": "WALL", "rename_to": "外壁", "color": 3, "make_current": True})["layer"]
+    check(renamed["name"] == "外壁" and renamed["current"] and renamed["color"] == 3, f"update_layer: {renamed}")
+    check(c.ok("undo", {})["undone"] == ["LAYER"], "update_layer が undo 1 回ぶんでない")
+    c.ok("redo", {})
+    c.ok("add_layer", {"name": "TMP", "color": 4})
+    c.ok("add_entities", {"layer": "TMP", "entities": [{"type": "circle", "center": [0, 0], "radius": 1}]})
+    deleted = c.ok("delete_layer", {"name": "TMP"})
+    check(deleted["deleted_entities"] == 1, f"delete_layer: {deleted}")
+    c.fails("delete_layer", {"name": "外壁"}, "現在レイヤ")
+    layers = {l["name"]: l for l in c.ok("list_layers", {})["layers"]}
+    check(set(layers) == {"0", "外壁", "LOCKED"}, f"レイヤの一覧: {sorted(layers)}")
+    # 3 本の線分は layer を省いたので、そのときの現在レイヤ 0 に置かれている。
+    check(layers["外壁"]["entity_count"] == 6 and layers["0"]["entity_count"] == 4, f"レイヤごとの数: {layers}")
+    check(count(c) == 10, "最後の図形の数")
+
+    saved = c.ok("save_drawing", {"path": "edited.ymc"})
+    check(saved["entity_count"] == 10 and saved["format"] == "ymc", f"保存: {saved}")
 
 
 def run(binary: Path, root: Path) -> list[Path]:
@@ -160,7 +289,7 @@ def run(binary: Path, root: Path) -> list[Path]:
         check(p.is_file(), f"{p} がありません（write_sample で作ってください）")
 
     # 前の実行の出力を消す（残っていると上書きの確認で止まる）。
-    for name in ("from_dxf.ymc", "roundtrip.ymc"):
+    for name in ("from_dxf.ymc", "roundtrip.ymc", "edited.ymc"):
         (root / name).unlink(missing_ok=True)
 
     c = Client(binary, root)
@@ -185,6 +314,8 @@ def run(binary: Path, root: Path) -> list[Path]:
     # --- DXF を開いてネイティブで保存 -------------------------------------
     info = c.ok("open_drawing", {"path": "sample.dxf"})
     check(info["format"] == "dxf" and info["entity_count"] > 0, f"DXF を開けない: {info}")
+    # 開いた .dxf へ path なしで保存しない（設計原則 9: DXF は交換用・非可逆）。
+    c.fails("save_drawing", {}, ".ymc")
     # 図面名は d<起動の印（16 進）>-<通し番号>。起動の印はプロセスごとに違う。
     session, _, serial = info["drawing"][1:].partition("-")
     check(
@@ -238,6 +369,8 @@ def run(binary: Path, root: Path) -> list[Path]:
     c.fails("save_drawing", {"path": "note.txt"}, "拡張子")
     c.fails("new_drawing", {"bogus": 1}, "bogus")
 
+    edit_session(c)
+
     r = c.request("tools/call", {"name": "no_such_tool", "arguments": {}})
     check(r.get("error", {}).get("code") == -32602, f"知らない道具が -32602 でない: {r}")
 
@@ -251,7 +384,7 @@ def run(binary: Path, root: Path) -> list[Path]:
         roundtrip.read_bytes() == sample_ymc.read_bytes(),
         "開いて保存しただけの .ymc が元とバイト単位で一致しない",
     )
-    return [root / "from_dxf.ymc", roundtrip]
+    return [root / "from_dxf.ymc", roundtrip, root / "edited.ymc"]
 
 
 def validate(paths: list[Path]) -> None:
@@ -259,6 +392,8 @@ def validate(paths: list[Path]) -> None:
         args = [sys.executable, str(VALIDATE_YMC), str(p)]
         if p.name == "roundtrip.ymc":
             args += ["--expect", SAMPLE_EXPECT]
+        if p.name == "edited.ymc":
+            args += ["--expect", EDITED_EXPECT]
         done = subprocess.run(args, capture_output=True, text=True)
         check(done.returncode == 0, f"validate_ymc.py が {p} を不合格にした:\n{done.stdout}{done.stderr}")
         print(f"OK: validate_ymc.py {p.name}")
