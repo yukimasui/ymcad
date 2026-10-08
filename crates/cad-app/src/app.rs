@@ -40,11 +40,14 @@ const SIDE_PANEL_WIDTH: f32 = 370.0;
 ///
 /// 外側のパネルから順に、残りの幅からこれを引いた分までしか広がれない。ユーザーがドラッグで
 /// 広げた後や狭い画面でも毎フレーム効く（保存された幅も範囲に収められる）。
+/// ただし画面が狭く、開いているパネルの最小幅の合計を引くとこれを下回るときは、パネルの
+/// 最小幅を優先して作図領域を狭める（[`CadApp::canvas_min_width`]。パネルが幅 0 で見えなく
+/// なったり、隣のパネルを覆ったりしない）。
 const MIN_CANVAS_WIDTH: f32 = 400.0;
-/// 各パネルの最小幅 [px]。中身（レイヤの 1 行、プロパティの表）がはみ出さずに収まる幅。
+/// 各パネルの最小幅 [px]。中身（レイヤの 1 行、プロパティの表）が読める幅。
 ///
-/// egui の `Panel` は、範囲の上限が中身の最小幅より狭いと、中身を隣のパネルの上にはみ出して
-/// 描いてしまう。そうなる前に、内側のパネルの分を外側のパネルが空けておく（[`right_panel`]）。
+/// 内側のパネルの分を外側のパネルが空けておく（[`right_panel`]）。中身がこれより広くても、
+/// 各パネルは自分の幅の中で横スクロールするので、隣のパネルへはみ出さない（[`own_width`]）。
 const LAYER_PANEL_MIN_WIDTH: f32 = 330.0;
 const COMPONENT_PANEL_MIN_WIDTH: f32 = 240.0;
 const PROPERTIES_PANEL_MIN_WIDTH: f32 = 200.0;
@@ -813,16 +816,17 @@ fn ellipsize(text: &str, max_chars: usize) -> String {
 /// 右側のパネル。幅は、残りの幅から作図領域の最小幅を引いた分までに毎フレーム収める。
 ///
 /// `reserved` … このパネルより内側（あとで置く）の、開いているパネルの最小幅の合計。
-/// これを空けておかないと、3 枚開いたとき内側のパネルが中身の最小幅より狭くなる。
-/// 画面が狭くて空けられないときは、作図領域の最小幅を優先して、内側のパネルが縮む。
+/// これを空けておかないと、3 枚開いたとき内側のパネルが最小幅より狭くなる。
+/// `canvas_min` … 作図領域に残す最小幅（[`CadApp::canvas_min_width`]）。
 fn right_panel(
     id: &'static str,
     default_width: f32,
     min_width: f32,
     reserved: f32,
+    canvas_min: f32,
     ui: &egui::Ui,
 ) -> egui::Panel {
-    let room = (ui.available_width() - MIN_CANVAS_WIDTH).max(0.0);
+    let room = (ui.available_width() - canvas_min).max(0.0);
     let max = if room - reserved >= min_width {
         room - reserved
     } else {
@@ -832,6 +836,22 @@ fn right_panel(
         .default_size(default_width)
         .min_size(min_width)
         .max_size(max)
+}
+
+/// パネルの中身を、パネル自身の幅で切る（収まらない分は横スクロールで届く）。
+///
+/// egui の `Panel` は、中身がパネルの幅より広いと中身を隣のパネルの上へはみ出して描く。
+/// 後から描くパネルがその上を塗るので、先に描いたパネルの左側（見出しやボタン）が隠れる。
+fn own_width<R>(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    egui::ScrollArea::horizontal()
+        .id_salt(id)
+        .auto_shrink([false, true])
+        .show(ui, add_contents)
+        .inner
 }
 
 impl CadApp {
@@ -919,6 +939,17 @@ impl CadApp {
         components + properties
     }
 
+    /// 作図領域に残す最小幅。`MIN_CANVAS_WIDTH` と、画面幅から開いているパネルの最小幅の
+    /// 合計を引いた残りの、小さいほう（狭い画面ではパネルの最小幅を先に確保する）。
+    fn canvas_min_width(&self, total_width: f32) -> f32 {
+        let mut panels = 0.0;
+        if self.layer_panel.is_open() {
+            panels += LAYER_PANEL_MIN_WIDTH;
+        }
+        panels += self.reserved_width(true);
+        MIN_CANVAS_WIDTH.min((total_width - panels).max(0.0))
+    }
+
     /// レイヤパネルを描画し、返ってきたコマンドを適用する。
     fn layer_area(&mut self, ui: &mut egui::Ui) {
         if !self.layer_panel.is_open() {
@@ -926,24 +957,28 @@ impl CadApp {
         }
         let busy = self.session.active_command().is_some();
         let reserved = self.reserved_width(true);
+        let canvas_min = self.canvas_min_width(ui.max_rect().width());
         right_panel(
             "layers",
             SIDE_PANEL_WIDTH,
             LAYER_PANEL_MIN_WIDTH,
             reserved,
+            canvas_min,
             ui,
         )
         .show(ui, |ui| {
-            let commands = self.layer_panel.show(
-                ui,
-                &self.doc,
-                &self.session.selection,
-                busy,
-                self.session.drop_note(),
-            );
-            for cmd in commands {
-                self.session.apply_external(cmd, &mut self.doc);
-            }
+            own_width(ui, "layers_scroll", |ui| {
+                let commands = self.layer_panel.show(
+                    ui,
+                    &self.doc,
+                    &self.session.selection,
+                    busy,
+                    self.session.drop_note(&self.doc),
+                );
+                for cmd in commands {
+                    self.session.apply_external(cmd, &mut self.doc);
+                }
+            });
         });
     }
 }
@@ -955,30 +990,34 @@ impl CadApp {
             return;
         }
         let reserved = self.reserved_width(false);
+        let canvas_min = self.canvas_min_width(ui.max_rect().width());
         right_panel(
             "components",
             SIDE_PANEL_WIDTH,
             COMPONENT_PANEL_MIN_WIDTH,
             reserved,
+            canvas_min,
             ui,
         )
         .show(ui, |ui| {
-            let (commands, request) = self.component_panel.show(
-                ui,
-                &self.doc,
-                &self.session.selection,
-                self.session.editing(),
-            );
-            for cmd in commands {
-                self.session.apply_external(cmd, &mut self.doc);
-            }
-            if let Some(PanelRequest::Insert(def)) = request {
-                // 名前を打たせずに INSERT を始める。
-                self.session.start_tool_directly(
-                    Box::new(crate::tools::component::InsertTool::for_definition(def)),
-                    &mut self.doc,
+            own_width(ui, "components_scroll", |ui| {
+                let (commands, request) = self.component_panel.show(
+                    ui,
+                    &self.doc,
+                    &self.session.selection,
+                    self.session.editing(),
                 );
-            }
+                for cmd in commands {
+                    self.session.apply_external(cmd, &mut self.doc);
+                }
+                if let Some(PanelRequest::Insert(def)) = request {
+                    // 名前を打たせずに INSERT を始める。
+                    self.session.start_tool_directly(
+                        Box::new(crate::tools::component::InsertTool::for_definition(def)),
+                        &mut self.doc,
+                    );
+                }
+            });
         });
     }
 }
@@ -990,27 +1029,31 @@ impl CadApp {
         if !self.properties_panel.is_open() {
             return;
         }
+        let canvas_min = self.canvas_min_width(ui.max_rect().width());
         right_panel(
             "properties",
             PROPERTIES_PANEL_WIDTH,
             PROPERTIES_PANEL_MIN_WIDTH,
             0.0,
+            canvas_min,
             ui,
         )
         .show(ui, |ui| {
-            // 選択待ちを含め、コマンドを実行している間は表示だけにする。
-            let busy = self.session.active_command().is_some();
-            let commands = self.properties_panel.show(
-                ui,
-                &self.doc,
-                &self.session.selection,
-                busy,
-                self.session.drop_note(),
-            );
-            // 選択から外れたときの案内は `Session::apply_external` が出す（レイヤパネルと共通）。
-            for cmd in commands {
-                self.session.apply_external(cmd, &mut self.doc);
-            }
+            own_width(ui, "properties_scroll", |ui| {
+                // 選択待ちを含め、コマンドを実行している間は表示だけにする。
+                let busy = self.session.active_command().is_some();
+                let commands = self.properties_panel.show(
+                    ui,
+                    &self.doc,
+                    &self.session.selection,
+                    busy,
+                    self.session.drop_note(&self.doc),
+                );
+                // 選択から外れたときの案内は `Session::apply_external` が出す（レイヤパネルと共通）。
+                for cmd in commands {
+                    self.session.apply_external(cmd, &mut self.doc);
+                }
+            });
         });
     }
 

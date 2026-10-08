@@ -230,7 +230,8 @@ impl ComponentPanel {
         overridden: bool,
         commands: &mut Vec<Box<dyn Command>>,
     ) {
-        ui.horizontal(|ui| {
+        // 狭いパネル（3 枚を開いたとき）でも中身が切れないよう、収まらなければ折り返す。
+        ui.horizontal_wrapped(|ui| {
             // 上書き中は名前を強調する。何を変えたかが一目で分かる。
             if overridden {
                 ui.strong(&decl.name);
@@ -295,7 +296,7 @@ impl ComponentPanel {
             .max_height(200.0)
             .show(ui, |ui| {
                 for decl in &definition.params {
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         ui.label(&decl.name);
                         ui.weak(decl.ty.name());
                         // 既定値は式なので、読める形にして見せる。
@@ -346,7 +347,7 @@ impl ComponentPanel {
 
         // ---- 新しく宣言する ----
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             ui.label("追加");
             ui.add(
                 egui::TextEdit::singleline(&mut self.draft.name)

@@ -75,6 +75,16 @@ impl ClickTarget {
     }
 }
 
+/// 選択から外れた理由の案内（[`Session::drop_note`]）。
+#[derive(Debug)]
+struct DropNote {
+    /// 案内を出した時点の図面の版番号。
+    doc_revision: u64,
+    /// 案内を出した時点の選択の版番号。
+    selection_revision: u64,
+    text: String,
+}
+
 /// 実行中コマンドが無いときのプロンプト。
 const IDLE_PROMPT: &str = "コマンド:";
 /// 選択待ちのプロンプト。
@@ -108,11 +118,13 @@ pub struct Session {
     /// 直接距離入力と寸法入力の `Enter` で、向きや欠けた値をカーソルから決めるのに使う。
     /// カーソルが作図領域の外にあるときは `None`。
     cursor: Option<Point2>,
-    /// 選択から外れた理由の案内と、そのときの選択の版番号。
+    /// 選択から外れた理由の案内と、そのときの図面と選択の版番号。
     ///
     /// コマンドラインは画面の下で、操作した人が見ているのは右のパネルなので、パネルにも出す。
-    /// 版番号が変わった（選び直した）ら古い案内になるので、[`Self::drop_note`] は返さない。
-    drop_note: Option<(u64, String)>,
+    /// どちらかの版番号が変わったら（選び直した、Undo で戻した、ほかの変更をした）古い案内に
+    /// なるので、[`Self::drop_note`] は返さない。移した直後は選択が空なので、選択の版だけでは
+    /// 空のまま進む操作（Undo など）で消えない。
+    drop_note: Option<DropNote>,
 }
 
 impl Default for Session {
@@ -142,15 +154,18 @@ impl Session {
         }
     }
 
-    /// 図形をロック・非表示のレイヤへ移して選択から外れたときの案内。次に選択が変わるまで返す。
+    /// 図形をロック・非表示のレイヤへ移して選択から外れたときの案内。次に図面か選択が変わるまで返す。
     ///
     /// プロパティパネルとレイヤパネルが、選択が空の表示の上に出す。
     #[must_use]
-    pub fn drop_note(&self) -> Option<&str> {
+    pub fn drop_note(&self, doc: &Document) -> Option<&str> {
         self.drop_note
             .as_ref()
-            .filter(|(revision, _)| *revision == self.selection.revision())
-            .map(|(_, text)| text.as_str())
+            .filter(|n| {
+                n.doc_revision == doc.revision()
+                    && n.selection_revision == self.selection.revision()
+            })
+            .map(|n| n.text.as_str())
     }
 
     /// いま表示すべきプロンプト。
@@ -259,9 +274,11 @@ impl Session {
         // `apply` は消えた図形を選択から外すので、外れた数は適用の前から数える。
         let selected_before = self.selection.len();
         let ids_before = self.selection.to_vec();
+        // `revalidate` はツールを中断することがあるので、実行中だったかは適用の前に見る。
+        let was_idle = self.tool.is_none();
         self.apply(cmd, name, doc);
         self.revalidate(doc, selected_before);
-        if self.tool.is_none() && name == MOVE_TO_LAYER_COMMAND {
+        if was_idle && name == MOVE_TO_LAYER_COMMAND {
             self.note_moved_out(&ids_before, doc);
         }
     }
@@ -288,7 +305,11 @@ impl Session {
         };
         let text = properties::moved_out_note(dropped.len(), dest);
         self.cmdline.info(text.clone());
-        self.drop_note = Some((self.selection.revision(), text));
+        self.drop_note = Some(DropNote {
+            doc_revision: doc.revision(),
+            selection_revision: self.selection.revision(),
+            text,
+        });
     }
 
     /// 図面が入れ替わった（NEW / OPEN）。前の図面の ID を覚えている状態をすべて捨てる。
@@ -299,6 +320,8 @@ impl Session {
     pub fn document_replaced(&mut self) {
         self.cancel();
         self.editing = None;
+        // 前の図面のレイヤ名を出した案内は残さない（版番号は新しい図面と重なりうる）。
+        self.drop_note = None;
     }
 
     /// 実行中のコマンドの外で図面が変わった後に、選択と実行中のツールの前提を確かめる

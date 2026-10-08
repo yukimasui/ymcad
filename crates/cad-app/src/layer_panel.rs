@@ -15,7 +15,6 @@ use cad_core::command::{
 use cad_core::layer::LineType;
 use cad_core::{AciColor, Command, Document, LayerId};
 
-use crate::properties::BUSY_NOTE;
 use crate::properties_panel::{BUSY_COLOR, DROP_NOTE_COLOR};
 use crate::selection::Selection;
 
@@ -31,6 +30,11 @@ const PALETTE: [AciColor; 9] = [
     AciColor(8),
     AciColor(9),
 ];
+
+/// コマンド実行中に「移動」の行へ出す案内。表示・ロック・色・追加などは実行中も使えるので、
+/// パネル全体ではなく移動だけが使えないと読めるようにする。
+pub const MOVE_BUSY_NOTE: &str =
+    "コマンド実行中は移動できません（終えるか Esc で中断。中断すると選択も外れます）";
 
 /// 色見本の一辺 [px]。
 const SWATCH_PX: f32 = 14.0;
@@ -297,8 +301,9 @@ impl LayerPanel {
         if let Some(note) = drop_note {
             ui.colored_label(DROP_NOTE_COLOR, note);
         }
-        if busy {
-            ui.colored_label(BUSY_COLOR, BUSY_NOTE);
+        // 選択が空なら移すものが無い（「先に図形を選択してください」だけで足りる）。
+        if busy && !selection.is_empty() {
+            ui.colored_label(BUSY_COLOR, MOVE_BUSY_NOTE);
         }
         ui.horizontal_wrapped(|ui| {
             if selection.is_empty() {

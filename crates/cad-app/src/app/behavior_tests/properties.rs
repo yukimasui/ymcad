@@ -6,8 +6,14 @@
 use egui_kittest::kittest::Queryable as _;
 
 use super::*;
+use crate::layer_panel::MOVE_BUSY_NOTE;
 use crate::properties::{BUSY_NOTE, EMPTY_NOTE, MIXED_LAYER};
-use cad_core::command::{AddEntities, AddLayer, SetLayerProperties};
+use cad_core::command::{
+    AddEntities, AddLayer, DefineComponent, InsertInstance, SetBinding, SetDefinitionParams,
+    SetLayerProperties,
+};
+use cad_core::component::{Binding, ParamDecl, Placement, Slot};
+use cad_core::expr::parse;
 use cad_core::geom::Line;
 use cad_core::{AciColor, Entity, EntityId, Geometry, LayerId};
 
@@ -398,7 +404,7 @@ fn moving_to_an_uneditable_layer_drops_the_selection_with_a_note(via_layer_panel
 
         // 選び直したら古い案内は消える（次の選択まで出し続けるだけ）。
         select(&mut h, &ids[2..]);
-        assert!(h.state().session.drop_note().is_none());
+        assert!(h.state().session.drop_note(&h.state().doc).is_none());
         assert_eq!(
             h.query_all_by_label(note).count(),
             1,
@@ -438,7 +444,7 @@ fn moving_to_an_ordinary_layer_gives_no_note() {
     press_move_button(&mut h, "L1");
     assert_eq!(h.state().session.selection.len(), 2, "選択は残る");
     assert_eq!(info_lines(&h), infos, "案内は増えない");
-    assert!(h.state().session.drop_note().is_none());
+    assert!(h.state().session.drop_note(&h.state().doc).is_none());
 }
 
 // ---- コマンド実行中は表示だけ -----------------------------------------------------
@@ -478,7 +484,16 @@ fn the_panel_is_display_only_while_a_command_runs() {
         press(&mut h, egui::Key::Escape);
         assert!(h.state().session.active_command().is_none());
         assert!(!has(&h, BUSY_NOTE), "{name}: 終われば案内が消える");
+        assert!(!has(&h, MOVE_BUSY_NOTE), "{name}: 移動の案内も消える");
     }
+
+    // 選択が空なら、レイヤパネルは実行中の案内を出さない（移すものが無い）。
+    select(&mut h, &[]);
+    type_text(&mut h, "LINE");
+    press(&mut h, egui::Key::Enter);
+    assert!(h.state().session.active_command().is_some(), "前提: 実行中");
+    assert!(!has(&h, MOVE_BUSY_NOTE), "選択が空なら案内を出さない");
+    press(&mut h, egui::Key::Escape);
 
     // 終わった後は変えられる（上の検査が、操作の失敗で偶然通ったのではないことの対照）。
     select(&mut h, &ids[..2]);
@@ -510,8 +525,13 @@ fn the_layer_panels_move_row_is_disabled_while_a_command_runs() {
         select(&mut h, &ids[..2]);
         assert_eq!(
             h.query_all_by_label(BUSY_NOTE).count(),
-            2,
-            "{name}: 両方のパネルに案内が出る"
+            1,
+            "{name}: プロパティパネルに案内が出る"
+        );
+        assert_eq!(
+            h.query_all_by_label(MOVE_BUSY_NOTE).count(),
+            1,
+            "{name}: レイヤパネルには「移動」だけが使えない旨の案内が出る"
         );
 
         press_move_button(&mut h, "L1");
@@ -573,18 +593,167 @@ fn three_side_panels_leave_the_canvas_its_minimum_width() {
     );
 }
 
-/// 狭い画面（1024px）でも、3 枚開いて作図領域の最小幅が残る。
-#[test]
-fn the_canvas_minimum_width_holds_on_a_narrow_screen() {
-    let mut h = app_with_width(1024.0);
+/// パラメータを持つインスタンス（コンポーネントパネルの中身が最大になる）を選び、長い名前の
+/// レイヤを足して、3 枚とも開いた状態。インスタンスは図面レイヤ 0 にある。
+fn crowded(width: f32) -> Harness<'static, CadApp> {
+    let mut h = app_with_width(width);
+    external(
+        &mut h,
+        Box::new(AddLayer::new("外壁_RC造_耐火被覆あり_2F", AciColor::WHITE)),
+    );
+    external(
+        &mut h,
+        Box::new(DefineComponent::new(
+            "COMPONENT",
+            "窓",
+            Point2::ORIGIN,
+            vec![Entity::new(
+                Geometry::Line(Line::new(Point2::ORIGIN, Point2::new(1.0, 0.0))),
+                LayerId::ZERO,
+            )],
+        )),
+    );
+    let def = h.state().doc.definitions().by_name("窓").expect("定義");
+    let params = vec![
+        ParamDecl::number("開口幅", 900.0).with_range(300.0, 3000.0),
+        ParamDecl::boolean("網戸", false),
+        ParamDecl::choice("種別", vec!["引違い".to_owned(), "開き".to_owned()]).expect("候補"),
+    ];
+    external(
+        &mut h,
+        Box::new(SetDefinitionParams::new("PARAM", def, params)),
+    );
+    external(
+        &mut h,
+        Box::new(SetBinding::new(
+            "BIND",
+            def,
+            Binding::new(0, Slot::LineBx, parse("開口幅").expect("解析")),
+        )),
+    );
+    external(
+        &mut h,
+        Box::new(InsertInstance::new(
+            "INSERT",
+            def,
+            Placement::at(Point2::ORIGIN),
+            LayerId::ZERO,
+        )),
+    );
+    let instance = h.state().doc.entities().ids().last().expect("インスタンス");
     open_layer_panel(&mut h);
     h.state_mut().component_panel.toggle();
     press_ctrl_1(&mut h);
-    assert!(open(&h) && h.state().layer_panel.is_open() && h.state().component_panel.is_open());
-    let canvas = h.state().viewport.rect().width();
+    select(&mut h, &[instance]);
+    assert!(h.state().layer_panel.is_open() && h.state().component_panel.is_open() && open(&h));
+    h
+}
+
+/// 3 枚のパネルが互いに重ならず、作図領域にも食い込まない。内側のパネルほど画面の左にある
+/// （作図領域 | プロパティ | コンポーネント | レイヤ）。
+///
+/// 中身が最大になる状態で見る。修正前（1280px）は、コンポーネントパネルの中身が割り当てより
+/// 広く、左側（見出し・「配置」ボタン・パラメータ名）がプロパティパネルの下に隠れた。
+fn assert_three_panels_do_not_overlap(h: &Harness<'_, CadApp>, width: f32) {
+    let canvas = h.state().viewport.rect();
+    let expected_min = crate::app::MIN_CANVAS_WIDTH.min(width - 770.0);
     assert!(
-        canvas >= crate::app::MIN_CANVAS_WIDTH - 1.0,
-        "作図領域が最小幅を保つ: {canvas}px"
+        canvas.width() >= expected_min - 1.0,
+        "{width}px: 作図領域は最小幅 {expected_min}px を保つ: {}px",
+        canvas.width()
+    );
+    // プロパティパネルの右端は、インスタンスのレイヤのドロップダウン（値は「0」）の右端。
+    let props_combo = h
+        .query_all_by_role(egui::accesskit::Role::ComboBox)
+        .find(|n| n.value().as_deref() == Some("0"))
+        .expect("プロパティのレイヤのドロップダウン")
+        .rect();
+    let props_label = h.get_by_label("倍率").rect();
+    assert!(
+        props_label.left() >= canvas.right(),
+        "{width}px: プロパティの中身が作図領域に食い込んでいる: {props_label:?} / {canvas:?}"
+    );
+    // コンポーネントパネルの左側（「配置」ボタン）が、プロパティパネルの右に出ている。
+    let place = h
+        .query_all_by_role_and_label(egui::accesskit::Role::Button, "配置")
+        .next()
+        .expect("「配置」ボタン")
+        .rect();
+    assert!(
+        place.left() >= props_combo.right(),
+        "{width}px: コンポーネントパネルの左側がプロパティパネルの下に隠れている: \
+         配置 {place:?} / プロパティ {props_combo:?}"
+    );
+}
+
+/// 1280px で 3 枚、パラメータを持つインスタンスを選び、長いレイヤ名があっても重ならない。
+#[test]
+fn crowded_three_panels_do_not_overlap_at_1280() {
+    let h = crowded(1280.0);
+    assert_three_panels_do_not_overlap(&h, 1280.0);
+}
+
+/// 狭い画面（1024px・800px）では、作図領域の最小幅よりパネルの最小幅を優先する。
+/// プロパティの幅が 0 になったり、隣のパネルを覆ったりしない。
+#[test]
+fn crowded_three_panels_keep_their_minimum_widths_on_narrow_screens() {
+    for width in [1024.0, 800.0] {
+        let h = crowded(width);
+        assert_three_panels_do_not_overlap(&h, width);
+    }
+}
+
+/// 移して選択から外れた案内は、Undo で戻したら消える（図形は元のレイヤへ戻っている）。
+/// 修正前は選択の版番号だけを見ていたので、選択が空のまま進む Undo では残った。
+#[test]
+fn the_moved_out_note_disappears_after_undo() {
+    let Scene { mut h, ids } = scene();
+    select(&mut h, &ids[..2]);
+    choose_layer(&mut h, "LOCKED（ロック中）");
+    let note =
+        "2 個を「LOCKED」へ移しました。ロック中のレイヤなので選択から外れます（U で戻せます）";
+    assert!(
+        h.state().session.drop_note(&h.state().doc).is_some(),
+        "前提"
+    );
+    assert_eq!(h.query_all_by_label(note).count(), 2, "前提: パネルと履歴");
+
+    type_text(&mut h, "U");
+    press(&mut h, egui::Key::Enter);
+    settle(&mut h);
+    assert_eq!(
+        layers_of(&h, &ids[..2]),
+        vec![LayerId::ZERO; 2],
+        "前提: 戻った"
+    );
+    assert!(
+        h.state().session.selection.is_empty(),
+        "前提: 選択は空のまま"
+    );
+    assert!(
+        h.state().session.drop_note(&h.state().doc).is_none(),
+        "Undo の後は案内を出さない"
+    );
+    assert_eq!(h.query_all_by_label(note).count(), 1, "履歴の 1 行だけ残る");
+}
+
+/// 図面が入れ替わったら（NEW / OPEN）、前の図面のレイヤ名を出した案内は消える。
+#[test]
+fn the_moved_out_note_disappears_when_the_drawing_is_replaced() {
+    let Scene { mut h, ids } = scene();
+    select(&mut h, &ids[..2]);
+    choose_layer(&mut h, "HIDDEN（非表示）");
+    assert!(
+        h.state().session.drop_note(&h.state().doc).is_some(),
+        "前提"
+    );
+
+    h.state_mut()
+        .report_file_outcome(crate::file_ops::FileOutcome::Replaced("新規".to_owned()));
+    settle(&mut h);
+    assert!(
+        h.state().session.drop_note(&h.state().doc).is_none(),
+        "図面の入れ替え後は案内を出さない"
     );
 }
 
