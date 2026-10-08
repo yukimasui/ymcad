@@ -6,6 +6,7 @@
 
 use crate::drafting::PolarHit;
 use crate::editing::EditSession;
+use crate::grips::{Grip, GripGroup};
 use crate::resolved::ResolvedInstances;
 use crate::selection::{Selection, WindowMode};
 use crate::tools::EntityPreview;
@@ -594,6 +595,105 @@ pub fn draw_selection_rect(painter: &egui::Painter, rect: egui::Rect, mode: Wind
 }
 
 // ---------------------------------------------------------------------------
+// グリップ（Issue #30、ADR-0045）
+// ---------------------------------------------------------------------------
+
+/// グリップの一辺 [px]。画面上で一定（ズームに左右されない）。
+pub const GRIP_PX: f32 = 8.0;
+/// 乗せているグリップの一辺 [px]。大きくして「掴める」ことを示す。
+pub const GRIP_HOVER_PX: f32 = 12.0;
+/// グリップの色（青）。選択色（水色）の線の上でも見分けられる濃さ。
+const GRIP_COLOR: egui::Color32 = egui::Color32::from_rgb(0x29, 0x62, 0xff);
+/// 乗せているグリップの色。ホバーの縁取り（紫）と同じ系統にして「乗せている」をそろえる。
+const GRIP_HOVER_COLOR: egui::Color32 = egui::Color32::from_rgb(0xe0, 0x40, 0xfb);
+/// 掴んでいる（ホット）グリップの色（赤）。
+const GRIP_HOT_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0x3d, 0x3d);
+/// グリップの縁の色。明るい線や背景の上でも四角の輪郭が読めるように。
+const GRIP_BORDER_COLOR: egui::Color32 = egui::Color32::from_rgb(0x10, 0x10, 0x10);
+
+/// 選択した図形のグリップを描く。乗せているもの（`hovered`）は大きく紫、掴んでいるもの（`hot`）は赤。
+///
+/// 図形・仮の形の**後**に描く（線に隠れないように）。重なったグリップ（段階 2）は同じ位置に
+/// 同じ四角を描くので 1 つに見える。乗せている束・掴んでいる束に入ったものは普通の青では描かず、
+/// 束を 1 つの四角として最後に描く（青い小さな四角が紫・赤の上に重なって見えないように）。
+pub fn draw_grips(
+    painter: &egui::Painter,
+    vp: &Viewport,
+    grips: &[Grip],
+    hovered: Option<&GripGroup>,
+    hot: &[Grip],
+) {
+    let same = |a: &Grip, b: &Grip| a.id == b.id && a.handle == b.handle;
+    let in_hovered = |g: &Grip| hovered.is_some_and(|h| h.grips().iter().any(|o| same(o, g)));
+    let clip = vp.rect().expand(GRIP_HOVER_PX);
+    for g in grips {
+        if hot.iter().any(|h| same(h, g)) || in_hovered(g) {
+            continue;
+        }
+        draw_grip_square(painter, vp.model_to_screen(g.at), GRIP_PX, GRIP_COLOR, clip);
+    }
+    if let Some(h) = hovered {
+        let at = h.representative().at;
+        draw_grip_square(
+            painter,
+            vp.model_to_screen(at),
+            GRIP_HOVER_PX,
+            GRIP_HOVER_COLOR,
+            clip,
+        );
+    }
+    if let Some(g) = hot.first() {
+        // 掴んだ束はどれも掴んだ点にある。
+        draw_grip_square(
+            painter,
+            vp.model_to_screen(g.at),
+            GRIP_PX,
+            GRIP_HOT_COLOR,
+            clip,
+        );
+    }
+}
+
+fn draw_grip_square(
+    painter: &egui::Painter,
+    c: egui::Pos2,
+    size: f32,
+    color: egui::Color32,
+    clip: egui::Rect,
+) {
+    if !clip.contains(c) {
+        return;
+    }
+    let rect = egui::Rect::from_center_size(c, egui::vec2(size, size));
+    painter.rect_filled(rect, 0.0, color);
+    painter.rect_stroke(
+        rect,
+        0.0,
+        egui::Stroke::new(1.0, GRIP_BORDER_COLOR),
+        egui::StrokeKind::Outside,
+    );
+}
+
+/// 乗せているグリップの横に、掴んで動かしたら何が起きるか（「端点を動かす」など）を出す。
+///
+/// グリップの右上に出す。右下はカーソル横の入力欄（ADR-0034）なので避ける。
+pub fn draw_grip_label(painter: &egui::Painter, vp: &Viewport, group: &GripGroup) {
+    let at = vp.model_to_screen(group.representative().at);
+    let galley = painter.layout_no_wrap(
+        group.label(),
+        egui::FontId::proportional(13.0),
+        egui::Color32::WHITE,
+    );
+    let pos = at + egui::vec2(GRIP_HOVER_PX, -GRIP_HOVER_PX - galley.size().y);
+    painter.rect_filled(
+        egui::Rect::from_min_size(pos, galley.size()).expand(3.0),
+        3.0,
+        egui::Color32::from_black_alpha(0xc0),
+    );
+    painter.galley(pos, galley, egui::Color32::WHITE);
+}
+
+// ---------------------------------------------------------------------------
 // スナップマーカー
 // ---------------------------------------------------------------------------
 
@@ -779,21 +879,23 @@ fn clip_ray(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cad_core::geom::tolerance::{eq_len, is_zero_len};
 
     #[test]
     fn nice_step_returns_1_2_5_series() {
-        assert!((nice_step(1.0) - 1.0).abs() < 1e-12);
-        assert!((nice_step(1.5) - 2.0).abs() < 1e-12);
-        assert!((nice_step(3.0) - 5.0).abs() < 1e-12);
-        assert!((nice_step(7.0) - 10.0).abs() < 1e-12);
-        assert!((nice_step(0.03) - 0.05).abs() < 1e-12);
-        assert!((nice_step(23_000.0) - 50_000.0).abs() < 1e-6);
+        assert!(eq_len(nice_step(1.0), 1.0));
+        assert!(eq_len(nice_step(1.5), 2.0));
+        assert!(eq_len(nice_step(3.0), 5.0));
+        assert!(eq_len(nice_step(7.0), 10.0));
+        assert!(eq_len(nice_step(0.03), 0.05));
+        assert!(eq_len(nice_step(23_000.0), 50_000.0));
     }
 
     /// 返り値は必ず入力以上（グリッドが目標間隔より細かくならない）。
     #[test]
     fn nice_step_is_never_smaller_than_input() {
-        let mut x = 1e-9;
+        // 十分小さい値から十分大きい値まで、間隔を 1.37 倍ずつ広げて確かめる。
+        let mut x = 1.0 / 1_000_000_000.0;
         while x < 1e9 {
             let s = nice_step(x);
             assert!(s >= x, "nice_step({x:e}) = {s:e} が入力より小さい");
@@ -808,9 +910,7 @@ mod tests {
             for m in [1.0, 1.3, 2.7, 4.9, 6.1, 9.9] {
                 let s = nice_step(m * 10f64.powi(exp));
                 let mantissa = s / 10f64.powf(s.log10().floor());
-                let ok = [1.0, 2.0, 5.0]
-                    .iter()
-                    .any(|v: &f64| (mantissa - v).abs() < 1e-9);
+                let ok = [1.0, 2.0, 5.0].iter().any(|v: &f64| eq_len(mantissa, *v));
                 assert!(ok, "nice_step の仮数 {mantissa} が 1/2/5 系列でない");
             }
         }
@@ -822,7 +922,7 @@ mod tests {
         assert_eq!(v, vec![-2.0, 0.0, 2.0, 4.0, 6.0]);
         // すべて step の整数倍であること（格子が歪んでいない）。
         for x in v {
-            assert!((x / 2.0).fract().abs() < 1e-12);
+            assert!(is_zero_len((x / 2.0).fract()));
         }
     }
 
@@ -872,10 +972,10 @@ mod tests {
 
     #[test]
     fn nice_step_rejects_invalid_input() {
-        assert!((nice_step(0.0) - 1.0).abs() < 1e-12);
-        assert!((nice_step(-5.0) - 1.0).abs() < 1e-12);
-        assert!((nice_step(f64::NAN) - 1.0).abs() < 1e-12);
-        assert!((nice_step(f64::INFINITY) - 1.0).abs() < 1e-12);
+        assert!(eq_len(nice_step(0.0), 1.0));
+        assert!(eq_len(nice_step(-5.0), 1.0));
+        assert!(eq_len(nice_step(f64::NAN), 1.0));
+        assert!(eq_len(nice_step(f64::INFINITY), 1.0));
     }
 
     // ---- インスタンスの描画 -----------------------------------------------

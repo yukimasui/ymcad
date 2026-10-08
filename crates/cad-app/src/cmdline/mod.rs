@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use cad_core::geom::Point2;
 
-use self::dimension::{DimState, DimValues, Field, Live, TabOutcome};
+use self::dimension::{DimKind, DimState, DimValues, Field, Live, TabOutcome};
 use self::dynamic::{Activity, Bounds, Point, Size};
 
 use crate::tools::{self, CommandSpec};
@@ -273,6 +273,8 @@ pub struct CommandLine {
     recent_error: Option<RecentError>,
     /// 寸法入力（長さ・角度の欄）の状態。
     dim: DimensionInput,
+    /// [`Self::begin_frame`] で Ctrl+A を全選択として消費したか（[`Self::take_select_all`]）。
+    select_all_requested: bool,
     /// 直近に描いた入力欄の矩形。変換開始で入力欄が動かないことのテストに使う。
     #[cfg(test)]
     input_rect: Option<egui::Rect>,
@@ -295,6 +297,8 @@ struct DimensionInput {
     /// フレームの最初の時点で、寸法入力に参加しているツールの基点。
     /// キー（Tab / Esc / Enter）の扱いを決めるのに使う。
     base: Option<Point2>,
+    /// 欄の見せ方（「長さ」「角度」か「半径」だけか）。
+    kind: DimKind,
     /// 入力中の欄と固定した値。
     state: DimState,
     /// 直前のフレームで欄を出したか。
@@ -354,6 +358,7 @@ impl CommandLine {
             },
             recent_error: None,
             dim: DimensionInput::default(),
+            select_all_requested: false,
             #[cfg(test)]
             input_rect: None,
         }
@@ -426,11 +431,23 @@ impl CommandLine {
     ///
     /// 基点が変わったら（ツールが次の点へ進んだ・終わった・別のツールになった）
     /// 固定を外す。前の点で固定した長さが次の線分に残ると、気づかずに使ってしまう。
-    pub fn set_dimension_base(&mut self, base: Option<Point2>) {
-        if self.dim.base != base {
+    /// 欄の見せ方 `kind`（「半径」だけ、など）が変わったときも外す。
+    pub fn set_dimension_base(&mut self, base: Option<Point2>, kind: DimKind) {
+        if self.dim.base != base || self.dim.kind != kind {
             self.dim.state.reset();
         }
         self.dim.base = base;
+        self.dim.kind = kind;
+    }
+
+    /// このフレームで Ctrl+A が全選択として押されたか。読んだら落とす。
+    ///
+    /// 全選択そのものは `Session::select_all` がする。コマンドラインはキーを消費して印を立てるだけ。
+    /// 効く段階か（待機中・選択待ちか）も `Session::select_all` が決める。点や値の入力中に
+    /// 空の入力欄で押された Ctrl+A はここで消費されるが、入力欄が受け取っても空の文字列の
+    /// 全選択で何も起きないので、奪って困ることは無い。
+    pub fn take_select_all(&mut self) -> bool {
+        std::mem::take(&mut self.select_all_requested)
     }
 
     /// 寸法入力の固定を外し、長さの欄へ戻す。
@@ -535,7 +552,8 @@ impl CommandLine {
 
         // 変換中はキーを一切奪わない。IME に確定させるのが先。
         // 候補の操作キーもこのブロックの中にあるので、変換中は自動的に無効になる。
-        // パネルの入力欄を編集している間も奪わない（Issue #22）。
+        // パネルの入力欄を編集している間も奪わない（Issue #22）。Ctrl+A（全選択）も同じ。
+        self.select_all_requested = false;
         let pending = if self.composing || !owns_keys {
             None
         } else {
@@ -818,7 +836,7 @@ impl CommandLine {
             });
     }
 
-    /// 寸法入力の「長さ」「角度」の 2 欄を描く。
+    /// 寸法入力の「長さ」「角度」の 2 欄（円の四分点のグリップでは「半径」の 1 欄）を描く。
     ///
     /// **`TextEdit` は 1 つだけ**。入力中の欄の位置に本物の入力欄を置き、もう片方は
     /// 値を描くだけにする。2 つ描くとフォーカスと IME の出力先が 2 つになる（ADR-0034 決定 6）。
@@ -827,7 +845,8 @@ impl CommandLine {
     /// （入力欄のことがある）が右へずれないように。
     fn show_dimension_fields(&mut self, ui: &mut egui::Ui, live: Option<Live>) {
         let state = self.dim.state;
-        for field in [Field::Length, Field::Angle] {
+        let kind = self.dim.kind;
+        for &field in kind.fields() {
             let locked = state.locks.get(field);
             let live_value = live.and_then(|l| match field {
                 Field::Length => Some(l.length),
@@ -840,10 +859,7 @@ impl CommandLine {
             // 固定値を優先し、無ければライブ値。どちらも無ければ（カーソルが無い・
             // 基点と同じで向きが無い）横棒。
             let shown = locked.or(live_value).map_or_else(|| "-".to_owned(), format);
-            let name = match field {
-                Field::Length => "長さ",
-                Field::Angle => "角度",
-            };
+            let name = kind.name(field);
             let active = field == state.field;
             let name_color = if active {
                 ui.visuals().strong_text_color()
@@ -931,6 +947,16 @@ impl CommandLine {
     fn consume_keys(&mut self, i: &mut egui::InputState) -> Option<Submission> {
         const NONE: egui::Modifiers = egui::Modifiers::NONE;
 
+        // Ctrl+A（全選択、Issue #34 段階 3、ADR-0044）。ここへ来るのはキーの持ち主がコマンドラインで、
+        // 変換中でないときだけ（パネルの入力欄・モーダル・IME では奪わない）。
+        // 打ちかけの文字があるときは奪わない。入力欄（`TextEdit`）が受け取り、文字の全選択になる
+        // （ユーザー判断 5）。効く段階か（点や値の入力中は効かない）は `Session::select_all` が決める。
+        // 印を立てるだけで return はしない（同じフレームの Enter を取りこぼさない）。
+        // 修飾キーは厳密に比べる（Ctrl+Shift+A・Ctrl+Alt+A では全選択しない。Issue #74 の 5）。
+        if self.input.is_empty() && consume_key_exact(i, egui::Modifiers::COMMAND, egui::Key::A) {
+            self.select_all_requested = true;
+        }
+
         if i.consume_key(NONE, egui::Key::Escape) {
             // 候補が出ていれば、まず候補だけを閉じる。
             // いきなりコマンドを中断すると、打ち間違いのやり直しが面倒になる。
@@ -970,7 +996,11 @@ impl CommandLine {
         // 寸法入力の Tab。候補が出ているときの Tab は上で補完に使われるので、ここには来ない
         // （ツール実行中は候補を出さないので、実際には重ならない）。
         if self.dimension_active() && i.consume_key(NONE, egui::Key::Tab) {
-            match self.dim.state.tab(dimension::classify(&self.input)) {
+            match self
+                .dim
+                .state
+                .tab_in(self.dim.kind, dimension::classify(&self.input))
+            {
                 TabOutcome::Moved { consumed: true } => self.input.clear(),
                 TabOutcome::Moved { consumed: false } | TabOutcome::Ignored => {}
                 TabOutcome::Rejected(e) => self.error(e.message()),
@@ -1148,6 +1178,31 @@ fn lock_icon(ui: &mut egui::Ui, visible: bool) {
         [at(8.0, 10.8), at(8.0, 12.8)],
         egui::Stroke::new(1.3 * unit, hole),
     );
+}
+
+/// `modifiers` と**ちょうど同じ**修飾キーで押された `key` を消費し、あったかを返す。
+///
+/// egui の `consume_key` は `Modifiers::matches_logically` で比べるので、余分な Shift・Alt が
+/// 付いていても一致する（Ctrl+Shift+A も Ctrl+A になる）。こちらは `matches_exact` で比べる。
+/// Ctrl と Command の違いは `matches_exact` が吸収する（Linux の Ctrl は `ctrl` と `command` の
+/// 両方が立つが、`COMMAND` と一致する）。同じフレームに複数あれば（キーリピート）全部を消費する
+/// （`consume_key` と同じ。残すと入力欄へ流れる）。
+fn consume_key_exact(i: &mut egui::InputState, modifiers: egui::Modifiers, key: egui::Key) -> bool {
+    let mut found = false;
+    i.events.retain(|event| {
+        let hit = matches!(
+            event,
+            egui::Event::Key {
+                key: k,
+                modifiers: m,
+                pressed: true,
+                ..
+            } if *k == key && m.matches_exact(modifiers)
+        );
+        found |= hit;
+        !hit
+    });
+    found
 }
 
 #[cfg(test)]

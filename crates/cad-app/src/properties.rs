@@ -1,4 +1,4 @@
-//! プロパティパネルの中身を決める純粋な関数（Issue #31 段階 1）。
+//! プロパティパネルの中身を決める純粋な関数（Issue #31 段階 1・2）。
 //!
 //! egui に依存しない。図形から「表示項目の一覧」を作り、選択から「種類ごとの件数と
 //! 共通のレイヤ」の要約を作る。描くのは `properties_panel.rs`。
@@ -16,10 +16,10 @@
 //! 要約は図面の版番号と選択の版番号（[`Selection::revision`]）をキーに作り直す。
 
 use cad_core::component::DefinitionTable;
-use cad_core::geom::tolerance::wrap_2pi;
 use cad_core::layer::Layer;
 use cad_core::{Document, Geometry, LayerId};
 
+use crate::properties_edit::{display_value, Field, Toggle};
 use crate::selection::Selection;
 
 /// 何も選んでいないときの案内。
@@ -30,6 +30,10 @@ pub const EMPTY_NOTE: &str = "図形を選ぶと、ここに値が出ます";
 /// 選び直しになる人が出ないよう、そう書いておく。
 pub const BUSY_NOTE: &str =
     "コマンド実行中は変更できません（終えるか Esc で中断。中断すると選択も外れます）";
+/// グリップを掴んでいる間の案内。グリップの Esc は掴みだけを取り消し、選択は残る
+/// （`Session::cancel`。Issue #30 段階 1 の操作レビュー 1）。
+pub const GRIP_BUSY_NOTE: &str =
+    "グリップで編集中は変更できません（クリックで確定、Esc で取り消し。選択は残ります）";
 /// レイヤへの移動（`MoveEntitiesToLayer`）の名前。パネルから返るコマンドを見分けるのに使う。
 pub const MOVE_TO_LAYER_COMMAND: &str = "LAYER_MOVE_ENTITIES";
 /// 選択がまたぐレイヤが 1 つに決まらないときの、ドロップダウンの表示。
@@ -76,18 +80,58 @@ pub fn kind_of(geom: &Geometry) -> Kind {
     }
 }
 
-/// 表示項目 1 行。段階 1 では値はすべて表示だけ。
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// 項目の編集のしかた（Issue #31 段階 2）。
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Editor {
+    /// 数値（`DragValue`）。値はいま表示している値（角度は `[0, 360)` の度）。
+    Number(Field, f64),
+    /// はい・いいえ（チェックボックス）。
+    Toggle(Toggle, bool),
+}
+
+/// 表示項目 1 行。
+#[derive(Clone, Debug, PartialEq)]
 pub struct Item {
     /// 項目名（`始点 X` など）。
     pub label: &'static str,
     /// 表示用に整えた値。
     pub value: String,
+    /// 編集できる項目なら、その編集のしかた。`None` なら表示だけ（中点・直径など）。
+    pub editor: Option<Editor>,
 }
 
 impl Item {
+    /// 表示だけの項目。
     fn new(label: &'static str, value: String) -> Self {
-        Self { label, value }
+        Self {
+            label,
+            value,
+            editor: None,
+        }
+    }
+
+    /// 数値で編集できる項目。表示は [`display_value`]（角度は度に `°` を付ける）。
+    fn number(label: &'static str, geom: &Geometry, field: Field) -> Self {
+        let v = display_value(geom, field).unwrap_or(f64::NAN);
+        let value = if field.is_angle() {
+            fmt_deg(v)
+        } else {
+            fmt_num(v)
+        };
+        Self {
+            label,
+            value,
+            editor: Some(Editor::Number(field, v)),
+        }
+    }
+
+    /// はい・いいえで編集できる項目。
+    fn toggle(label: &'static str, toggle: Toggle, value: bool) -> Self {
+        Self {
+            label,
+            value: yes_no(value),
+            editor: Some(Editor::Toggle(toggle, value)),
+        }
     }
 }
 
@@ -108,76 +152,74 @@ pub fn fmt_deg(deg: f64) -> String {
     format!("{}°", fmt_num(deg))
 }
 
-/// 角度 [rad] を `[0, 360)` の度に直して表示する。丸めて `360.0000` になる値は `0.0000` にする。
-#[must_use]
-pub fn fmt_angle(rad: f64) -> String {
-    let s = fmt_num(wrap_2pi(rad).to_degrees());
-    if s == "360.0000" {
-        fmt_deg(0.0)
-    } else {
-        format!("{s}°")
-    }
-}
-
 fn yes_no(b: bool) -> String {
     if b { "はい" } else { "いいえ" }.to_owned()
 }
 
 /// 図形 1 つの表示項目。種類ごとに要る項目だけを出す（Issue #31 の計画の表）。
+///
+/// 計画の表の「編集」列の項目には [`Editor`] が付く。角度は表示も編集も度。
 #[must_use]
 pub fn items(geom: &Geometry, defs: &DefinitionTable) -> Vec<Item> {
+    use Field as F;
+    let num = |label, field| Item::number(label, geom, field);
     match geom {
         Geometry::Line(l) => {
             let mid = l.midpoint();
             vec![
-                Item::new("始点 X", fmt_num(l.a.x)),
-                Item::new("始点 Y", fmt_num(l.a.y)),
-                Item::new("終点 X", fmt_num(l.b.x)),
-                Item::new("終点 Y", fmt_num(l.b.y)),
-                Item::new("長さ", fmt_num(l.length())),
-                Item::new("角度", fmt_angle(l.vector().angle())),
+                num("始点 X", F::LineStartX),
+                num("始点 Y", F::LineStartY),
+                num("終点 X", F::LineEndX),
+                num("終点 Y", F::LineEndY),
+                num("長さ", F::LineLength),
+                num("角度", F::LineAngle),
                 Item::new("中点 X", fmt_num(mid.x)),
                 Item::new("中点 Y", fmt_num(mid.y)),
             ]
         }
         Geometry::Circle(c) => vec![
-            Item::new("中心 X", fmt_num(c.center.x)),
-            Item::new("中心 Y", fmt_num(c.center.y)),
-            Item::new("半径", fmt_num(c.radius)),
+            num("中心 X", F::CenterX),
+            num("中心 Y", F::CenterY),
+            num("半径", F::Radius),
             Item::new("直径", fmt_num(c.radius * 2.0)),
             Item::new("円周", fmt_num(std::f64::consts::TAU * c.radius)),
         ],
         Geometry::Arc(a) => vec![
-            Item::new("中心 X", fmt_num(a.center.x)),
-            Item::new("中心 Y", fmt_num(a.center.y)),
-            Item::new("半径", fmt_num(a.radius)),
-            Item::new("開始角", fmt_angle(a.start_angle)),
-            Item::new("終了角", fmt_angle(a.end_angle)),
+            num("中心 X", F::CenterX),
+            num("中心 Y", F::CenterY),
+            num("半径", F::Radius),
+            num("開始角", F::ArcStart),
+            num("終了角", F::ArcEnd),
             Item::new("掃引角", fmt_deg(a.sweep().to_degrees())),
             Item::new("弧長", fmt_num(a.length())),
         ],
         Geometry::Polyline(p) => vec![
+            // 頂点数は表示だけ（ADR-0040。束縛が頂点を添字で指すため、数は変えない）。
             Item::new("頂点数", p.vertex_count().to_string()),
-            Item::new("閉じ", yes_no(p.closed)),
+            // 閉じられるのは頂点 3 以上のときだけ（PLINE の「閉じる」と同じ約束）。
+            if p.vertex_count() >= 3 {
+                Item::toggle("閉じ", Toggle::Closed, p.closed)
+            } else {
+                Item::new("閉じ", yes_no(p.closed))
+            },
             Item::new("長さ", fmt_num(p.length())),
         ],
-        Geometry::Xline(x) => vec![
-            Item::new("通過点 X", fmt_num(x.origin.x)),
-            Item::new("通過点 Y", fmt_num(x.origin.y)),
-            Item::new("角度", fmt_angle(x.angle())),
+        Geometry::Xline(_) => vec![
+            num("通過点 X", F::XlineX),
+            num("通過点 Y", F::XlineY),
+            num("角度", F::XlineAngle),
         ],
         Geometry::Instance(i) => {
             let name = defs
                 .get(i.definition)
                 .map_or_else(|| "（定義が見つかりません）".to_owned(), |d| d.name.clone());
-            let p = i.placement;
             vec![
                 Item::new("定義", name),
-                Item::new("基点 X", fmt_num(p.origin.x)),
-                Item::new("基点 Y", fmt_num(p.origin.y)),
-                Item::new("回転", fmt_angle(p.rotation)),
-                Item::new("倍率", fmt_num(p.scale)),
-                Item::new("反転", yes_no(p.flipped)),
+                num("基点 X", F::BaseX),
+                num("基点 Y", F::BaseY),
+                num("回転", F::Rotation),
+                num("倍率", F::Scale),
+                Item::toggle("反転", Toggle::Flipped, i.placement.flipped),
             ]
         }
     }
@@ -381,6 +423,7 @@ mod tests {
     /// 丸めると 360 や -0 になる値を、`360.0000°` や `-0.0000` で見せない。
     #[test]
     fn rounding_never_shows_360_or_negative_zero() {
+        let fmt_angle = |rad: f64| fmt_deg(crate::properties_edit::display_deg(rad));
         // 360° のすぐ手前（丸めると 360.0000 になる）と、0 のすぐ手前の負の値。
         assert_eq!(fmt_angle(-f64::MIN_POSITIVE), "0.0000°");
         assert_eq!(fmt_angle(std::f64::consts::TAU), "0.0000°");

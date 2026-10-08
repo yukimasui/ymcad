@@ -11,13 +11,13 @@ use crate::drafting::{self, Drafting};
 use crate::file_ops::{self, FileOps, FileOutcome};
 use crate::hover::Hover;
 use crate::input::{self, ViewAction};
-use crate::layer_panel::LayerPanel;
-use crate::properties_panel::PropertiesPanel;
+use crate::layer_panel::{LayerPanel, PanelNotice};
+use crate::properties_panel::{PanelInput, PropertiesPanel};
 use crate::render;
 use crate::resolved::ResolvedInstances;
 use crate::ribbon::Ribbon;
 use crate::selection::WindowMode;
-use crate::session::{Session, UiAction};
+use crate::session::{ClickTarget, Session, UiAction};
 use crate::snap::SnapState;
 use crate::viewport::Viewport;
 
@@ -142,6 +142,11 @@ pub struct CadApp {
     hover: Hover,
     /// 矩形選択のドラッグ中の状態。
     rect_drag: Option<RectDrag>,
+    /// グリップの上で押してドラッグし、掴んだまま離すのを待っているか（Issue #30 ユーザー判断 2）。
+    ///
+    /// ドラッグを始めた時点で掴み、離したときのボタンの解放は確定のクリックにしない
+    /// （確定は次のクリック）。
+    grip_drag: bool,
     /// 直近フレームのカーソル位置（モデル座標）。
     cursor_model: Option<Point2>,
     /// 読み込めた日本語フォントの情報。読み込めなかった場合は `None`。
@@ -174,6 +179,7 @@ impl CadApp {
             snapped: None,
             hover: Hover::new(),
             rect_drag: None,
+            grip_drag: false,
             cursor_model: None,
             font_status,
             draw_timer: DrawTimer::new(),
@@ -245,7 +251,7 @@ impl CadApp {
                     tooltip: layer_tooltip,
                     ..InfoItem::new(format!("レイヤ {short_name}"))
                 },
-                InfoItem::new(format!("選択 {}", self.session.selection.len())),
+                self.selection_item(),
                 InfoItem::new(format!("要素 {}", self.doc.entities().len())),
                 InfoItem::new(format!("倍率 {:.6}", self.viewport.scale())),
             ];
@@ -265,6 +271,23 @@ impl CadApp {
             )));
             show_while_fits(ui, items, separator_width);
         });
+    }
+
+    /// ステータスバーの「選択」の項目。選択数が多くてグリップを出していないときは、そう添える
+    /// （Issue #30 ユーザー判断 4）。
+    fn selection_item(&self) -> InfoItem {
+        let n = self.session.selection.len();
+        if self.session.grips_suppressed() {
+            InfoItem {
+                tooltip: Some(format!(
+                    "グリップは選択が {MAX_GRIPS} 個以下のときだけ出ます",
+                    MAX_GRIPS = crate::session::MAX_GRIP_SELECTION
+                )),
+                ..InfoItem::new(format!("選択 {n}（グリップなし）"))
+            }
+        } else {
+            InfoItem::new(format!("選択 {n}"))
+        }
     }
 
     fn command_area(&mut self, ui: &mut egui::Ui) {
@@ -459,8 +482,9 @@ impl CadApp {
             None
         };
         let pick_tolerance = self.viewport.px_to_model_len(PICK_RADIUS_PX);
+        let shift = ui.input(|i| i.modifiers.shift);
         self.hover
-            .update(&self.session, &self.doc, hover_at, pick_tolerance);
+            .update(&self.session, &self.doc, hover_at, pick_tolerance, shift);
 
         painter.rect_filled(response.rect, 0.0, ui.visuals().extreme_bg_color);
         render::draw_grid(&painter, &self.viewport, ui.visuals());
@@ -495,6 +519,30 @@ impl CadApp {
 
         let preview = self.session.preview(self.cursor_model, &self.doc);
         render::draw_preview(&painter, &self.viewport, self.doc.definitions(), &preview);
+        // プロパティパネルで値をドラッグしている間の仮の形（Issue #31 段階 2）。図面はまだ変えて
+        // いないので、ラバーバンドと同じ経路で描く。
+        if let Some(g) = self.properties_panel.drag_preview() {
+            render::draw_preview(
+                &painter,
+                &self.viewport,
+                self.doc.definitions(),
+                std::slice::from_ref(g),
+            );
+        }
+
+        // グリップ（Issue #30）。図形と仮の形の上に描く。乗せているものは大きく、掴んでいるものは赤。
+        let grips = self.session.grips(&self.doc);
+        let hovered = self.hover.hovered_grip();
+        render::draw_grips(
+            &painter,
+            &self.viewport,
+            &grips,
+            hovered,
+            &self.session.hot_grips(),
+        );
+        if let Some(g) = hovered {
+            render::draw_grip_label(&painter, &self.viewport, g);
+        }
 
         if let Some(hit) = tracked.and_then(|t| t.polar) {
             render::draw_polar_guide(&painter, &self.viewport, &hit);
@@ -555,6 +603,22 @@ impl CadApp {
         // 押した位置を使うと、スナップ表示と入力結果がずれる。
         let released_pos = response.interact_pointer_pos();
 
+        // ---- グリップの上で押して始めたドラッグ（Issue #30 ユーザー判断 2） ----
+        //
+        // 押してドラッグした時点で掴んでいるので、離したときの解放は確定のクリックにしない
+        // （確定は次のクリック）。ドラッグの途中で Esc で取り消していても、解放は捨てる
+        // （待機中の解放として扱うと、離した位置で選択が変わる）。
+        if self.grip_drag {
+            if released {
+                self.grip_drag = false;
+                return None;
+            }
+            if !response.dragged_by(egui::PointerButton::Primary) {
+                // 解放を見届けられなかった（キャンバスの外で離したなど）。次のクリックを捨てない。
+                self.grip_drag = false;
+            }
+        }
+
         // ---- 点の入力待ち中 ----
         //
         // この状態では矩形選択に入らないので、離されたら常に点として拾ってよい。
@@ -570,6 +634,12 @@ impl CadApp {
 
         // ---- 左ドラッグによる矩形選択 ----
         if response.drag_started_by(egui::PointerButton::Primary) {
+            // グリップの上で押してドラッグしたら、矩形選択にせずにその場で掴む。
+            // 当たりは押した位置で見る（ドラッグと判定された時点ではもう数 px 動いている）。
+            if self.grab_grip_at_press(ui, shift, pick_tolerance) {
+                self.grip_drag = true;
+                return None;
+            }
             if let Some(from) = response.interact_pointer_pos() {
                 self.rect_drag = Some(RectDrag { from, shift });
             }
@@ -611,6 +681,22 @@ impl CadApp {
         }
 
         None
+    }
+
+    /// 押した位置がグリップの上なら掴んで `true`。クリックと同じ `Session::click_target` で決める。
+    fn grab_grip_at_press(&mut self, ui: &egui::Ui, shift: bool, pick_tolerance: f64) -> bool {
+        let Some(origin) = ui.input(|i| i.pointer.press_origin()) else {
+            return false;
+        };
+        let model = self.viewport.screen_to_model(origin);
+        let target =
+            self.session
+                .click_target(model, pick_tolerance, shift, &self.doc, self.hover.picker());
+        let ClickTarget::Grip(grip) = target else {
+            return false;
+        };
+        self.session.start_grip(&grip, &self.doc);
+        self.session.is_gripping()
     }
 
     /// スクリーン座標を入力点として `Session` へ渡す。
@@ -865,6 +951,70 @@ fn own_width<R>(
 }
 
 impl CadApp {
+    /// 図面が丸ごと入れ替わった（NEW / OPEN）ので、前の図面に結びついた状態をすべて捨てる。
+    ///
+    /// **`Document::revision()` は同じ図面の中でしか比べられない。** 読み込んだ図面の版番号は
+    /// コマンドの適用回数で決まり中身によらないので、別の図面どうしで一致しうる。版番号だけを
+    /// キーにした派生データ（スナップ・ピックの索引、インスタンスの展開結果、プロパティの要約、
+    /// 境界の列）や、前の図面の ID を持つ状態（実行中のツール・選択・パネルの編集中）は、
+    /// 入れ替えのたびにここで捨てる（Issue #65、PR #63 の B1）。
+    ///
+    /// **`CadApp` のフィールドを足したら、ここで必ず扱いを決める。** 下の分解は `..` を使わず
+    /// 全フィールドを並べているので、足しただけではコンパイルが通らない。図面に結びつくなら捨てる処理を
+    /// 書き、図面によらない（見え方・設定・ファイル操作）なら `_` と理由で残す。
+    fn drop_derived_state(&mut self) {
+        let Self {
+            // 図面そのものは呼び出し側が入れ替え済み。
+            doc: _,
+            // 視点は入れ替えで動かさない（開いた直後の ZOOM は利用者の操作）。
+            viewport: _,
+            session,
+            snap,
+            // 直交・極トラッキングは利用者の設定。
+            drafting: _,
+            resolved,
+            layer_panel,
+            // 開閉と新しいパラメータ名の下書きだけで、図面の ID を持たない。
+            component_panel: _,
+            properties_panel,
+            ribbon: _,
+            files: _,
+            quitting: _,
+            snapped,
+            hover,
+            rect_drag,
+            grip_drag,
+            // 次のフレームのポインタ位置で上書きされる。
+            cursor_model: _,
+            font_status: _,
+            draw_timer: _,
+            initialized: _,
+            coord_width,
+        } = self;
+        // 実行中のツール・選択・コンポーネントの編集・レイヤ名を出した案内（ADR-0039）。
+        session.document_replaced();
+        // スナップの索引と掴んでいた点。ON/OFF と種別の設定は残す。
+        snap.document_replaced();
+        *snapped = None;
+        // インスタンスの展開結果（版番号が重なると前の図面の定義で描かれる）。
+        *resolved = ResolvedInstances::new();
+        // ピック用の索引・ホバーの結果・結果プレビューの境界の列（PR #63 のレビュー B1）。
+        *hover = Hover::new();
+        // 改名中・色見本表示中のレイヤ ID。
+        layer_panel.document_replaced();
+        // 選択の要約と、編集中の値（打ちかけ・ドラッグ中）と理由（#31 段階 2）。編集中の値は版番号に
+        // 結び付けているが、版番号は新しい図面と重なりうるので、残すと前の図面で打ちかけた値が
+        // 新しい図面の同じ番号の図形へ確定されうる。
+        // 選択の要約。`document_replaced` が選択を空にして選択の版は進むが、版番号が
+        // 偶然重なっても古い要約が残らないよう明示的に捨てる。
+        properties_panel.invalidate();
+        *rect_drag = None;
+        // 前の図面のグリップを掴んだドラッグ（`document_replaced` がグリップを取り消している）。
+        *grip_drag = false;
+        // 座標の欄も最小の幅へ戻す（広がったままにしない）。
+        *coord_width = COORD_MIN_WIDTH;
+    }
+
     /// ファイル操作の結果をコマンドラインへ出す。
     fn report_file_outcome(&mut self, outcome: FileOutcome) {
         match outcome {
@@ -872,21 +1022,8 @@ impl CadApp {
             // 保存。図面はそのままなので、選択・スナップ・座標の欄は変えない（Issue #41）。
             FileOutcome::Ok(msg) => self.session.cmdline.info(msg),
             FileOutcome::Replaced(msg) => {
-                // 図面が入れ替わったので、前の図面に結びついた状態（実行中のツール・選択・
-                // コンポーネントの編集）とスナップを捨てる（ADR-0039）。
-                // 座標の欄も最小の幅へ戻す（広がったままにしない）。
-                self.session.document_replaced();
-                // 念のための無効化。`document_replaced` が選択を空にして選択の版が進むので、
-                // 通常は要約のキャッシュのキーが変わって作り直される。版番号が前の図面と
-                // 偶然重なっても古い要約が残らないよう、明示的に捨てておく（必須の処理ではない）。
-                self.properties_panel.invalidate();
-                // ピック用の索引とホバーの結果、結果プレビューの境界の列も版番号をキーにしているので、
-                // 前の図面のものを捨てる（PR #63 のレビュー B1。残すとクリックでも新しい図面の図形を
-                // 拾えず、TRIM / EXTEND のプレビューは前の図面の境界で計算される）。
-                self.hover = Hover::new();
+                self.drop_derived_state();
                 self.session.cmdline.info(msg);
-                self.snap.release();
-                self.coord_width = COORD_MIN_WIDTH;
             }
             FileOutcome::Failed(msg) => self.session.cmdline.error(msg),
             FileOutcome::Quit => self.quitting = true,
@@ -967,6 +1104,7 @@ impl CadApp {
             return;
         }
         let busy = self.session.active_command().is_some();
+        let gripping = self.session.is_gripping();
         let reserved = self.reserved_width(true);
         let canvas_min = self.canvas_min_width(ui.max_rect().width());
         right_panel(
@@ -984,10 +1122,16 @@ impl CadApp {
                     &self.doc,
                     &self.session.selection,
                     busy,
+                    gripping,
                     self.session.drop_note(&self.doc),
                 );
                 for cmd in commands {
                     self.session.apply_external(cmd, &mut self.doc);
+                }
+                match self.layer_panel.take_notice() {
+                    Some(PanelNotice::Info(text)) => self.session.cmdline.info(text),
+                    Some(PanelNotice::Error(text)) => self.session.cmdline.error(text),
+                    None => {}
                 }
             });
         });
@@ -1051,15 +1195,17 @@ impl CadApp {
         )
         .show(ui, |ui| {
             own_width(ui, "properties_scroll", |ui| {
-                // 選択待ちを含め、コマンドを実行している間は表示だけにする。
-                let busy = self.session.active_command().is_some();
-                let commands = self.properties_panel.show(
-                    ui,
-                    &self.doc,
-                    &self.session.selection,
-                    busy,
-                    self.session.drop_note(&self.doc),
-                );
+                let input = PanelInput {
+                    doc: &self.doc,
+                    selection: &self.session.selection,
+                    // 選択待ちを含め、コマンドを実行している間は表示だけにする。
+                    busy: self.session.active_command().is_some(),
+                    gripping: self.session.is_gripping(),
+                    drop_note: self.session.drop_note(&self.doc),
+                    component_edit: self.session.editing(),
+                    length_step: self.viewport.px_to_model_len(1.0),
+                };
+                let commands = self.properties_panel.show(ui, &input);
                 // 選択から外れたときの案内は `Session::apply_external` が出す（レイヤパネルと共通）。
                 for cmd in commands {
                     self.session.apply_external(cmd, &mut self.doc);
@@ -1098,6 +1244,12 @@ impl CadApp {
         &self.ribbon
     }
 
+    /// 表示範囲（スクリーンショットのテストが図形の画面上の位置を求めるため）。
+    #[cfg(test)]
+    pub fn viewport(&self) -> &Viewport {
+        &self.viewport
+    }
+
     /// 画面上端のリボンを描き、押されたコマンドを始める。
     ///
     /// **コマンド名を打つのと同じ扱い**（`Session::start_command_from_ui`）。
@@ -1128,10 +1280,18 @@ impl eframe::App for CadApp {
         let allow_suggestions = !self.session.has_active_tool();
         // 寸法入力の基点。Tab / Esc / Enter の扱いがこれで変わるので、キーを取る前に渡す。
         let dimension_base = self.session.dimension_base();
-        self.session.cmdline.set_dimension_base(dimension_base);
+        let dimension_kind = self.session.dimension_kind();
+        self.session
+            .cmdline
+            .set_dimension_base(dimension_base, dimension_kind);
         self.session
             .cmdline
             .begin_frame(&ctx, allow_suggestions, self.files.is_confirming());
+        // Ctrl+A（全選択）。効く段階か（待機中・選択待ちだけ）は `select_all` が決める。
+        // 確定（Enter）より前に選ぶ。同じフレームに Ctrl+A と Enter が来たら、選んでから確定する。
+        if self.session.cmdline.take_select_all() {
+            self.session.select_all(&self.doc);
+        }
         egui::Panel::bottom("cmdline").show(ui, |ui| self.command_area(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         self.layer_area(ui);
@@ -1148,6 +1308,7 @@ mod behavior_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cad_core::geom::tolerance::eq_len;
 
     #[test]
     fn draw_timer_reports_zero_when_empty() {
@@ -1161,8 +1322,8 @@ mod tests {
         t.push(Duration::from_micros(1000)); // 1.0ms
         t.push(Duration::from_micros(3000)); // 3.0ms
         let (avg, max) = t.stats_ms();
-        assert!((avg - 2.0).abs() < 1e-9, "平均は 2.0ms のはず: {avg}");
-        assert!((max - 3.0).abs() < 1e-9, "最大は 3.0ms のはず: {max}");
+        assert!(eq_len(avg, 2.0), "平均は 2.0ms のはず: {avg}");
+        assert!(eq_len(max, 3.0), "最大は 3.0ms のはず: {max}");
     }
 
     /// 窓を越えても古いサンプルで壊れないこと。
@@ -1173,8 +1334,8 @@ mod tests {
             t.push(Duration::from_micros(500));
         }
         let (avg, max) = t.stats_ms();
-        assert!((avg - 0.5).abs() < 1e-9);
-        assert!((max - 0.5).abs() < 1e-9);
+        assert!(eq_len(avg, 0.5));
+        assert!(eq_len(max, 0.5));
     }
 
     /// 座標の欄は桁の多い座標で広がり、小さい座標に戻っても縮まない。

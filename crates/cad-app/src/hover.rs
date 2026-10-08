@@ -17,11 +17,20 @@
 //! EXTEND で伸びる部分）も求める（`Session::entity_preview`）。境界の列のキャッシュ
 //! （[`Boundaries`]）もここに持つので、図面を入れ替えたとき（`Hover::new()` で作り直す）に
 //! 索引と一緒に捨てられる。
+//!
+//! # グリップ（Issue #30、ADR-0045）
+//!
+//! 待機中は、選択した図形のグリップが図形より先に拾われる（`ClickTarget::Grip`）。これも
+//! `click_target` が決めるので、乗せて大きくなったグリップとクリックで掴まれるグリップは一致する。
+//! 重なったグリップの束（段階 2）も同じ結果に入っているので、束も一致する。
+//! グリップは選択から作るので、結果を使い回す鍵に**選択の版**も入れる（選び直したら、同じ位置でも
+//! 計算し直す）。
 
 use cad_core::geom::{Aabb, Point2};
 use cad_core::snap::SpatialIndex;
 use cad_core::{Document, EntityId};
 
+use crate::grips::GripGroup;
 use crate::selection::{self, Picker};
 use crate::session::{ClickTarget, PickStage, Session};
 use crate::tools::entity_preview::Boundaries;
@@ -77,6 +86,12 @@ struct Key {
     y: u64,
     tolerance: u64,
     stage: PickStage,
+    /// 選択の版。グリップは選択から作るので、選び直したら計算し直す。
+    selection: u64,
+    /// グリップを掴める状態か（何も実行していない・選択数が上限以下）。
+    grips: bool,
+    /// Shift が押されているか（押している間はグリップを無視する）。
+    shift: bool,
 }
 
 /// ホバーの強調の状態。
@@ -114,13 +129,16 @@ impl Hover {
     /// （キャンバスの外、矩形選択のドラッグ中）では `None` を渡す。点や値の入力待ちでは
     /// `click_target` が点を返すので、何も強調されない。
     ///
-    /// 図面・位置・半径・段階が前フレームと同じなら計算し直さない。
+    /// `shift` はクリックと同じく、Shift が押されているか（押している間はグリップを拾わない）。
+    ///
+    /// 図面・位置・半径・段階・選択・Shift が前フレームと同じなら計算し直さない。
     pub fn update(
         &mut self,
         session: &Session,
         doc: &Document,
         at: Option<Point2>,
         tolerance: f64,
+        shift: bool,
     ) {
         let Some(pos) = at else {
             self.shown = false;
@@ -134,9 +152,12 @@ impl Hover {
             y: pos.y.to_bits(),
             tolerance: tolerance.to_bits(),
             stage: session.pick_stage(),
+            selection: session.selection.revision(),
+            grips: session.grips_enabled(),
+            shift,
         };
         if !self.last.as_ref().is_some_and(|(k, _)| *k == key) {
-            let target = session.click_target(pos, tolerance, doc, &mut self.picker);
+            let target = session.click_target(pos, tolerance, shift, doc, &mut self.picker);
             self.last = Some((key, target));
             #[cfg(test)]
             {
@@ -165,6 +186,16 @@ impl Hover {
     #[cfg(test)]
     pub(crate) fn boundaries(&self) -> &Boundaries {
         &self.boundaries
+    }
+
+    /// 乗せているグリップの束（クリックすると掴まれるもの。重なったグリップはまとめて）。
+    /// 大きく描き、カーソル横に案内を出す。
+    #[must_use]
+    pub fn hovered_grip(&self) -> Option<&GripGroup> {
+        match (&self.last, self.shown) {
+            (Some((_, ClickTarget::Grip(g))), true) => Some(g),
+            _ => None,
+        }
     }
 
     /// 強調する図形。

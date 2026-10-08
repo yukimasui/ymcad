@@ -2,6 +2,7 @@
 //!
 //! 開閉（コマンド・リボン・Ctrl+1）、レイヤの変更、コマンド実行中は表示だけ、を
 //! 画面なしで動かして固定する。値の並びや要約は `properties.rs` の単体テスト。
+//! 数値の編集（段階 2）は子モジュール `edit`。
 
 use egui_kittest::kittest::Queryable as _;
 
@@ -16,6 +17,8 @@ use cad_core::component::{Binding, ParamDecl, Placement, Slot};
 use cad_core::expr::parse;
 use cad_core::geom::Line;
 use cad_core::{AciColor, Entity, EntityId, Geometry, LayerId};
+
+mod edit;
 
 fn open(h: &Harness<'_, CadApp>) -> bool {
     h.state().properties_panel.is_open()
@@ -73,6 +76,12 @@ fn add_line(h: &mut Harness<'_, CadApp>, layer: LayerId, y: f64) -> EntityId {
 /// 画面にその文字列のラベルが 1 つ以上ある。
 fn has(h: &Harness<'_, CadApp>, text: &str) -> bool {
     h.query_all_by_label(text).next().is_some()
+}
+
+/// 数値の欄（`DragValue`）に、その文字の値が出ているものがある（角度は `°` 付き）。
+fn has_value(h: &Harness<'_, CadApp>, text: &str) -> bool {
+    h.query_all_by_role(egui::accesskit::Role::SpinButton)
+        .any(|n| n.value().as_deref() == Some(text))
 }
 
 /// レイヤのドロップダウンの表示（選んでいるレイヤ名、または「（混在）」）。
@@ -272,9 +281,10 @@ fn panel_shows_a_note_values_or_a_summary() {
     assert!(!has(&h, EMPTY_NOTE));
     assert!(has(&h, "線分"));
     assert!(has(&h, "長さ"));
-    assert!(has(&h, "100.0000"), "終点 X と長さ");
+    assert!(has_value(&h, "100.0000"), "終点 X と長さ");
     assert!(has(&h, "角度"));
-    assert!(has(&h, "0.0000°"));
+    assert!(has_value(&h, "0.0000°"));
+    assert!(has(&h, "50.0000"), "中点 X は表示だけ");
 
     select(&mut h, &ids);
     assert!(has(&h, "3 個を選択"));

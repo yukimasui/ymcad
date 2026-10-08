@@ -16,6 +16,7 @@ pub mod component;
 pub mod draw;
 pub mod edit;
 pub mod entity_preview;
+pub mod grip;
 pub mod param;
 
 use cad_core::geom::{Aabb, Point2};
@@ -68,6 +69,9 @@ pub enum StepOutcome {
     Finish,
     /// 入力を受け付けず、メッセージを出して同じ状態のまま待つ。
     Reject(String),
+    /// 何も適用せず、エラーを出して終了する（前提が崩れて続けられないとき。
+    /// グリップ編集で、掴んだ後に図面が変わっていた場合など）。
+    Abort(String),
     /// コマンド間で覚える設定を更新し、同じツールのまま入力を続ける。
     Setting(ToolSettings),
     /// コマンドを適用し、**コンポーネントの編集セッションを始める**。
@@ -235,6 +239,15 @@ pub trait Tool: std::fmt::Debug {
         _at: Point2,
         _ctx: &mut PreviewCtx<'_>,
     ) -> Option<EntityPreview> {
+        None
+    }
+
+    /// グリップ編集（Issue #30、ADR-0045）のツールなら自身。既定は `None`。
+    ///
+    /// `Session` はこれで、グリップ編集だけの扱い（取り消しても選択を残す・空の Enter と `U` で
+    /// 取り消す・コマンド名を打ったら取り消して始める・掴んでいるグリップを描く）を決める。
+    /// コマンド名で分岐しない（名前を変えたときに黙って壊れる。ADR-0043）。
+    fn grip(&self) -> Option<&grip::GripTool> {
         None
     }
 }
@@ -499,6 +512,12 @@ pub static COMMANDS: &[CommandSpec] = &[
         kind: CommandKind::Immediate(Immediate::PropertiesPanel),
     },
     CommandSpec {
+        name: "SELECTALL",
+        aliases: &[],
+        summary: "選べる図形をすべて選ぶ（非表示・ロック中のレイヤは除く）  Ctrl+A",
+        kind: CommandKind::Immediate(Immediate::SelectAll),
+    },
+    CommandSpec {
         name: "NEW",
         aliases: &[],
         summary: "新規図面",
@@ -606,6 +625,8 @@ pub enum Immediate {
     ComponentPanel,
     /// プロパティパネルの開閉。
     PropertiesPanel,
+    /// 選べる図形をすべて選ぶ（`Session::select_all`。Ctrl+A と同じ）。
+    SelectAll,
     /// コンポーネントの編集を終える。
     EndComponentEdit,
     /// ファイル操作。
@@ -622,6 +643,7 @@ impl Immediate {
             Self::LayerPanel => "LAYER",
             Self::ComponentPanel => "COMPONENTS",
             Self::PropertiesPanel => "PROPERTIES",
+            Self::SelectAll => "SELECTALL",
             Self::EndComponentEdit => "ENDCOMP",
             Self::File(a) => a.command_name(),
         }
@@ -639,7 +661,10 @@ impl Immediate {
     ///   （打っている途中のポリラインなど）は図面に入っていないので、保存されないのは `Ctrl+S` と同じ
     ///
     /// UNDO / REDO は図面を変え、ENDCOMP は編集を終え、NEW / OPEN / 終了は図面を入れ替える
-    /// （捨てる）ので中断する。`_` を書かずに全部の種類を並べて、種類を足したときにここで決めさせる。
+    /// （捨てる）ので中断する。SELECTALL は選択を変える（実行中のツールが前提にしている選択を
+    /// 横から変えない）ので中断する。ただし選択待ちの間だけは中断せずに選び足す
+    /// （`Session::start_command_from_ui`。Ctrl+A と同じ。ADR-0044）。
+    /// `_` を書かずに全部の種類を並べて、種類を足したときにここで決めさせる。
     #[must_use]
     pub fn keeps_running_command(self) -> bool {
         match self {
@@ -649,6 +674,7 @@ impl Immediate {
             | Self::File(FileAction::Save | FileAction::SaveAs) => true,
             Self::Undo
             | Self::Redo
+            | Self::SelectAll
             | Self::EndComponentEdit
             | Self::File(FileAction::New | FileAction::Open | FileAction::Quit) => false,
         }
