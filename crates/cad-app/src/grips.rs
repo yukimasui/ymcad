@@ -271,9 +271,10 @@ pub fn apply(geom: &Geometry, handle: Handle, to: Point2) -> Result<Geometry, Gr
             }
             Geometry::Circle(circle)
         }
-        (Geometry::Arc(a), Handle::ArcStart) => arc_through(to, a.mid_point(), a.end_point())?,
-        (Geometry::Arc(a), Handle::ArcEnd) => arc_through(a.start_point(), a.mid_point(), to)?,
-        (Geometry::Arc(a), Handle::ArcMid) => arc_through_mid(a.start_point(), to, a.end_point())?,
+        // 端点は、もう一方の端点と中点を通る 3 点円弧（ユーザー判断 7）。中点は両端と P を通る。
+        (Geometry::Arc(a), Handle::ArcStart) => arc_3(to, a.mid_point(), a.end_point())?,
+        (Geometry::Arc(a), Handle::ArcEnd) => arc_3(a.start_point(), a.mid_point(), to)?,
+        (Geometry::Arc(a), Handle::ArcMid) => arc_3(a.start_point(), to, a.end_point())?,
         (Geometry::Polyline(p), Handle::Vertex(i)) => {
             let mut vertices = p.vertices.clone();
             vertices[i] = to;
@@ -301,16 +302,9 @@ fn line(l: Line) -> Result<Geometry, GripError> {
     Ok(Geometry::Line(l))
 }
 
-/// 端点を動かした円弧。`a` → `mid` → `c` を通る 3 点円弧（ユーザー判断 7）。
-fn arc_through(a: Point2, mid: Point2, c: Point2) -> Result<Geometry, GripError> {
-    if a.eq_tol(c) {
-        return Err(GripError::ArcEndsMeet);
-    }
-    arc_through_mid(a, mid, c)
-}
-
-/// 3 点円弧。両端が重なる結果（1 周）も断る。
-fn arc_through_mid(a: Point2, mid: Point2, c: Point2) -> Result<Geometry, GripError> {
+/// `a` → `mid` → `c` を通る 3 点円弧。両端が重なる形（1 周になる）は断る。
+fn arc_3(a: Point2, mid: Point2, c: Point2) -> Result<Geometry, GripError> {
+    // 先に見る。重なった 2 点は「3 点が一直線」にもなるが、理由としては両端の重なりが分かりやすい。
     if a.eq_tol(c) {
         return Err(GripError::ArcEndsMeet);
     }

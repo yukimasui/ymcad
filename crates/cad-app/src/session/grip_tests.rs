@@ -121,6 +121,7 @@ fn a_click_that_changes_nothing_adds_no_history() {
     click(&mut s, &mut doc, p(10.0, 0.0));
     assert!(!s.is_gripping(), "終わる");
     assert_eq!(doc.revision(), revision, "図面は変わらない");
+    assert!(errors(&s).is_empty(), "エラーも出さない: {:?}", errors(&s));
     assert_eq!(doc.undo().expect("戻せる"), Some("LINE"), "Undo は前の操作");
     assert!(doc.entities().get(id).is_none());
 }

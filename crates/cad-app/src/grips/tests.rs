@@ -312,6 +312,15 @@ fn refusals() {
         Err(GripError::NotFinite),
         "非有限の行き先"
     );
+    // 行き先は有限でも、計算の途中で桁があふれる（中心からの距離が無限大）。
+    // 個別の検査では止まらず、最後の `Geometry::validate` が止める。
+    assert!(
+        matches!(
+            apply(&c, Handle::CircleQuadrant(0), p(f64::MAX, f64::MAX)),
+            Err(GripError::Invalid(_))
+        ),
+        "あふれた半径"
+    );
 }
 
 /// 半径がとても大きい円弧で、両端の距離はトレランスより大きいのに開始角と終了角が角度のトレランスで
@@ -453,6 +462,9 @@ fn targets(rng: &mut Lcg, geom: &Geometry, handle: Handle, from: Point2) -> Vec<
         from,
         p(rng.next_f64(-150.0, 150.0), rng.next_f64(-150.0, 150.0)),
         from + Vec2::new(rng.next_f64(-1.0, 1.0), rng.next_f64(-1.0, 1.0)),
+        // 計算の途中で桁があふれる行き先（距離・移動量が無限大になる）。
+        p(f64::MAX, f64::MAX),
+        p(-f64::MAX, f64::MAX),
     ];
     for (_, q) in grips_of(geom) {
         v.push(q);
