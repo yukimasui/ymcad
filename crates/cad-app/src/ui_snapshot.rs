@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 use crate::app::CadApp;
 
+mod grips;
 mod hover;
 mod properties;
 mod rename;

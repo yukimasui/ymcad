@@ -1241,6 +1241,12 @@ impl CadApp {
         &self.ribbon
     }
 
+    /// 表示範囲（スクリーンショットのテストが図形の画面上の位置を求めるため）。
+    #[cfg(test)]
+    pub fn viewport(&self) -> &Viewport {
+        &self.viewport
+    }
+
     /// 画面上端のリボンを描き、押されたコマンドを始める。
     ///
     /// **コマンド名を打つのと同じ扱い**（`Session::start_command_from_ui`）。
