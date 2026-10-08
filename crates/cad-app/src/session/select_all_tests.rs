@@ -167,7 +167,8 @@ fn works_while_waiting_for_a_selection() {
     );
 }
 
-/// 点や値の入力中・図形を指す段階では効かない（選択も履歴も変わらない）。
+/// 点や値の入力中・図形を指す段階では効かない（選択は変わらない）。効かなかったことが分かるよう、
+/// 使える段階を灰色の案内で 1 行だけ知らせる（Issue #74 の 1）。押し続けても履歴は増えない。
 #[test]
 fn does_nothing_while_a_point_or_an_entity_is_wanted() {
     for name in ["LINE", "TRIM", "ZOOM"] {
@@ -181,9 +182,120 @@ fn does_nothing_while_a_point_or_an_entity_is_wanted() {
         assert!(!s.can_select_all(), "{name}");
         assert!(!s.select_all(&doc), "{name}: 効かない");
         assert!(s.selection.is_empty(), "{name}: 選ばれない");
-        assert_eq!(s.cmdline.history().count(), lines, "{name}: 案内も出ない");
         assert_eq!(s.active_command(), Some(name), "{name}: 続いている");
+        assert_eq!(
+            s.cmdline.history().count(),
+            lines + 1,
+            "{name}: 案内を 1 行"
+        );
+        assert_eq!(
+            infos(&s).last().map(String::as_str),
+            Some(SELECT_ALL_UNAVAILABLE),
+            "{name}: 使える段階を案内する"
+        );
+        assert!(
+            !s.cmdline.history().any(|l| l.kind == LineKind::Error),
+            "{name}: エラー（赤）にはしない"
+        );
+
+        // 続けて押しても（キーの連打・押しっぱなし）、同じ案内は積まない。
+        for _ in 0..5 {
+            assert!(!s.select_all(&doc));
+        }
+        assert_eq!(
+            s.cmdline.history().count(),
+            lines + 1,
+            "{name}: 連打で履歴が増えない"
+        );
     }
+}
+
+/// 間に別の行が入った後なら、もう一度案内する（直前の行と同じときだけ省く）。
+#[test]
+fn the_unavailable_notice_comes_back_after_another_line() {
+    let mut doc = Document::new();
+    let mut s = Session::new();
+    feed(&mut s, &mut doc, "LINE");
+    assert!(!s.select_all(&doc));
+    feed(&mut s, &mut doc, "0,0");
+    s.cmdline.info("別の行");
+    assert!(!s.select_all(&doc));
+    let notices = s
+        .cmdline
+        .history()
+        .filter(|l| l.text == SELECT_ALL_UNAVAILABLE)
+        .count();
+    assert_eq!(notices, 2);
+}
+
+/// 選択待ち（「オブジェクトを選択」）の `ALL` は `SELECTALL` と同じ（AutoCAD の習慣。Issue #74 の 2）。
+/// 大文字・小文字は問わない。選択待ちのまま選び、Enter で全部が消える。
+#[test]
+fn typing_all_while_waiting_for_a_selection_selects_everything() {
+    for word in ["ALL", "all", " All "] {
+        let mut doc = Document::new();
+        let mut s = Session::new();
+        let (locked, _) = locked_and_hidden(&mut doc);
+        add_line(&mut doc, LayerId::ZERO, 0.0);
+        add_line(&mut doc, LayerId::ZERO, 5.0);
+        let kept = add_line(&mut doc, locked, 10.0);
+        feed(&mut s, &mut doc, "ERASE");
+        assert_eq!(s.prompt(), SELECT_PROMPT, "前提: 選択待ち");
+
+        feed(&mut s, &mut doc, word);
+        assert_eq!(s.selection.len(), 2, "{word:?}: 選べる 2 本を選ぶ");
+        assert_eq!(s.prompt(), SELECT_PROMPT, "{word:?}: 選択待ちのまま");
+        assert!(
+            !s.cmdline.history().any(|l| l.kind == LineKind::Error),
+            "{word:?}: エラーにしない"
+        );
+        assert_eq!(
+            s.cmdline.last_command(),
+            Some("ERASE"),
+            "再実行は ERASE のまま"
+        );
+        enter(&mut s, &mut doc);
+        assert_eq!(
+            doc.entities().ids().collect::<Vec<_>>(),
+            vec![kept],
+            "{word:?}: Enter で選べた 2 本が消える"
+        );
+    }
+}
+
+/// 選択待ち以外の `ALL` は今までどおり。待機中は不明なコマンド、点の入力中は座標として読めない、
+/// ZOOM の中では ZOOM のオプション（全体表示）。どれも図形を選ばない。
+#[test]
+fn all_outside_a_selection_wait_keeps_its_meaning() {
+    let mut doc = Document::new();
+    let mut s = Session::new();
+    add_line(&mut doc, LayerId::ZERO, 0.0);
+
+    feed(&mut s, &mut doc, "ALL");
+    assert!(s.selection.is_empty(), "待機中: 選ばない");
+    assert!(!s.has_active_tool());
+    assert!(
+        s.cmdline
+            .history()
+            .any(|l| l.kind == LineKind::Error && l.text.contains("不明なコマンドです: ALL")),
+        "待機中: 不明なコマンド"
+    );
+
+    feed(&mut s, &mut doc, "LINE");
+    feed(&mut s, &mut doc, "ALL");
+    assert!(s.selection.is_empty(), "LINE: 選ばない");
+    assert_eq!(s.active_command(), Some("LINE"), "LINE は続く");
+    assert!(s.last_point().is_none(), "LINE: 点にもならない");
+    s.cancel();
+
+    feed(&mut s, &mut doc, "ZOOM");
+    feed(&mut s, &mut doc, "ALL");
+    assert!(s.selection.is_empty(), "ZOOM: 選ばない");
+    assert!(!s.has_active_tool(), "ZOOM: 全体表示で終わる");
+    assert!(
+        s.take_view_actions().contains(&ViewAction::ZoomAll),
+        "ZOOM: 全体表示"
+    );
 }
 
 /// インプレース編集中は、薄く表示されている編集の外の図形も入る（クリックで拾えるので。
@@ -215,6 +327,11 @@ fn includes_entities_dimmed_by_in_place_editing() {
 
     assert!(s.select_all(&doc));
     assert_eq!(selected(&s), ids, "薄く表示されている外の線分も入る");
+    assert_eq!(
+        infos(&s).last().map(String::as_str),
+        Some("全選択: 3 個のオブジェクトを選択（編集の外の 1 個を含む）"),
+        "続けて ERASE すると外も消えることが読めるよう、外の数を添える（Issue #74 の 3）"
+    );
 
     // 待機中のクリックで拾える図形と同じ（各線分の中点をクリックして集める）。
     let mut clicked = Session::new();
@@ -280,4 +397,25 @@ fn the_ribbon_button_keeps_a_selection_wait_but_interrupts_a_point_input() {
     s.start_command_from_ui("SELECTALL", &mut doc);
     assert!(!s.has_active_tool(), "LINE は中断される");
     assert_eq!(s.selection.len(), 1, "中断してから全選択する");
+}
+
+/// 案内の添え書きは 1 組の括弧にまとめる。編集の外の数は編集中（0 でない）ときだけ。
+#[test]
+fn the_notice_puts_the_notes_in_one_pair_of_brackets() {
+    assert_eq!(
+        select_all_notice(3, 0, 0),
+        "全選択: 3 個のオブジェクトを選択"
+    );
+    assert_eq!(
+        select_all_notice(3, 1, 0),
+        "全選択: 3 個のオブジェクトを選択（編集の外の 1 個を含む）"
+    );
+    assert_eq!(
+        select_all_notice(3, 1, 2),
+        "全選択: 3 個のオブジェクトを選択（編集の外の 1 個を含む。非表示・ロック中のレイヤの 2 個は除く）"
+    );
+    assert_eq!(
+        select_all_notice(0, 0, 2),
+        "全選択: 選べるオブジェクトがありません（非表示・ロック中のレイヤの 2 個は除く）"
+    );
 }

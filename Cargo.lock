@@ -546,6 +546,7 @@ name = "cad-mcp"
 version = "0.1.0"
 dependencies = [
  "cad-core",
+ "resvg",
  "serde_json",
 ]
 

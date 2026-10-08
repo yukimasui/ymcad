@@ -15,9 +15,11 @@ JSON-RPC を話し、保存されたファイルを validate_ymc.py に通す。
 3. sample.dxf を開いて from_dxf.ymc へ保存（DXF → ネイティブの変換）
 4. sample.ymc を開き、図形・レイヤ・コンポーネントを照会し、roundtrip.ymc へ保存
    （開いて保存しただけの .ymc は元とバイト単位で一致すること）
-5. root の外・.. を含むパス・上書きの確認が isError になること
-6. stdin を閉じ、正常終了すること。stdout にプロトコル以外が出ていないこと
-7. 保存したファイルを validate_ymc.py に通す
+5. render で SVG / PNG を取り、Python 側で検査する（SVG は xml.etree で解析して要素数・座標、
+   PNG はシグネチャ・IHDR の幅と高さ・CRC・IDAT の展開後の大きさ）
+6. root の外・.. を含むパス・上書きの確認が isError になること
+7. stdin を閉じ、正常終了すること。stdout にプロトコル以外が出ていないこと
+8. 保存したファイルを validate_ymc.py に通す
 
 使い方
 ------
@@ -30,10 +32,14 @@ JSON-RPC を話し、保存されたファイルを validate_ymc.py に通す。
 
 from __future__ import annotations
 
+import base64
 import json
 import math
+import struct
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
+import zlib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -53,6 +59,7 @@ EXPECTED_TOOLS = {
     "list_components",
     "undo",
     "redo",
+    "render",
 }
 
 
@@ -153,6 +160,166 @@ def check_tool_list(tools: list) -> None:
         check(isinstance(ann.get("destructiveHint"), bool), f"{t['name']}: destructiveHint が無い")
 
 
+SVG_NS = "{http://www.w3.org/2000/svg}"
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def png_chunks(data: bytes) -> list[tuple[bytes, bytes]]:
+    """PNG をチャンク（種類, 本体）に分ける。CRC を検査し、末尾でぴったり尽きることを見る。"""
+    check(data[:8] == PNG_SIGNATURE, f"PNG のシグネチャでない: {data[:8]!r}")
+    pos, chunks = 8, []
+    while pos < len(data):
+        check(pos + 12 <= len(data), "PNG のチャンクが途中で切れている")
+        (length,) = struct.unpack(">I", data[pos : pos + 4])
+        kind = data[pos + 4 : pos + 8]
+        body = data[pos + 8 : pos + 8 + length]
+        (crc,) = struct.unpack(">I", data[pos + 8 + length : pos + 12 + length])
+        check(len(body) == length, "PNG のチャンクが途中で切れている")
+        check(zlib.crc32(kind + body) == crc, f"PNG の {kind!r} の CRC が合わない")
+        chunks.append((kind, body))
+        pos += 12 + length
+    check(chunks and chunks[-1][0] == b"IEND", "PNG が IEND で終わっていない")
+    check(chunks[0][0] == b"IHDR", "PNG が IHDR で始まっていない")
+    return chunks
+
+
+def check_png(b64: str, width: int, height: int) -> None:
+    data = base64.b64decode(b64, validate=True)
+    chunks = png_chunks(data)
+    w, h, depth, color, _comp, _filt, interlace = struct.unpack(">IIBBBBB", chunks[0][1])
+    check((w, h) == (width, height), f"PNG の大きさが違う: {(w, h)} != {(width, height)}")
+    check((depth, color, interlace) == (8, 6, 0), f"PNG の形式が RGBA 8 ビットでない: {(depth, color, interlace)}")
+    raw = zlib.decompress(b"".join(body for kind, body in chunks if kind == b"IDAT"))
+    # 1 行ごとにフィルタ 1 バイト + RGBA 4 バイト × 幅。
+    check(len(raw) == height * (1 + 4 * width), f"IDAT の展開後の大きさが合わない: {len(raw)}")
+
+
+def svg_elements(svg: str) -> dict[str, list[ET.Element]]:
+    root = ET.fromstring(svg)
+    check(root.tag == SVG_NS + "svg", f"ルートが svg でない: {root.tag}")
+    out: dict[str, list[ET.Element]] = {}
+    for el in root.iter():
+        out.setdefault(el.tag.removeprefix(SVG_NS), []).append(el)
+    return out
+
+
+def check_render(c: "Client", info: dict, entities: list[dict]) -> None:
+    """render の通し検査。Python 側で独立に座標を求めて SVG と比べる。"""
+    ppu_of = lambda r: r["width"] / (r["view"]["max"]["x"] - r["view"]["min"]["x"])
+
+    # --- 既定（PNG）。結果の先頭は structuredContent と同じ JSON の text、その後ろに image ---
+    result = c.call("render", {"width": 640, "height": 480})
+    check(result.get("isError") is False, f"render が失敗: {result}")
+    blocks = result["content"]
+    check([b["type"] for b in blocks] == ["text", "image"], f"content の並び: {[b['type'] for b in blocks]}")
+    check(blocks[1]["mimeType"] == "image/png", f"mimeType: {blocks[1]['mimeType']}")
+    check(json.loads(blocks[0]["text"]) == result["structuredContent"], "render: text と structuredContent が違う")
+    check_png(blocks[1]["data"], 640, 480)
+    sc = result["structuredContent"]
+    check(sc["png_bytes"] == len(base64.b64decode(blocks[1]["data"])), "png_bytes が実際の大きさと違う")
+    check(sc["region_source"] == "drawing_extent" and sc["background"] == "dark", f"render の既定: {sc}")
+
+    # 範囲を省くと、図面の範囲（drawing_info の bbox。作図線を含まない）が余白つきで入る。
+    view, box = sc["view"], info["bbox"]
+    check(
+        view["min"]["x"] < box["min"]["x"] and view["min"]["y"] < box["min"]["y"]
+        and view["max"]["x"] > box["max"]["x"] and view["max"]["y"] > box["max"]["y"],
+        f"view が図面の範囲を覆っていない: {view} {box}",
+    )
+    # 縦横比を保つ: 1 単位あたりの px が横も縦も同じ。
+    ppu = sc["pixels_per_unit"]
+    check(math.isclose(ppu_of(sc), ppu) and math.isclose(480 / (view["max"]["y"] - view["min"]["y"]), ppu),
+          f"pixels_per_unit が view と合わない: {sc}")
+
+    # --- SVG: 解析して要素数と座標を見る。write_sample は表示中の図形 6 つ（作図線は非表示レイヤ）---
+    r = c.call("render", {"format": "svg", "width": 640, "height": 480})
+    check(r.get("isError") is False, f"render(svg) が失敗: {r}")
+    svg_res = r["structuredContent"]
+    svg = r["content"][1]["text"]
+    check(r["content"][1]["type"] == "text" and svg_res["svg_bytes"] == len(svg), "SVG の text ブロック")
+    el = svg_elements(svg)
+    root = el["svg"][0]
+    check((root.get("width"), root.get("height"), root.get("viewBox")) == ("640", "480", "0 0 640 480"), "svg の大きさ")
+    check(svg_res["entities_drawn"] == 6 and svg_res["entities_on_hidden_layers"] == 1, f"描いた数: {svg_res}")
+    # 表示中の図形は 線 1・円 1・円弧 1・ポリライン 1・インスタンス 2（中身は線 1 と円 1）。
+    # 展開すると 線分 3・円 3・path 2（円弧とポリライン）になる。作図線は非表示のレイヤなので描かない。
+    check(len(el.get("line", [])) == 3, f"線分の要素数: {len(el.get('line', []))}（非表示レイヤの作図線を描いていないか）")
+    check(len(el.get("circle", [])) == 3, f"円の要素数: {len(el.get('circle', []))}")
+    paths = el.get("path", [])
+    check(len(paths) == 2, f"path の要素数: {len(paths)}")
+    check(sum("A" in p.get("d", "") for p in paths) == 1, "円弧の A コマンドが 1 つでない")
+    check(sum(p.get("d", "").endswith("Z") for p in paths) == 1, "閉じたポリラインの Z が 1 つでない")
+    check(len(el["rect"]) == 1 and el["rect"][0].get("fill") == "#0a0a0a", "背景の rect")
+    check(all(e.get("data-id", "").startswith("d3e") for tag in ("line", "circle", "path") for e in el.get(tag, [])),
+          "data-id が図形 ID でない")
+    check(any(l.get("stroke-dasharray") == "12 3 3 3" for l in el["line"]), "一点鎖線の破線パターンが無い")
+
+    # 座標の対応を独立に求める: 図面の線分（レイヤ 0 の d3e0）の端点 → 画像 px。
+    # px = (x - view.min.x) * ppu、py = (view.max.y - y) * ppu（Y を反転）。
+    ppu = ppu_of(svg_res)
+    first = next(e for e in entities if e["geometry"]["type"] == "line")
+    mine = [l for l in el["line"] if l.get("data-id") == first["id"]]
+    check(len(mine) == 1, f"線分 {first['id']} の要素: {len(mine)}")
+    g = first["geometry"]
+    expect = {
+        "x1": (g["start"]["x"] - svg_res["view"]["min"]["x"]) * ppu,
+        "y1": (svg_res["view"]["max"]["y"] - g["start"]["y"]) * ppu,
+        "x2": (g["end"]["x"] - svg_res["view"]["min"]["x"]) * ppu,
+        "y2": (svg_res["view"]["max"]["y"] - g["end"]["y"]) * ppu,
+    }
+    for key, want in expect.items():
+        got = float(mine[0].get(key))
+        check(abs(got - want) < 0.01, f"線分の {key}: SVG {got} != 独立に求めた {want}")
+    # 円弧: 0.25 → 2.75 ラジアンの円弧の始点・終点が path の M と A の終点に一致する。
+    arc_ent = next(e for e in entities if e["geometry"]["type"] == "arc")["geometry"]
+    arc_path = next(p for p in paths if "A" in p.get("d", ""))
+    cx, cy, rad = arc_ent["center"]["x"], arc_ent["center"]["y"], arc_ent["radius"]
+    pt = lambda deg: (
+        (cx + rad * math.cos(math.radians(deg)) - svg_res["view"]["min"]["x"]) * ppu,
+        (svg_res["view"]["max"]["y"] - (cy + rad * math.sin(math.radians(deg)))) * ppu,
+    )
+    d = arc_path.get("d")
+    m, a = d.split("A")
+    sx, sy = map(float, m.removeprefix("M").split())
+    rx, ry, rot, large, sweep, ex, ey = a.split()
+    s_want, e_want = pt(arc_ent["start_angle"]), pt(arc_ent["end_angle"])
+    check(abs(sx - s_want[0]) < 0.01 and abs(sy - s_want[1]) < 0.01, f"円弧の始点: {d}")
+    check(abs(float(ex) - e_want[0]) < 0.01 and abs(float(ey) - e_want[1]) < 0.01, f"円弧の終点: {d}")
+    check(abs(float(rx) - rad * ppu) < 0.01 and rx == ry, f"円弧の半径: {d}")
+    # 14° → 158°（144°）なので large-arc は 0。モデルの反時計回りは画像でも反時計回り = sweep-flag 0。
+    check((large, sweep) == ("0", "0"), f"円弧の large-arc / sweep フラグ: {d}")
+
+    # --- 範囲の指定・背景・両方 ---
+    zoom = c.call("render", {
+        "format": "both", "width": 800, "height": 600, "background": "light",
+        "region": {"min": [0, 0], "max": [8, 6]},
+    })
+    check(zoom.get("isError") is False, f"region つきの render: {zoom}")
+    zs = zoom["structuredContent"]
+    check([b["type"] for b in zoom["content"]] == ["text", "image", "text"], "both の content の並び")
+    check_png(zoom["content"][1]["data"], 800, 600)
+    check(zs["region_source"] == "given" and zs["background"] == "light", f"region / background: {zs}")
+    check(math.isclose(zs["pixels_per_unit"], 100.0), f"8 × 6 を 800 × 600 に収めると 100 px/単位: {zs}")
+    check(zs["view"] == {"min": {"x": 0.0, "y": 0.0}, "max": {"x": 8.0, "y": 6.0}}, f"view: {zs['view']}")
+    check(zs["entities_outside_view"] >= 1, f"範囲の外の図形を数えていない: {zs}")
+    zel = svg_elements(zoom["content"][2]["text"])
+    check(zel["rect"][0].get("fill") == "#ffffff", "light の背景")
+    # light の背景では白（ACI 7）の線を黒で描く。
+    check(any(e.get("stroke") == "#000000" for tag in ("line", "path") for e in zel.get(tag, [])), "白の線を黒にしていない")
+
+    # --- 拒否 ---
+    c.fails("render", {"width": 4097}, "4096")
+    c.fails("render", {"height": 5000}, "4096")
+    c.fails("render", {"width": 0}, "width")
+    c.fails("render", {"format": "jpeg"}, "png / svg / both")
+    c.fails("render", {"region": {"min": [0, 0], "max": [0, 5]}}, "0 より大きく")
+    c.fails("render", {"bogus": 1}, "bogus")
+
+
+def info_after_open(c: "Client") -> dict:
+    return c.ok("drawing_info", {})
+
+
 def run(binary: Path, root: Path) -> list[Path]:
     sample_ymc = root / "sample.ymc"
     sample_dxf = root / "sample.dxf"
@@ -213,6 +380,7 @@ def run(binary: Path, root: Path) -> list[Path]:
         f"円弧の角度が度で出ていない: {arcs[0]}",
     )
     c.fails("get_entities", {"ids": ["d2e0g0"]}, "別の図面")
+    check_render(c, info_after_open(c), got["entities"])
     layers = c.ok("list_layers", {})["layers"]
     check(any(l["name"] == "0" for l in layers), f"レイヤ 0 が無い: {layers}")
     comps = c.ok("list_components", {})["components"]

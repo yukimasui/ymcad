@@ -16,7 +16,7 @@ use cad_core::command::AddLayer;
 use cad_core::{AciColor, LayerId};
 
 /// レイヤ `L1` を足してレイヤパネルを開く。
-fn with_layer(on: bool) -> (Harness<'static, CadApp>, LayerId) {
+pub(super) fn with_layer(on: bool) -> (Harness<'static, CadApp>, LayerId) {
     let mut h = app_with_dynamic(on);
     hover(&mut h, P1);
     {
@@ -30,7 +30,7 @@ fn with_layer(on: bool) -> (Harness<'static, CadApp>, LayerId) {
     (h, id)
 }
 
-fn name_of(h: &Harness<'_, CadApp>, id: LayerId) -> String {
+pub(super) fn name_of(h: &Harness<'_, CadApp>, id: LayerId) -> String {
     h.state()
         .doc
         .layers()
@@ -41,7 +41,7 @@ fn name_of(h: &Harness<'_, CadApp>, id: LayerId) -> String {
 }
 
 /// レイヤパネルの名前 `name` をダブルクリックする（押す・離すを 2 回、別フレームで）。
-fn double_click_layer_name(h: &mut Harness<'_, CadApp>, name: &str) {
+pub(super) fn double_click_layer_name(h: &mut Harness<'_, CadApp>, name: &str) {
     let pos = h
         .query_all_by_role_and_label(egui::accesskit::Role::Button, name)
         .next()
