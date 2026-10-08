@@ -1186,6 +1186,12 @@ mod tests {
     fn define_from_ids_replaces_the_shapes_with_one_instance() {
         let dir = TempDir::new("comp-define-ids");
         let mut s = layered(&dir);
+        // 先に別の定義を置いておく（名前で引き直さず「最初の定義」などを使うと別の定義に付く）。
+        ok(
+            &mut s,
+            "define_component",
+            json!({"name": "枠", "origin": [0, 0], "entities": [{"type": "line", "start": [0, 0], "end": [1, 0]}]}),
+        );
         let (line, circle) = two_shapes(&mut s);
         let r = mutate(
             &mut s,
@@ -1205,6 +1211,7 @@ mod tests {
         );
         let def = s.doc.definitions().by_name("窓").unwrap();
         assert_eq!(s.doc.definitions().get(def).unwrap().entities.len(), 2);
+        assert_eq!(s.doc.definitions().len(), 2);
         // 元の図形は消え、インスタンスが 1 つ（mutate の redo の後でも同じ ID）。
         let inst = r["instance"].as_str().unwrap().to_owned();
         err(&mut s, "get_entities", json!({ "ids": [line] }));
