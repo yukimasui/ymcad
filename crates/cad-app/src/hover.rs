@@ -22,6 +22,7 @@
 //!
 //! 待機中は、選択した図形のグリップが図形より先に拾われる（`ClickTarget::Grip`）。これも
 //! `click_target` が決めるので、乗せて大きくなったグリップとクリックで掴まれるグリップは一致する。
+//! 重なったグリップの束（段階 2）も同じ結果に入っているので、束も一致する。
 //! グリップは選択から作るので、結果を使い回す鍵に**選択の版**も入れる（選び直したら、同じ位置でも
 //! 計算し直す）。
 
@@ -29,7 +30,7 @@ use cad_core::geom::{Aabb, Point2};
 use cad_core::snap::SpatialIndex;
 use cad_core::{Document, EntityId};
 
-use crate::grips::Grip;
+use crate::grips::GripGroup;
 use crate::selection::{self, Picker};
 use crate::session::{ClickTarget, PickStage, Session};
 use crate::tools::entity_preview::Boundaries;
@@ -187,11 +188,12 @@ impl Hover {
         &self.boundaries
     }
 
-    /// 乗せているグリップ（クリックすると掴まれるもの）。大きく描き、カーソル横に案内を出す。
+    /// 乗せているグリップの束（クリックすると掴まれるもの。重なったグリップはまとめて）。
+    /// 大きく描き、カーソル横に案内を出す。
     #[must_use]
-    pub fn hovered_grip(&self) -> Option<Grip> {
+    pub fn hovered_grip(&self) -> Option<&GripGroup> {
         match (&self.last, self.shown) {
-            (Some((_, ClickTarget::Grip(g))), true) => Some(*g),
+            (Some((_, ClickTarget::Grip(g))), true) => Some(g),
             _ => None,
         }
     }

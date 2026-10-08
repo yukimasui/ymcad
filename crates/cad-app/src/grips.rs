@@ -1,4 +1,4 @@
-//! グリップ編集の純粋関数（Issue #30 段階 1、ADR-0045）。
+//! グリップ編集の純粋関数（Issue #30 段階 1・2、ADR-0045）。
 //!
 //! 選んだ図形の端点・中点・中心などに「グリップ」を出し、それを掴んで動かすと形が変わる。
 //! ここには egui にも `Session` にも依存しない計算だけを置く。
@@ -7,6 +7,9 @@
 //! - [`apply`] … 「そのグリップの点が `to` へ行く」形の変え方。成り立たない形は [`GripError`] で断る
 //! - [`dimension_base`] / [`tracks`] … 長さ・角度（寸法入力・直接距離入力）と直交・極トラッキングの基点
 //!   （ユーザー判断 1: **形の基準から**。線分の端点なら反対側の端点）
+//! - [`hit`] … カーソルの下の**重なったグリップの束**（[`GripGroup`]、段階 2）。選んだ図形どうしで
+//!   同じ位置にあるグリップはまとめて掴み、[`apply_group`] で全部を「その点が `to` へ」動かす
+//!   （全部か無しか）。線分 4 本の矩形の角を動かすと、隣り合う 2 本がつながったまま動く
 //!
 //! # 断るケース
 //!
@@ -49,6 +52,9 @@ pub enum Handle {
     ArcCenter,
     /// ポリラインの頂点（添字）。
     Vertex(usize),
+    /// ポリラインの辺の中点（辺の添字。辺 `i` は頂点 `i` → `i + 1`、閉じたポリラインの最後の辺は
+    /// 最後の頂点 → 先頭の頂点）。辺を平行移動する（段階 2）。
+    Edge(usize),
     /// 作図線の通過点（図形ごと移動）。
     XlineOrigin,
     /// インスタンスの基点（図形ごと移動）。
@@ -62,6 +68,7 @@ impl Handle {
         match self {
             Self::LineStart | Self::LineEnd | Self::ArcStart | Self::ArcEnd => "端点を動かす",
             Self::Vertex(_) => "頂点を動かす",
+            Self::Edge(_) => "辺を動かす",
             Self::ArcMid => "中点を動かす",
             Self::CircleQuadrant(_) => "半径を変える",
             Self::LineMid
@@ -154,7 +161,7 @@ fn is_full_arc(a: &Arc) -> bool {
 /// | 線分 | 始点・終点・中点 |
 /// | 円 | 中心・四分点 ×4 |
 /// | 円弧 | 始点・終点・中点・中心（**1 周の円弧は中心だけ**） |
-/// | ポリライン | 頂点（辺の中点は段階 2） |
+/// | ポリライン | 頂点・辺の中点（閉じていれば最後の辺も） |
 /// | 作図線 | 通過点 |
 /// | インスタンス | 基点 |
 #[must_use]
@@ -183,12 +190,21 @@ pub fn grips_of(geom: &Geometry) -> Vec<(Handle, Point2)> {
                 ]
             }
         }
-        Geometry::Polyline(p) => p
-            .vertices
-            .iter()
-            .enumerate()
-            .map(|(i, v)| (Handle::Vertex(i), *v))
-            .collect(),
+        Geometry::Polyline(p) => {
+            let mut v: Vec<(Handle, Point2)> = p
+                .vertices
+                .iter()
+                .enumerate()
+                .map(|(i, v)| (Handle::Vertex(i), *v))
+                .collect();
+            // 辺 `i` は頂点 `i` → `i + 1`（閉じていれば最後の辺は最後の頂点 → 先頭の頂点）。
+            v.extend(
+                p.segments()
+                    .enumerate()
+                    .map(|(i, s)| (Handle::Edge(i), s.midpoint())),
+            );
+            v
+        }
         Geometry::Xline(x) => vec![(Handle::XlineOrigin, x.origin)],
         Geometry::Instance(i) => vec![(Handle::InstanceOrigin, i.placement.origin)],
     }
@@ -214,7 +230,7 @@ pub fn position(geom: &Geometry, handle: Handle) -> Option<Point2> {
 /// | 線分の端点 | 反対側の端点（「F8 で水平」「`100` で長さ 100」がそのままできる） |
 /// | 円の四分点 | 中心（長さ = 半径） |
 /// | 開いたポリラインの両端の頂点 | 隣の頂点 |
-/// | それ以外 | 元の位置（移動量を測る） |
+/// | それ以外（辺の中点も） | 元の位置（移動量を測る） |
 #[must_use]
 pub fn dimension_base(geom: &Geometry, handle: Handle) -> Option<Point2> {
     let here = position(geom, handle)?;
@@ -284,6 +300,19 @@ pub fn apply(geom: &Geometry, handle: Handle, to: Point2) -> Result<Geometry, Gr
             }
             Geometry::Polyline(moved)
         }
+        // 辺の両端の頂点を同じだけ動かす（辺の平行移動。頂点の数は変えない。ADR-0040）。
+        (Geometry::Polyline(p), Handle::Edge(i)) => {
+            let n = p.vertices.len();
+            let d = to - from;
+            let mut vertices = p.vertices.clone();
+            vertices[i] += d;
+            vertices[(i + 1) % n] += d;
+            let moved = Polyline::new(vertices, p.closed);
+            if moved.is_degenerate() {
+                return Err(GripError::ZeroLength);
+            }
+            Geometry::Polyline(moved)
+        }
         (_, h) if h.moves_whole() => geom.translated(to - from),
         _ => return Err(GripError::NotAGrip),
     };
@@ -317,13 +346,136 @@ fn arc_3(a: Point2, mid: Point2, c: Point2) -> Result<Geometry, GripError> {
     Ok(Geometry::Arc(arc))
 }
 
-/// `at` に当たるグリップ。グリップを中心とする一辺 `2 × tolerance` の正方形（画面上で一定の大きさ）
-/// の中にあるもののうち、最も近いもの。
+/// 1 つの図形の上の複数のグリップを、どれも「その点が `to` へ」行くように順に動かした形。
 ///
-/// 同じ距離なら `EntityId` の大きい方（後から作った = 手前に描かれる方。図形のピックと同じ）、
-/// それも同じなら同じ図形の中での並び（[`grips_of`] の順）で先のもの。
+/// [`GripGroup::parts`] が同じ図形から複数のグリップを渡すのは、ポリラインの重なった頂点
+/// （始点と終点が同じ位置の開いたポリラインなど）だけ。頂点はそれぞれ別の添字を書き換えるので、
+/// 順に動かしても結果は順序によらない。
+///
+/// # Errors
+///
+/// どれか 1 つでも成り立たなければ、その理由（[`apply`] と同じ）。
+pub fn apply_many(geom: &Geometry, handles: &[Handle], to: Point2) -> Result<Geometry, GripError> {
+    let Some((first, rest)) = handles.split_first() else {
+        return Err(GripError::NotAGrip);
+    };
+    let mut moved = apply(geom, *first, to)?;
+    for h in rest {
+        moved = apply(&moved, *h, to)?;
+    }
+    Ok(moved)
+}
+
+/// まとめて掴んだ図形のうち、断ったもの（[`apply_group`]）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartError {
+    /// 断った図形の添字（[`apply_group`] に渡した列の中で）。
+    pub index: usize,
+    /// 理由。
+    pub error: GripError,
+}
+
+/// まとめて掴んだグリップを `to` へ動かした形の列（段階 2）。
+///
+/// **全部か無しか。** 1 つでも成り立たなければ、最初に断った図形の添字と理由を返す
+/// （呼び出し側はどれも書き換えない）。それぞれの図形は自分の規則（[`apply_many`]）で動く。
+///
+/// # Errors
+///
+/// [`PartError`]。
+pub fn apply_group(
+    parts: &[(&Geometry, &[Handle])],
+    to: Point2,
+) -> Result<Vec<Geometry>, PartError> {
+    parts
+        .iter()
+        .enumerate()
+        .map(|(index, (geom, handles))| {
+            apply_many(geom, handles, to).map_err(|error| PartError { index, error })
+        })
+        .collect()
+}
+
+/// 選んだ図形どうしで同じ位置（[`Point2::eq_tol`]）にある、重なったグリップの束（段階 2）。
+///
+/// 先頭が**代表**（クリックで拾われたもの。長さ・角度の基点と直交・極は代表の規則で決まる）。
+/// 束は [`hit`] だけが作るので、ホバーで大きくなるグリップの束とクリックで掴まれる束は一致する
+/// （ADR-0042）。
+#[derive(Clone, Debug, PartialEq)]
+pub struct GripGroup {
+    grips: Vec<Grip>,
+}
+
+impl GripGroup {
+    /// 代表のグリップ。
+    #[must_use]
+    pub fn representative(&self) -> Grip {
+        self.grips[0]
+    }
+
+    /// 束のグリップすべて（先頭が代表）。
+    #[must_use]
+    pub fn grips(&self) -> &[Grip] {
+        &self.grips
+    }
+
+    /// 図形ごとに、動かすグリップ。代表の図形が先頭で、その先頭が代表のグリップ。
+    ///
+    /// 1 つの図形が同じ位置に複数のグリップを持つときは 1 つを選ぶ（代表の図形なら代表、ほかは
+    /// 並び（[`Handle`] の順）で先のもの）。ただしポリラインの頂点どうしは全部動かす（始点と終点が
+    /// 同じ位置の開いたポリラインの角を動かしても、閉じた形のまま）。
+    #[must_use]
+    pub fn parts(&self) -> Vec<(EntityId, Vec<Handle>)> {
+        let rep = self.representative();
+        let mut out: Vec<(EntityId, Vec<Handle>)> = Vec::new();
+        for g in &self.grips {
+            if out.iter().any(|(id, _)| *id == g.id) {
+                continue;
+            }
+            let mut mine: Vec<Handle> = self
+                .grips
+                .iter()
+                .filter(|o| o.id == g.id)
+                .map(|o| o.handle)
+                .collect();
+            mine.sort();
+            let chosen = if g.id == rep.id { rep.handle } else { mine[0] };
+            let mut handles = vec![chosen];
+            if matches!(chosen, Handle::Vertex(_)) {
+                handles.extend(
+                    mine.into_iter()
+                        .filter(|h| *h != chosen && matches!(h, Handle::Vertex(_))),
+                );
+            }
+            out.push((g.id, handles));
+        }
+        out
+    }
+
+    /// 乗せたときにカーソル横へ出す案内。図形が 1 つなら代表の案内（「端点を動かす」など）。
+    /// 複数なら、どれも同じ案内ならそれ、混ざっていれば「点を動かす」に、図形の数を添える
+    /// （「端点を動かす（2 個）」）。
+    #[must_use]
+    pub fn label(&self) -> String {
+        let parts = self.parts();
+        let first = parts[0].1[0].label();
+        if parts.len() == 1 {
+            return first.to_owned();
+        }
+        let same = parts.iter().all(|(_, h)| h[0].label() == first);
+        let label = if same { first } else { "点を動かす" };
+        format!("{label}（{} 個）", parts.len())
+    }
+}
+
+/// `at` に当たるグリップの束。グリップを中心とする一辺 `2 × tolerance` の正方形（画面上で一定の
+/// 大きさ）の中にあるもののうち、最も近いものと、それと同じ位置（[`Point2::eq_tol`]）にあるもの全部。
+///
+/// 最も近いものが同じ距離で複数あれば `EntityId` の大きい方（後から作った = 手前に描かれる方。
+/// 図形のピックと同じ）。束の代表は、束の中で `EntityId` の大きい方、同じ図形なら並び
+/// （[`Handle`] の順 = [`grips_of`] の順）で先のもの。束の残りは `EntityId` の大きい順。
 #[must_use]
-pub fn hit(grips: &[Grip], at: Point2, tolerance: f64) -> Option<Grip> {
+pub fn hit(grips: &[Grip], at: Point2, tolerance: f64) -> Option<GripGroup> {
     let mut best: Option<(Grip, f64)> = None;
     for g in grips {
         let d = g.at - at;
@@ -339,7 +491,15 @@ pub fn hit(grips: &[Grip], at: Point2, tolerance: f64) -> Option<Grip> {
             best = Some((*g, dist));
         }
     }
-    best.map(|(g, _)| g)
+    let (nearest, _) = best?;
+    let mut group: Vec<Grip> = grips
+        .iter()
+        .filter(|g| g.at.eq_tol(nearest.at))
+        .copied()
+        .collect();
+    // 代表を先頭に（EntityId の大きい順、同じ図形なら並びの順）。
+    group.sort_by(|a, b| b.id.cmp(&a.id).then(a.handle.cmp(&b.handle)));
+    Some(GripGroup { grips: group })
 }
 
 #[cfg(test)]

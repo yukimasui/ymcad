@@ -18,7 +18,8 @@ use super::{
     CadApp, P1,
 };
 use crate::grips::Handle;
-use crate::properties::BUSY_NOTE;
+use crate::layer_panel::{MOVE_BUSY_NOTE, MOVE_GRIP_NOTE};
+use crate::properties::{BUSY_NOTE, GRIP_BUSY_NOTE};
 
 /// パネルからの変更と同じ入口で図面を変える。
 fn external(h: &mut Harness<'_, CadApp>, cmd: Box<dyn cad_core::Command>) {
@@ -252,7 +253,10 @@ fn grips_are_hit_at_the_same_pixel_distance_at_any_zoom() {
         let end = screen(&h, p(200.0, 100.0));
         hover(&mut h, end + egui::vec2(5.0, 5.0));
         assert_eq!(
-            h.state().hover.hovered_grip().map(|g| g.handle),
+            h.state()
+                .hover
+                .hovered_grip()
+                .map(|g| g.representative().handle),
             Some(Handle::LineEnd),
             "倍率 {factor}: 5px ずれは当たる"
         );
@@ -317,6 +321,7 @@ fn selecting_ten_thousand_entities_shows_no_grips_and_says_so() {
 // ---- パネル・変換中 -----------------------------------------------------------
 
 /// 掴んでいる間、プロパティパネルは表示だけ（コマンド実行中と同じ）。取り消せば戻る。
+/// 案内はグリップ用（「Esc で取り消し。選択は残ります」。コマンドの「中断すると選択も外れます」ではない）。
 #[test]
 fn the_properties_panel_is_display_only_while_gripping() {
     let (mut h, _) = selected_line();
@@ -324,16 +329,34 @@ fn the_properties_panel_is_display_only_while_gripping() {
     settle(&mut h);
     assert!(h.state().properties_panel.is_open(), "前提: 開いた");
     assert!(
-        h.query_all_by_label(BUSY_NOTE).next().is_none(),
+        h.query_all_by_label(GRIP_BUSY_NOTE).next().is_none(),
         "前提: 待機中は案内が無い"
     );
     grab_end(&mut h);
     assert!(
-        h.query_all_by_label(BUSY_NOTE).next().is_some(),
+        h.query_all_by_label(GRIP_BUSY_NOTE).next().is_some(),
         "掴んでいる間は表示だけ"
     );
+    assert!(
+        h.query_all_by_label(BUSY_NOTE).next().is_none(),
+        "コマンドの案内（中断すると選択も外れます）は出さない"
+    );
     press(&mut h, egui::Key::Escape);
-    assert!(h.query_all_by_label(BUSY_NOTE).next().is_none());
+    assert!(h.query_all_by_label(GRIP_BUSY_NOTE).next().is_none());
+}
+
+/// レイヤパネルの「移動」の行も、掴んでいる間はグリップ用の案内。
+#[test]
+fn the_layer_panel_move_row_says_the_grip_keeps_the_selection() {
+    let (mut h, _) = selected_line();
+    type_text(&mut h, "LA");
+    press(&mut h, egui::Key::Enter);
+    assert!(h.state().layer_panel.is_open(), "前提: 開いた");
+    grab_end(&mut h);
+    assert!(h.query_all_by_label(MOVE_GRIP_NOTE).next().is_some());
+    assert!(h.query_all_by_label(MOVE_BUSY_NOTE).next().is_none());
+    press(&mut h, egui::Key::Escape);
+    assert!(h.query_all_by_label(MOVE_GRIP_NOTE).next().is_none());
 }
 
 /// コマンドラインで変換中でも、クリックで掴み・確定できる。変換中の文字列には触れない（ADR-0002）。

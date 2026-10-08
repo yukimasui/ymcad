@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use cad_core::geom::Point2;
 
-use self::dimension::{DimState, DimValues, Field, Live, TabOutcome};
+use self::dimension::{DimKind, DimState, DimValues, Field, Live, TabOutcome};
 use self::dynamic::{Activity, Bounds, Point, Size};
 
 use crate::tools::{self, CommandSpec};
@@ -297,6 +297,8 @@ struct DimensionInput {
     /// フレームの最初の時点で、寸法入力に参加しているツールの基点。
     /// キー（Tab / Esc / Enter）の扱いを決めるのに使う。
     base: Option<Point2>,
+    /// 欄の見せ方（「長さ」「角度」か「半径」だけか）。
+    kind: DimKind,
     /// 入力中の欄と固定した値。
     state: DimState,
     /// 直前のフレームで欄を出したか。
@@ -429,11 +431,13 @@ impl CommandLine {
     ///
     /// 基点が変わったら（ツールが次の点へ進んだ・終わった・別のツールになった）
     /// 固定を外す。前の点で固定した長さが次の線分に残ると、気づかずに使ってしまう。
-    pub fn set_dimension_base(&mut self, base: Option<Point2>) {
-        if self.dim.base != base {
+    /// 欄の見せ方 `kind`（「半径」だけ、など）が変わったときも外す。
+    pub fn set_dimension_base(&mut self, base: Option<Point2>, kind: DimKind) {
+        if self.dim.base != base || self.dim.kind != kind {
             self.dim.state.reset();
         }
         self.dim.base = base;
+        self.dim.kind = kind;
     }
 
     /// このフレームで Ctrl+A が全選択として押されたか。読んだら落とす。
@@ -832,7 +836,7 @@ impl CommandLine {
             });
     }
 
-    /// 寸法入力の「長さ」「角度」の 2 欄を描く。
+    /// 寸法入力の「長さ」「角度」の 2 欄（円の四分点のグリップでは「半径」の 1 欄）を描く。
     ///
     /// **`TextEdit` は 1 つだけ**。入力中の欄の位置に本物の入力欄を置き、もう片方は
     /// 値を描くだけにする。2 つ描くとフォーカスと IME の出力先が 2 つになる（ADR-0034 決定 6）。
@@ -841,7 +845,8 @@ impl CommandLine {
     /// （入力欄のことがある）が右へずれないように。
     fn show_dimension_fields(&mut self, ui: &mut egui::Ui, live: Option<Live>) {
         let state = self.dim.state;
-        for field in [Field::Length, Field::Angle] {
+        let kind = self.dim.kind;
+        for &field in kind.fields() {
             let locked = state.locks.get(field);
             let live_value = live.and_then(|l| match field {
                 Field::Length => Some(l.length),
@@ -854,10 +859,7 @@ impl CommandLine {
             // 固定値を優先し、無ければライブ値。どちらも無ければ（カーソルが無い・
             // 基点と同じで向きが無い）横棒。
             let shown = locked.or(live_value).map_or_else(|| "-".to_owned(), format);
-            let name = match field {
-                Field::Length => "長さ",
-                Field::Angle => "角度",
-            };
+            let name = kind.name(field);
             let active = field == state.field;
             let name_color = if active {
                 ui.visuals().strong_text_color()
@@ -993,7 +995,11 @@ impl CommandLine {
         // 寸法入力の Tab。候補が出ているときの Tab は上で補完に使われるので、ここには来ない
         // （ツール実行中は候補を出さないので、実際には重ならない）。
         if self.dimension_active() && i.consume_key(NONE, egui::Key::Tab) {
-            match self.dim.state.tab(dimension::classify(&self.input)) {
+            match self
+                .dim
+                .state
+                .tab_in(self.dim.kind, dimension::classify(&self.input))
+            {
                 TabOutcome::Moved { consumed: true } => self.input.clear(),
                 TabOutcome::Moved { consumed: false } | TabOutcome::Ignored => {}
                 TabOutcome::Rejected(e) => self.error(e.message()),

@@ -8,6 +8,8 @@ use cad_core::command::{AddEntities, AddLayer, SetLayerProperties};
 use cad_core::geom::{Arc, Circle, Line};
 use cad_core::{AciColor, Entity, LayerId};
 
+use crate::cmdline::dimension::DimKind;
+
 /// クリックの拾い半径（モデル空間）。グリップの当たり（正方形の半分の辺）も同じ。
 const PICK: f64 = 0.5;
 
@@ -202,6 +204,51 @@ fn a_quadrant_is_not_tracked_but_measures_from_the_center() {
     assert_eq!(
         geom(&doc, id),
         Geometry::Circle(Circle::new(p(0.0, 0.0), 7.0))
+    );
+}
+
+/// 円の四分点では寸法入力の欄を「半径」の 1 欄にし、履歴も「半径」（段階 1 の操作レビュー 3）。
+/// ほかのグリップは「長さ」「角度」。
+#[test]
+fn a_quadrant_uses_the_radius_field() {
+    let mut doc = Document::new();
+    let id = add(&mut doc, Geometry::Circle(Circle::new(p(0.0, 0.0), 5.0)));
+    let mut s = Session::new();
+    s.selection.insert(id);
+    assert_eq!(s.dimension_kind(), DimKind::LengthAngle, "掴む前");
+    click(&mut s, &mut doc, p(0.0, 5.0));
+    assert_eq!(s.dimension_kind(), DimKind::Radius);
+    s.set_cursor(Some(p(0.0, 1.0)));
+    s.handle_submission(
+        Submission::Dimension(dimension::DimValues {
+            length: Some(8.0),
+            angle_deg: None,
+        }),
+        &mut doc,
+    );
+    assert_eq!(
+        geom(&doc, id),
+        Geometry::Circle(Circle::new(p(0.0, 0.0), 8.0))
+    );
+    assert!(
+        inputs(&s).iter().any(|l| l == "> 半径 8.0000"),
+        "{:?}",
+        inputs(&s)
+    );
+    // 中心は「長さ」「角度」。
+    click(&mut s, &mut doc, p(0.0, 0.0));
+    assert!(s.is_gripping());
+    assert_eq!(s.dimension_kind(), DimKind::LengthAngle);
+}
+
+/// プロンプトは「空の Enter・Esc で取り消し」（数を打った後の Enter は確定。段階 1 の操作レビュー 2）。
+#[test]
+fn the_prompt_says_an_empty_enter_cancels() {
+    let (mut s, mut doc, _) = selected_line();
+    click(&mut s, &mut doc, p(10.0, 0.0));
+    assert_eq!(
+        s.prompt(),
+        "** 端点を動かす ** 点を指定 (空の Enter・Esc で取り消し):"
     );
 }
 
@@ -461,9 +508,10 @@ fn locking_the_layer_aborts_the_grip() {
     assert_eq!(geom(&doc, id), line_geom(p(0.0, 0.0), p(10.0, 0.0)));
 }
 
-/// 掴んだ後に図面が変わったら（掴んだ図形は編集できるままでも）確定を断り、グリップを取り消す。
+/// 掴んだ後に関係の無い変更（別のレイヤの色）があっても、掴んだまま確定できる
+/// （段階 1 のレビュー N1 を受けて段階 2 で緩めた）。Undo 1 回で戻る。
 #[test]
-fn a_changed_drawing_refuses_to_confirm() {
+fn an_unrelated_change_does_not_stop_the_grip() {
     let (mut s, mut doc, id) = selected_line();
     doc.apply(Box::new(AddLayer::new("L1", AciColor::WHITE)))
         .expect("足せる");
@@ -473,14 +521,36 @@ fn a_changed_drawing_refuses_to_confirm() {
         Box::new(SetLayerProperties::new(l1).color(AciColor::RED)),
         &mut doc,
     );
+    assert!(s.is_gripping(), "掴んだまま");
+    click(&mut s, &mut doc, p(20.0, 0.0));
+    assert!(!s.is_gripping(), "確定した");
+    assert_eq!(geom(&doc, id), line_geom(p(0.0, 0.0), p(20.0, 0.0)));
+    assert!(errors(&s).is_empty(), "{:?}", errors(&s));
+    assert_eq!(doc.undo().expect("戻せる"), Some("GRIP"));
+    assert_eq!(geom(&doc, id), line_geom(p(0.0, 0.0), p(10.0, 0.0)));
+}
+
+/// 掴んだ後に掴んだ図形の形が変わっていたら（元の形の写しが古い）確定を断り、グリップを取り消す。
+#[test]
+fn a_changed_shape_refuses_to_confirm() {
+    let (mut s, mut doc, id) = selected_line();
+    click(&mut s, &mut doc, p(10.0, 0.0));
+    s.apply_external(
+        Box::new(cad_core::command::ReplaceGeometries::one(
+            "TEST",
+            id,
+            line_geom(p(0.0, 1.0), p(10.0, 1.0)),
+        )),
+        &mut doc,
+    );
     assert!(s.is_gripping(), "前提: 掴んだ図形は編集できるまま");
     let revision = doc.revision();
     click(&mut s, &mut doc, p(20.0, 0.0));
     assert!(!s.is_gripping(), "取り消した");
     assert_eq!(doc.revision(), revision, "図面は変えない");
-    assert_eq!(geom(&doc, id), line_geom(p(0.0, 0.0), p(10.0, 0.0)));
+    assert_eq!(geom(&doc, id), line_geom(p(0.0, 1.0), p(10.0, 1.0)));
     assert!(
-        errors(&s).iter().any(|e| e.contains("図面が変わったため")),
+        errors(&s).iter().any(|e| e.contains("図形が変わったため")),
         "{:?}",
         errors(&s)
     );
@@ -528,10 +598,10 @@ fn hover_and_click_agree_on_a_grip() {
     let (mut s, mut doc, _) = selected_line();
     let mut h = crate::hover::Hover::new();
     h.update(&s, &doc, Some(p(10.2, 0.1)), PICK, false);
-    let hovered = h.hovered_grip().expect("グリップに乗せている");
+    let hovered = h.hovered_grip().expect("グリップに乗せている").clone();
     assert!(h.highlighted().is_empty(), "紫の縁取りは出さない");
     click(&mut s, &mut doc, p(10.2, 0.1));
-    assert_eq!(s.hot_grips(), vec![hovered], "乗せたグリップを掴む");
+    assert_eq!(s.hot_grips(), hovered.grips(), "乗せたグリップを掴む");
 }
 
 /// 選び直したら、同じ位置でもホバーの結果を作り直す（グリップは選択から作る）。
@@ -545,17 +615,210 @@ fn reselecting_recomputes_the_hover_at_the_same_position() {
     let mut h = crate::hover::Hover::new();
     let at = p(10.0, 0.0);
     h.update(&s, &doc, Some(at), PICK, false);
-    assert_eq!(h.hovered_grip().map(|g| g.id), Some(a));
+    assert_eq!(h.hovered_grip().map(|g| g.representative().id), Some(a));
 
     s.selection.clear();
     s.selection.insert(b);
     h.update(&s, &doc, Some(at), PICK, false);
     assert_eq!(
-        h.hovered_grip().map(|g| g.id),
+        h.hovered_grip().map(|g| g.representative().id),
         Some(b),
         "同じ位置でも作り直す"
     );
 
     h.update(&s, &doc, Some(at), PICK, true);
     assert_eq!(h.hovered_grip(), None, "Shift 中はグリップを拾わない");
+}
+
+// ---- 重なったグリップの束（段階 2） ------------------------------------------
+
+/// 線分 4 本の矩形 (0,0)-(10,0)-(10,5)-(0,5) を足して全部選んだ状態。
+fn selected_four_lines() -> (Session, Document, Vec<EntityId>) {
+    let mut doc = Document::new();
+    let ids = vec![
+        add(&mut doc, line_geom(p(0.0, 0.0), p(10.0, 0.0))),
+        add(&mut doc, line_geom(p(10.0, 0.0), p(10.0, 5.0))),
+        add(&mut doc, line_geom(p(10.0, 5.0), p(0.0, 5.0))),
+        add(&mut doc, line_geom(p(0.0, 5.0), p(0.0, 0.0))),
+    ];
+    let mut s = Session::new();
+    for id in &ids {
+        s.selection.insert(*id);
+    }
+    (s, doc, ids)
+}
+
+/// 矩形の角をまとめて掴み、確定すると隣り合う 2 本が一緒に動く。Undo 1 回で 2 本とも戻る。
+#[test]
+fn a_shared_corner_moves_both_lines_with_one_undo() {
+    let (mut s, mut doc, ids) = selected_four_lines();
+    click(&mut s, &mut doc, p(10.1, 0.1));
+    assert!(s.is_gripping());
+    assert_eq!(s.hot_grips().len(), 2, "2 本の端点をまとめて掴んだ");
+    assert_eq!(
+        s.prompt(),
+        "** 端点を動かす（2 個） ** 点を指定 (空の Enter・Esc で取り消し):"
+    );
+    // 長さ・角度の基点は代表（EntityId の大きい 2 本目の始点 → 反対側の端点 (10,5)）。
+    assert_eq!(s.dimension_base(), Some(p(10.0, 5.0)));
+    let revision = doc.revision();
+    click(&mut s, &mut doc, p(12.0, -1.0));
+    assert!(!s.is_gripping());
+    assert_eq!(geom(&doc, ids[0]), line_geom(p(0.0, 0.0), p(12.0, -1.0)));
+    assert_eq!(geom(&doc, ids[1]), line_geom(p(12.0, -1.0), p(10.0, 5.0)));
+    assert_eq!(
+        geom(&doc, ids[2]),
+        line_geom(p(10.0, 5.0), p(0.0, 5.0)),
+        "ほかは変わらない"
+    );
+    assert_eq!(doc.revision(), revision + 1, "1 回の操作");
+
+    assert_eq!(doc.undo().expect("戻せる"), Some("GRIP"));
+    assert_eq!(geom(&doc, ids[0]), line_geom(p(0.0, 0.0), p(10.0, 0.0)));
+    assert_eq!(geom(&doc, ids[1]), line_geom(p(10.0, 0.0), p(10.0, 5.0)));
+}
+
+/// 1 つでも断られたら全体を断り（どれも変えない）、どの図形の何の理由かを出す。掴んだまま。
+#[test]
+fn a_refusal_by_one_refuses_the_whole_group() {
+    let mut doc = Document::new();
+    let arc = Arc::new(p(0.0, 0.0), 5.0, 0.0, std::f64::consts::PI);
+    let l = add(&mut doc, line_geom(p(-8.0, 3.0), p(-5.0, 0.0)));
+    let a = add(&mut doc, Geometry::Arc(arc));
+    let mut s = Session::new();
+    s.selection.insert(l);
+    s.selection.insert(a);
+    click(&mut s, &mut doc, arc.end_point());
+    assert_eq!(s.hot_grips().len(), 2, "前提: まとめて掴んだ");
+    let revision = doc.revision();
+    // 線分の始点へ → 線分の長さが 0（円弧は動かせる）。
+    click(&mut s, &mut doc, p(-8.0, 3.0));
+    assert!(s.is_gripping(), "掴んだまま");
+    assert_eq!(doc.revision(), revision, "どれも変えない");
+    assert!(
+        errors(&s)
+            .iter()
+            .any(|e| e.contains("2 個のうち線分") && e.contains("長さが 0")),
+        "{:?}",
+        errors(&s)
+    );
+    // 円弧の始点へ → 円弧の両端が重なる（線分は動かせる）。
+    click(&mut s, &mut doc, arc.start_point());
+    assert!(s.is_gripping());
+    assert_eq!(doc.revision(), revision);
+    assert!(
+        errors(&s)
+            .iter()
+            .any(|e| e.contains("2 個のうち円弧") && e.contains("端点が重なります")),
+        "{:?}",
+        errors(&s)
+    );
+}
+
+/// まとめて掴んだうちの 1 つのレイヤがロックされたら、全体を中断する（ADR-0039）。
+#[test]
+fn locking_one_of_the_grabbed_entities_aborts_the_group() {
+    let mut doc = Document::new();
+    doc.apply(Box::new(AddLayer::new("L1", AciColor::WHITE)))
+        .expect("足せる");
+    let l1 = doc.layers().by_name("L1").expect("ある");
+    let a = add(&mut doc, line_geom(p(0.0, 0.0), p(10.0, 0.0)));
+    doc.apply(Box::new(AddEntities::one(
+        "LINE",
+        Entity::new(line_geom(p(10.0, 0.0), p(10.0, 5.0)), l1),
+    )))
+    .expect("足せる");
+    let b = doc.entities().ids().last().expect("ある");
+    let mut s = Session::new();
+    s.selection.insert(a);
+    s.selection.insert(b);
+    click(&mut s, &mut doc, p(10.0, 0.0));
+    assert_eq!(s.hot_grips().len(), 2, "前提: まとめて掴んだ");
+
+    s.apply_external(Box::new(SetLayerProperties::new(l1).locked(true)), &mut doc);
+    assert!(!s.is_gripping(), "全体を中断した");
+    assert!(
+        errors(&s).iter().any(|e| e.contains("GRIP: 対象の図形")),
+        "{:?}",
+        errors(&s)
+    );
+    click(&mut s, &mut doc, p(20.0, 0.0));
+    assert_eq!(
+        geom(&doc, a),
+        line_geom(p(0.0, 0.0), p(10.0, 0.0)),
+        "ロックされていない方も動かない"
+    );
+    assert_eq!(geom(&doc, b), line_geom(p(10.0, 0.0), p(10.0, 5.0)));
+}
+
+/// 重なったグリップの上では、ホバーの束とクリックで掴む束が同じ（ADR-0042）。
+#[test]
+fn hover_and_click_agree_on_a_group() {
+    let (mut s, mut doc, ids) = selected_four_lines();
+    let mut h = crate::hover::Hover::new();
+    h.update(&s, &doc, Some(p(0.2, 4.9)), PICK, false);
+    let hovered = h.hovered_grip().expect("角に乗せている").clone();
+    assert_eq!(hovered.grips().len(), 2);
+    let mut entities: Vec<EntityId> = hovered.grips().iter().map(|g| g.id).collect();
+    entities.sort();
+    assert_eq!(entities, vec![ids[2], ids[3]], "左上の角の 2 本");
+    click(&mut s, &mut doc, p(0.2, 4.9));
+    assert_eq!(s.hot_grips(), hovered.grips(), "同じ束を掴む");
+}
+
+/// 選択に入っていない図形のグリップは束に入らない（つながっていても動かない）。
+#[test]
+fn unselected_entities_are_not_grabbed() {
+    let (mut s, mut doc, ids) = selected_four_lines();
+    s.selection.remove(ids[0]);
+    click(&mut s, &mut doc, p(10.0, 0.0));
+    assert_eq!(s.hot_grips().len(), 1);
+    click(&mut s, &mut doc, p(12.0, 0.0));
+    assert_eq!(
+        geom(&doc, ids[0]),
+        line_geom(p(0.0, 0.0), p(10.0, 0.0)),
+        "選んでいない線分"
+    );
+    assert_eq!(geom(&doc, ids[1]), line_geom(p(12.0, 0.0), p(10.0, 5.0)));
+}
+
+/// ポリラインの辺の中点を掴むと辺を平行移動する。矩形の右の辺を動かすと幅が変わる（頂点の数は同じ）。
+#[test]
+fn an_edge_grip_moves_the_side_of_a_rectangle() {
+    let mut doc = Document::new();
+    let id = add(
+        &mut doc,
+        Geometry::Polyline(cad_core::geom::Polyline::rectangle(
+            p(0.0, 0.0),
+            p(10.0, 5.0),
+        )),
+    );
+    let mut s = Session::new();
+    s.selection.insert(id);
+    click(&mut s, &mut doc, p(10.0, 2.5));
+    assert_eq!(s.hot_grips()[0].handle, Handle::Edge(1));
+    assert_eq!(
+        s.prompt(),
+        "** 辺を動かす ** 点を指定 (空の Enter・Esc で取り消し):"
+    );
+    assert_eq!(s.dimension_base(), Some(p(10.0, 2.5)), "基点は元の位置");
+    feed(&mut s, &mut doc, "@4,0");
+    assert_eq!(
+        geom(&doc, id),
+        Geometry::Polyline(cad_core::geom::Polyline::rectangle(
+            p(0.0, 0.0),
+            p(14.0, 5.0)
+        ))
+    );
+    // 最後の辺（頂点 3 → 頂点 0）。
+    click(&mut s, &mut doc, p(0.0, 2.5));
+    assert_eq!(s.hot_grips()[0].handle, Handle::Edge(3));
+    click(&mut s, &mut doc, p(-2.0, 2.5));
+    assert_eq!(
+        geom(&doc, id),
+        Geometry::Polyline(cad_core::geom::Polyline::rectangle(
+            p(-2.0, 0.0),
+            p(14.0, 5.0)
+        ))
+    );
 }

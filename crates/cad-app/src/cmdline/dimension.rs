@@ -38,6 +38,52 @@ impl Field {
     }
 }
 
+/// 寸法入力の欄の見せ方。どの欄を出し、何と呼ぶか（ツールが決める）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DimKind {
+    /// 「長さ」「角度」の 2 欄（ふつう）。
+    #[default]
+    LengthAngle,
+    /// 「半径」の 1 欄だけ（円の四分点のグリップ。Issue #30 段階 2）。角度は半径に意味が無いので
+    /// 出さず、`Tab` でも移らない（`Tab` は半径を固定するだけ）。
+    Radius,
+}
+
+impl DimKind {
+    /// 出す欄（並び順）。
+    #[must_use]
+    pub fn fields(self) -> &'static [Field] {
+        match self {
+            Self::LengthAngle => &[Field::Length, Field::Angle],
+            Self::Radius => &[Field::Length],
+        }
+    }
+
+    /// 欄の名前。
+    #[must_use]
+    pub fn name(self, field: Field) -> &'static str {
+        match (self, field) {
+            (Self::Radius, Field::Length) => "半径",
+            (_, Field::Length) => "長さ",
+            (_, Field::Angle) => "角度",
+        }
+    }
+
+    /// 履歴に残す寸法入力の表示（`長さ 100.0000 角度 90.00°` / `半径 7.0000`）。
+    /// カーソルから決めた欄は書かない。
+    #[must_use]
+    pub fn describe(self, v: DimValues) -> String {
+        let mut parts = Vec::new();
+        if let Some(l) = v.length {
+            parts.push(format!("{} {}", self.name(Field::Length), format_length(l)));
+        }
+        if let Some(a) = v.angle_deg {
+            parts.push(format!("{} {}", self.name(Field::Angle), format_angle(a)));
+        }
+        parts.join(" ")
+    }
+}
+
 /// 入力欄のバッファの分類。
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BufferKind {
@@ -403,6 +449,16 @@ impl DimState {
         TabOutcome::Moved { consumed }
     }
 
+    /// 欄の見せ方 `kind` での `Tab`。出していない欄へは移らない（[`DimKind::Radius`] では
+    /// 半径を固定するだけで、欄は半径のまま）。
+    pub fn tab_in(&mut self, kind: DimKind, buffer: BufferKind) -> TabOutcome {
+        let outcome = self.tab(buffer);
+        if !kind.fields().contains(&self.field) {
+            self.field = kind.fields()[0];
+        }
+        outcome
+    }
+
     fn incomplete_error(self) -> DimError {
         match self.field {
             Field::Length => DimError::BadLength,
@@ -435,19 +491,6 @@ impl DimState {
             BufferKind::Empty => (!self.locks.is_empty()).then_some(self.locks),
         }
     }
-}
-
-/// 履歴に残す寸法入力の表示（`長さ 100.0000 角度 90.00°`）。カーソルから決めた欄は書かない。
-#[must_use]
-pub fn describe(v: DimValues) -> String {
-    let mut parts = Vec::new();
-    if let Some(l) = v.length {
-        parts.push(format!("長さ {}", format_length(l)));
-    }
-    if let Some(a) = v.angle_deg {
-        parts.push(format!("角度 {}", format_angle(a)));
-    }
-    parts.join(" ")
 }
 
 #[cfg(test)]
@@ -691,10 +734,18 @@ mod tests {
         assert_eq!(format_length(100.0), "100.0000");
         assert_eq!(format_angle(90.0), "90.00°");
         assert_eq!(
-            describe(locks(Some(100.0), Some(90.0))),
+            DimKind::LengthAngle.describe(locks(Some(100.0), Some(90.0))),
             "長さ 100.0000 角度 90.00°"
         );
-        assert_eq!(describe(locks(Some(5.0), None)), "長さ 5.0000");
+        assert_eq!(
+            DimKind::LengthAngle.describe(locks(Some(5.0), None)),
+            "長さ 5.0000"
+        );
+        assert_eq!(
+            DimKind::Radius.describe(locks(Some(7.0), None)),
+            "半径 7.0000",
+            "円の四分点のグリップでは「半径」"
+        );
     }
 
     // ---- バッファの分類 ---------------------------------------------------------
@@ -755,6 +806,27 @@ mod tests {
         s.tab(BufferKind::Empty);
         s.tab(BufferKind::Empty);
         assert_eq!(s.locks, locks(Some(5.0), Some(-30.0)));
+    }
+
+    /// 「半径」だけの欄（円の四分点のグリップ）では、Tab は半径を固定するだけで角度の欄へ移らない。
+    #[test]
+    fn radius_only_tab_locks_the_radius_and_stays() {
+        assert_eq!(DimKind::Radius.fields(), &[Field::Length]);
+        assert_eq!(DimKind::Radius.name(Field::Length), "半径");
+        assert_eq!(DimKind::LengthAngle.name(Field::Length), "長さ");
+        let mut s = DimState::default();
+        assert_eq!(
+            s.tab_in(DimKind::Radius, BufferKind::Number(7.0)),
+            TabOutcome::Moved { consumed: true }
+        );
+        assert_eq!(s.locks, locks(Some(7.0), None));
+        assert_eq!(s.field, Field::Length, "角度の欄へは移らない");
+        s.tab_in(DimKind::Radius, BufferKind::Empty);
+        assert_eq!(s.field, Field::Length);
+        // ふつうの欄では移る（`tab` と同じ）。
+        let mut s = DimState::default();
+        s.tab_in(DimKind::LengthAngle, BufferKind::Empty);
+        assert_eq!(s.field, Field::Angle);
     }
 
     #[test]
