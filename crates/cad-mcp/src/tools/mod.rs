@@ -6,7 +6,8 @@
 //! - 引数の形の誤り・図面の状態による失敗は **`isError: true` と日本語の説明**で返す
 //!   （LLM が読んで直せるように。JSON-RPC のエラーは「知らない道具」「引数がオブジェクトでない」だけ）
 //! - **知らない引数は動かす前に拒む**（`discard_change` のような綴り違いを黙って無視しない）
-//! - 成功の結果は `structuredContent`（オブジェクト）と、同じ JSON の text の両方で返す
+//! - 成功の結果は `structuredContent`（オブジェクト）と、同じ JSON の text の両方で返す。
+//!   大きさに上限（[`MAX_RESULT_BYTES`]）を置く（[`bound_result`]）
 //! - 道具の処理は `catch_unwind` で包む。panic してもサーバーは止まらず、`isError` を返す。
 //!   図面を変える道具（`read_only: false`）が panic したら図面に「壊れた」印を付け、以後の保存を拒む
 //!   （`Server::poisoned`。新規・開くで外す）
@@ -21,6 +22,7 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use serde_json::{json, Map, Value};
 
+use crate::limits::MAX_RESULT_BYTES;
 use crate::protocol::{error_code, RpcError};
 use crate::server::Server;
 use args::Args;
@@ -154,9 +156,9 @@ fn run_tool(server: &mut Server, tool: &Tool, arguments: Map<String, Value>) -> 
             }),
     };
 
-    match outcome {
-        Ok(structured) => json!({
-            "content": [{ "type": "text", "text": structured.to_string() }],
+    match outcome.and_then(|structured| bound_result(tool, structured)) {
+        Ok((structured, text)) => json!({
+            "content": [{ "type": "text", "text": text }],
             "structuredContent": structured,
             "isError": false,
         }),
@@ -165,6 +167,32 @@ fn run_tool(server: &mut Server, tool: &Tool, arguments: Map<String, Value>) -> 
             "isError": true,
         }),
     }
+}
+
+/// 結果の大きさを上限（[`MAX_RESULT_BYTES`]）に収める。結果と、その JSON の文字列を返す。
+///
+/// 読むだけの道具なら `isError` にして絞り込みを促す（何も変わっていないので呼び直せばよい）。
+/// **図面を変える道具は失敗にしない**（変更はもう済んでいるので、失敗と返すと LLM が同じ変更を
+/// やり直しかねない）。結果を省いた印だけを返す。
+fn bound_result(tool: &Tool, structured: Value) -> Result<(Value, String), String> {
+    let text = structured.to_string();
+    if text.len() <= MAX_RESULT_BYTES {
+        return Ok((structured, text));
+    }
+    if tool.read_only {
+        return Err(format!(
+            "結果が大きすぎます（{} バイト、上限 {MAX_RESULT_BYTES} バイト）。\
+             limit を小さくする・ID の数を減らす・layer / type / bbox で絞り込むなどして呼び直してください。",
+            text.len()
+        ));
+    }
+    let short = json!({
+        "result_omitted": true,
+        "result_bytes": text.len(),
+        "note": "図面への変更は済んでいます。結果が大きすぎるので省きました。drawing_info・list_entities で確かめてください",
+    });
+    let text = short.to_string();
+    Ok((short, text))
 }
 
 #[cfg(test)]
@@ -336,6 +364,54 @@ mod tests {
         s.poisoned = Some("x");
         ok(&mut s, "new_drawing", json!({}));
         assert!(s.poisoned.is_none());
+    }
+
+    /// 結果の大きさの上限。読むだけの道具は isError、図面を変える道具は結果を省いて成功のまま
+    /// （PR #84 レビューの非ブロッキング 7）。
+    #[test]
+    fn results_are_bounded() {
+        let dir = TempDir::new("tools-bounded");
+        let mut s = server(&dir);
+        let mut tool = Tool {
+            name: "huge",
+            title: "",
+            description: "",
+            schema: || (json!({}), &[]),
+            read_only: true,
+            destructive: false,
+            idempotent: true,
+            run: |_, _| Ok(json!({ "blob": "x".repeat(MAX_RESULT_BYTES) })),
+        };
+        let r = run_tool(&mut s, &tool, Map::new());
+        assert_eq!(r["isError"], true, "{}", &r.to_string()[..200]);
+        assert!(r["content"][0]["text"].as_str().unwrap().contains("絞り込"));
+
+        tool.read_only = false;
+        let r = run_tool(&mut s, &tool, Map::new());
+        assert_eq!(r["isError"], false);
+        assert_eq!(r["structuredContent"]["result_omitted"], true);
+        assert!(r.to_string().len() < MAX_RESULT_BYTES);
+
+        // 本物の道具でも: 頂点の多いポリラインを get_entities で取ると大きすぎる。
+        use cad_core::command::AddEntities;
+        use cad_core::geom::{Point2, Polyline};
+        use cad_core::{Entity, Geometry, LayerId};
+        let vertices: Vec<Point2> = (0..crate::limits::MAX_POLYLINE_VERTICES)
+            .map(|i| Point2::new(f64::from(u32::try_from(i).unwrap()) * 1.234_567, 9.876_543))
+            .collect();
+        s.doc
+            .apply(Box::new(AddEntities::one(
+                "PLINE",
+                Entity::new(
+                    Geometry::Polyline(Polyline::new(vertices, false)),
+                    LayerId::ZERO,
+                ),
+            )))
+            .unwrap();
+        let id = super::test_support::eid(&s, 0);
+        let msg = err(&mut s, "get_entities", json!({ "ids": [id] }));
+        assert!(msg.contains("大きすぎ"), "{msg}");
+        ok(&mut s, "list_entities", json!({}));
     }
 
     pub(super) fn cad_core_add_line(s: &mut Server) {
