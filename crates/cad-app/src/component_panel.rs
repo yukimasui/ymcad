@@ -355,6 +355,8 @@ impl ComponentPanel {
                     .desired_width(100.0),
             );
             egui::ComboBox::from_id_salt("param_draft_type")
+                // 狭いパネルで ▼ が切れないよう、短い選択肢に見合う幅にする。
+                .width(70.0)
                 .selected_text(match self.draft.ty {
                     DraftType::Number => "数値",
                     DraftType::Bool => "真偽",

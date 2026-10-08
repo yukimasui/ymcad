@@ -36,6 +36,15 @@ const PALETTE: [AciColor; 9] = [
 pub const MOVE_BUSY_NOTE: &str =
     "コマンド実行中は移動できません（終えるか Esc で中断。中断すると選択も外れます）";
 
+/// 行の右端に必ず残す幅 [px]（線種のドロップダウン 90px と削除ボタン）。名前はこれを除いた
+/// 残りの幅までしか使わず、長ければ省略する。色・線種・削除は名前より先に幅を確保する。
+const ROW_RIGHT_WIDTH: f32 = 90.0 + 30.0;
+/// 名前に最低限残す幅 [px]。
+const NAME_MIN_WIDTH: f32 = 40.0;
+
+/// 「移動」の行で、これより残りが狭いときは次の行へ送る [px]。
+const MOVE_BUTTON_MIN_WIDTH: f32 = 70.0;
+
 /// 色見本の一辺 [px]。
 const SWATCH_PX: f32 = 14.0;
 
@@ -214,10 +223,16 @@ impl LayerPanel {
                 };
             }
 
-            // 名前（ダブルクリックで編集）。
+            // 名前（ダブルクリックで編集）。長い名前は、右端の線種・削除ボタンの分を除いた
+            // 残りの幅で省略する（ホバーで全体）。
+            let name_width =
+                (ui.available_width() - ROW_RIGHT_WIDTH - ui.spacing().item_spacing.x * 2.0)
+                    .max(NAME_MIN_WIDTH);
             if self.rename_target == Some(id) {
-                let response = ui
-                    .add(egui::TextEdit::singleline(&mut self.rename_buffer).desired_width(120.0));
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.rename_buffer)
+                        .desired_width(name_width.min(120.0)),
+                );
                 let commit = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if commit {
                     let new_name = self.rename_buffer.trim().to_owned();
@@ -227,13 +242,21 @@ impl LayerPanel {
                     self.rename_target = None;
                 }
             } else {
-                let label = ui.selectable_label(is_current, &layer.name);
+                let label = ui
+                    .scope(|ui| {
+                        ui.set_max_width(name_width);
+                        ui.add(egui::Button::selectable(is_current, &layer.name).truncate())
+                    })
+                    .inner;
                 if label.double_clicked() && !is_zero {
                     self.rename_target = Some(id);
                     self.rename_buffer = layer.name.clone();
                 }
                 if is_zero {
                     label.on_hover_text("レイヤ 0 は名前を変更できません");
+                } else if label.rect.width() >= name_width - 1.0 {
+                    // 省略されている。
+                    label.on_hover_text(&layer.name);
                 }
             }
 
@@ -311,13 +334,25 @@ impl LayerPanel {
                 return;
             }
             ui.label(format!("選択中の {} 個を移動:", selection.len()));
-            ui.add_enabled_ui(!busy, |ui| {
-                for (id, layer) in doc.layers().iter() {
-                    if ui.button(&layer.name).clicked() {
-                        commands.push(Box::new(MoveEntitiesToLayer::new(selection.to_vec(), id)));
-                    }
+            if busy {
+                ui.disable();
+            }
+            for (id, layer) in doc.layers().iter() {
+                // 長い名前は、この行の残りの幅までで省略してホバーで全体を出す（行を押し広げない）。
+                // 省略するボタンは勝手に折り返さないので、残りが少なければ先に改行する。
+                if ui.available_width() < MOVE_BUTTON_MIN_WIDTH {
+                    ui.end_row();
                 }
-            });
+                let max_width = ui.available_width();
+                let button = ui.add(egui::Button::new(&layer.name).truncate());
+                let truncated = button.rect.width() >= max_width - 1.0;
+                if button.clicked() {
+                    commands.push(Box::new(MoveEntitiesToLayer::new(selection.to_vec(), id)));
+                }
+                if truncated {
+                    button.on_hover_text(&layer.name);
+                }
+            }
         });
     }
 }

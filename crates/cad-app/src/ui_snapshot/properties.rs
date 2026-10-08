@@ -282,3 +282,22 @@ fn ui_snapshot_properties_crowded_three_panels() {
         shot(&mut h, &format!("properties_n_crowded_{width}"));
     }
 }
+
+/// レイヤパネル 1 枚だけ（既定幅）で、長い名前のレイヤがあるとき。色・線種・削除が名前より先に
+/// 幅を確保され、名前が省略される。「移動」の行も長い名前を省略する。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_properties_layer_panel_long_names() {
+    let (mut h, _) = opened(|d| vec![d.line]);
+    h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Num1);
+    h.run_steps(STEPS);
+    let (doc, _) = h.state_mut().parts_mut();
+    for name in ["外壁_RC造_耐火被覆あり_2F", "A-WALL-EXTR-FIRE-RATED-2HR"] {
+        doc.apply(Box::new(AddLayer::new(name, AciColor(3))))
+            .expect("レイヤ");
+    }
+    type_text(&mut h, "LA");
+    press(&mut h, egui::Key::Enter);
+    hover(&mut h, CANVAS_CENTER);
+    shot(&mut h, "properties_o_layer_long_names");
+}

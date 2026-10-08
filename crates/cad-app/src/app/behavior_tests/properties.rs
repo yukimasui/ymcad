@@ -703,6 +703,63 @@ fn crowded_three_panels_keep_their_minimum_widths_on_narrow_screens() {
     }
 }
 
+/// レイヤパネル 1 枚だけでも、長いレイヤ名で行の右端（線種・削除）や「移動」の行のボタンが
+/// パネルの外へ押し出されない。名前が省略される。既定の幅（1280px）と最小幅（330px）で見る。
+/// 修正前は名前の分だけ行が広がり、削除ボタンが見えなかった（横スクロールの外）。
+#[test]
+fn long_layer_names_do_not_push_the_row_out_of_the_layer_panel() {
+    use egui::accesskit::Role;
+    // 730px だと、作図領域の最小幅（400px）を除いた残りがレイヤパネルの最小幅 330px になる。
+    for width in [1280.0, 730.0] {
+        let mut h = app_with_width(width);
+        // 3 つめは、「移動」の行 1 行より長い名前。
+        let names = [
+            "外壁_RC造_耐火被覆あり_2F",
+            "A-WALL-EXTR-FIRE-RATED-2HR",
+            "非常に長いレイヤ名をつけたときの動作を確かめるためのレイヤ_その一_その二_その三",
+        ];
+        for name in names {
+            external(&mut h, Box::new(AddLayer::new(name, AciColor::WHITE)));
+        }
+        let id = add_line(&mut h, LayerId::ZERO, 10.0);
+        open_layer_panel(&mut h);
+        select(&mut h, &[id]);
+        let canvas = h.state().viewport.rect();
+        let (left, right) = (canvas.right(), width);
+
+        let deletes: Vec<_> = h
+            .query_all_by_role_and_label(Role::Button, "🗑")
+            .map(|n| n.rect())
+            .collect();
+        assert_eq!(deletes.len(), 4, "{width}px: レイヤ 4 行の削除ボタン");
+        for r in deletes {
+            assert!(
+                r.left() >= left && r.right() <= right,
+                "{width}px: 削除ボタンがパネルの外にある: {r:?} / パネル {left}..{right}"
+            );
+        }
+        for combo in h.query_all_by_role(Role::ComboBox) {
+            let r = combo.rect();
+            assert!(
+                r.left() >= left && r.right() <= right,
+                "{width}px: 線種のドロップダウンがパネルの外にある: {r:?}"
+            );
+        }
+        // 「移動」の行（最後に見つかるラベル）のボタンも、パネルの中に収まる。
+        for name in names {
+            let r = h
+                .query_all_by_label(name)
+                .last()
+                .expect("「移動」の行のボタン")
+                .rect();
+            assert!(
+                r.left() >= left && r.right() <= right,
+                "{width}px: 「移動」の行の {name} がパネルの外にある: {r:?}"
+            );
+        }
+    }
+}
+
 /// 移して選択から外れた案内は、Undo で戻したら消える（図形は元のレイヤへ戻っている）。
 /// 修正前は選択の版番号だけを見ていたので、選択が空のまま進む Undo では残った。
 #[test]
