@@ -10,10 +10,12 @@ use cad_core::{Document, Entity, EntityId, Geometry};
 
 use crate::cmdline::{coord, dimension, CommandLine, LineKind, Submission};
 use crate::editing::EditSession;
+use crate::grips::{self, Grip};
 use crate::input::ViewAction;
 use crate::properties::{self, MOVE_TO_LAYER_COMMAND};
 use crate::selection::{self, Picker, Selection, WindowMode};
 use crate::tools::entity_preview::Boundaries;
+use crate::tools::grip::GripTool;
 use crate::tools::{
     self, EntityPreview, Immediate, PreviewCtx, StepInput, StepOutcome, Tool, ToolCtx, ToolSettings,
 };
@@ -64,6 +66,11 @@ pub enum ClickTarget {
     Select(Vec<EntityId>),
     /// 待機中・選択待ちで何も拾えなかった。
     Nothing,
+    /// 待機中に、選択した図形のグリップに当たった（Issue #30）。クリックすると掴む。
+    ///
+    /// 図形のピックより優先する。強調（紫の縁取り）は出さない。クリックの結果は「選ぶ」ではなく
+    /// 「掴む」なので（ADR-0042「強調 = クリックの結果」）、乗せたグリップを大きく描いて示す。
+    Grip(Grip),
 }
 
 impl ClickTarget {
@@ -73,7 +80,7 @@ impl ClickTarget {
         match self {
             Self::Entity { id, .. } => std::slice::from_ref(id),
             Self::Select(ids) => ids,
-            Self::Point(_) | Self::Nothing => &[],
+            Self::Point(_) | Self::Nothing | Self::Grip(_) => &[],
         }
     }
 }
@@ -92,6 +99,12 @@ struct DropNote {
 const IDLE_PROMPT: &str = "コマンド:";
 /// 選択待ちのプロンプト。
 const SELECT_PROMPT: &str = "オブジェクトを選択 (Enter で確定):";
+
+/// グリップを出す選択数の上限（Issue #30 ユーザー判断 4）。超えたら出さず、ステータスバーで知らせる。
+///
+/// グリップの一覧は毎フレーム選択から作るので、全選択（1 万図形）でもフレーム時間が延びないように
+/// 上限で打ち切る。AutoCAD の `GRIPOBJLIMIT` の既定と同じ 100。
+pub const MAX_GRIP_SELECTION: usize = 100;
 
 /// コマンドラインとツールの実行状態。
 pub struct Session {
@@ -322,6 +335,9 @@ impl Session {
     /// 振り直される）。ADR-0039。
     pub fn document_replaced(&mut self) {
         self.cancel();
+        // グリップを掴んでいた場合、`cancel` は選択を残すので明示的に捨てる。
+        self.selection.clear();
+        self.crossing_rects.clear();
         self.editing = None;
         // 前の図面のレイヤ名を出した案内は残さない（版番号は新しい図面と重なりうる）。
         self.drop_note = None;
@@ -481,14 +497,21 @@ impl Session {
     }
 
     /// `Esc`。実行中コマンドを中断し、選択を解除する。
+    ///
+    /// **グリップを掴んでいる間は、グリップだけを取り消して選択は残す**（Issue #30 ユーザー判断 3）。
+    /// 選択の解除は次の `Esc`（何も実行していないときの `Esc`）。リボンやコマンド名で別のコマンドを
+    /// 始めたときも同じ経路で取り消すので、選択を残したまま MOVE などへ移れる。
     pub fn cancel(&mut self) {
+        let gripping = self.is_gripping();
         if self.tool.is_some() || self.awaiting_selection {
             self.cmdline.info("*取り消し*");
         }
         self.tool = None;
         self.awaiting_selection = false;
-        self.selection.clear();
-        self.crossing_rects.clear();
+        if !gripping {
+            self.selection.clear();
+            self.crossing_rects.clear();
+        }
         self.cmdline.clear_input();
         self.cmdline.reset_dimension();
     }
@@ -497,6 +520,11 @@ impl Session {
     fn handle_empty_enter(&mut self, doc: &mut Document) {
         if self.awaiting_selection {
             self.finish_selection(doc);
+            return;
+        }
+        // グリップを掴んでいる間の空の Enter は取り消し（選択は残る）。GRIP は再実行の対象にならない。
+        if self.is_gripping() {
+            self.cancel();
             return;
         }
         if self.tool.is_some() {
@@ -525,6 +553,11 @@ impl Session {
             }
             self.cmdline
                 .error("選択中です。オブジェクトをクリックするか Enter で確定してください");
+            return;
+        }
+
+        if self.is_gripping() {
+            self.handle_grip_text(text, doc);
             return;
         }
 
@@ -562,6 +595,44 @@ impl Session {
         }
 
         self.start(text, doc);
+    }
+
+    /// グリップを掴んでいる間に打たれた文字列（Issue #30）。
+    ///
+    /// - 数値 1 つ … 直接距離入力（基点から、カーソルの向きにその長さ。基点は形の基準）
+    /// - 座標（`100,50` / `@10,0` / `@100<45`）… その点へ動かす。`@` は掴んだ点の元の位置から
+    /// - `U` / `UNDO` … グリップを取り消す（図面の Undo はしない。選択は残る）
+    /// - コマンド名 … グリップを取り消して（選択は残して）そのコマンドを始める。リボンと同じ
+    /// - それ以外 … 「点を指定するか Esc」
+    fn handle_grip_text(&mut self, text: &str, doc: &mut Document) {
+        if let (Some(base), dimension::BufferKind::Number(length)) =
+            (self.dimension_base(), dimension::classify(text))
+        {
+            match dimension::direct_distance(base, self.cursor, length) {
+                Ok(p) => self.feed_tool(StepInput::Point(p), doc),
+                Err(e) => self.cmdline.error(e.message()),
+            }
+            return;
+        }
+        if let Some(c) = coord::parse(text) {
+            if let Some(p) = c.resolve(self.last_point()) {
+                self.feed_tool(StepInput::Point(p), doc);
+                return;
+            }
+        }
+        let word = coord::normalize_ascii(text).trim().to_uppercase();
+        if word == "U" || word == "UNDO" {
+            self.cancel();
+        } else if let Some(cmd) = tools::immediate(&word).filter(|c| c.keeps_running_command()) {
+            // パネルの開閉と保存は、リボンと同じく掴んだまま（ADR-0037 決定 3）。
+            self.run_immediate(cmd, doc);
+        } else if tools::lookup(&word).is_some() {
+            self.cancel();
+            self.start(&word, doc);
+        } else {
+            self.cmdline
+                .error("点を指定するか Esc で取り消してください");
+        }
     }
 
     /// ツールへの入力を解釈する。座標 → 数値 → キーワードの順に試す。
@@ -800,6 +871,7 @@ impl Session {
                 self.cmdline
                     .info("コンポーネントを編集中です（ENDCOMP で確定）");
             }
+            StepOutcome::Abort(msg) => self.cmdline.error(format!("{name}: {msg}")),
             StepOutcome::Finish => {}
         }
     }
@@ -830,13 +902,23 @@ impl Session {
     ///
     /// [`Self::handle_click`] とホバーの強調（`hover::Hover`）の両方がここを通る。
     /// `pick_tolerance` はモデル空間での拾い半径。
+    ///
+    /// 待機中は、選択した図形のグリップ（[`Self::grips`]）を図形より先に見る（Issue #30）。
+    /// `shift` が押されていればグリップは見ない（Shift + クリックは選択から外す操作なので）。
+    /// グリップの当たりは、グリップを中心とする一辺 `2 × pick_tolerance` の正方形（画面上で一定）。
     pub fn click_target(
         &self,
         model: Point2,
         pick_tolerance: f64,
+        shift: bool,
         doc: &Document,
         picker: &mut dyn Picker,
     ) -> ClickTarget {
+        if !shift && self.grips_enabled() {
+            if let Some(g) = grips::hit(&self.grips(doc), model, pick_tolerance) {
+                return ClickTarget::Grip(g);
+            }
+        }
         match self.pick_stage() {
             // 拾えなかったクリックは点のまま渡し、ツール側で案内させる（ADR-0024）。
             PickStage::Entity => match picker.pick(doc, model, pick_tolerance) {
@@ -886,7 +968,8 @@ impl Session {
         doc: &mut Document,
         picker: &mut dyn Picker,
     ) {
-        match self.click_target(model, pick_tolerance, doc, picker) {
+        match self.click_target(model, pick_tolerance, shift, doc, picker) {
+            ClickTarget::Grip(g) => self.start_grip(&g, doc),
             ClickTarget::Point(p) => self.feed_tool(StepInput::Point(p), doc),
             ClickTarget::Entity { id, at } => self.feed_tool(StepInput::Entity { id, at }, doc),
             ClickTarget::Nothing => {
@@ -904,6 +987,95 @@ impl Session {
                 }
             }
         }
+    }
+
+    // ---- グリップ編集（Issue #30、ADR-0045） --------------------------------
+
+    /// グリップを掴んでいるか。
+    #[must_use]
+    pub fn is_gripping(&self) -> bool {
+        self.tool.as_ref().is_some_and(|t| t.grip().is_some())
+    }
+
+    /// 選択からグリップを出す条件のうち、ツールの状態以外（選択待ちでない・選択が空でない・上限以下）。
+    fn grips_allowed_for_selection(&self) -> bool {
+        !self.awaiting_selection
+            && !self.selection.is_empty()
+            && self.selection.len() <= MAX_GRIP_SELECTION
+    }
+
+    /// グリップを掴めるか。何も実行していない（選択待ちでもない）・選択が空でない・
+    /// 選択数が [`MAX_GRIP_SELECTION`] 以下のときだけ真。
+    ///
+    /// コマンドの実行中はグリップを出さない（Issue #30 の受け入れ基準）。
+    #[must_use]
+    pub fn grips_enabled(&self) -> bool {
+        self.tool.is_none() && self.grips_allowed_for_selection()
+    }
+
+    /// 選択数が上限を超えたためグリップを出していないか（ステータスバーで知らせる。ユーザー判断 4）。
+    #[must_use]
+    pub fn grips_suppressed(&self) -> bool {
+        self.tool.is_none() && !self.awaiting_selection && self.selection.len() > MAX_GRIP_SELECTION
+    }
+
+    /// いま描くグリップ。掴める間（[`Self::grips_enabled`]）と、掴んでいる間（掴んだグリップは
+    /// [`Self::hot_grips`] で赤く描く）。それ以外は空。
+    ///
+    /// 編集できない図形（削除・ロック・非表示）と、インプレース編集中に束縛（式）の付いた図形には
+    /// 出さない。束縛の付いた座標を動かしても、`ENDCOMP` で書き戻すと式の値で上書きされ、
+    /// 動かした形が黙って消えるため（プロパティパネルと同じ。`EditSession::is_bound`）。
+    #[must_use]
+    pub fn grips(&self, doc: &Document) -> Vec<Grip> {
+        let tool_allows = self.tool.as_ref().is_none_or(|t| t.grip().is_some());
+        if !tool_allows || !self.grips_allowed_for_selection() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for id in self.selection.iter() {
+            if !selection::is_editable(doc, id) {
+                continue;
+            }
+            if self.editing.as_ref().is_some_and(|e| e.is_bound(doc, id)) {
+                continue;
+            }
+            let Some(entity) = doc.entities().get(id) else {
+                continue;
+            };
+            out.extend(
+                grips::grips_of(&entity.geom)
+                    .into_iter()
+                    .map(|(handle, at)| Grip { id, handle, at }),
+            );
+        }
+        out
+    }
+
+    /// 掴んでいるグリップ（赤く描く）。掴んでいなければ空。
+    #[must_use]
+    pub fn hot_grips(&self) -> Vec<Grip> {
+        self.tool
+            .as_ref()
+            .and_then(|t| t.grip())
+            .map(GripTool::grips)
+            .unwrap_or_default()
+    }
+
+    /// グリップを掴む（クリック、またはグリップの上で押してドラッグした時点）。
+    ///
+    /// コマンド名で始めるコマンドとは別の入口で、**再実行の対象として覚えない**
+    /// （`remember_command` しない。空の Enter で GRIP が再実行されると、掴んでいない状態で
+    /// 何を動かすのか決まらない）。掴めるのは [`Self::grips_enabled`] の間だけ。
+    pub fn start_grip(&mut self, grip: &Grip, doc: &Document) {
+        if !self.grips_enabled() {
+            return;
+        }
+        let Some(tool) = GripTool::new(doc, grip) else {
+            return;
+        };
+        // 寸法入力の固定は前の基点のもの。掴んだ点から始め直す。
+        self.cmdline.reset_dimension();
+        self.tool = Some(Box::new(tool));
     }
 
     /// いま全選択（Ctrl+A / SELECTALL）が効くか。待機中と選択待ち（「オブジェクトを選択」）だけ真。
@@ -992,6 +1164,9 @@ impl Session {
         self.feed_tool(StepInput::SelectionReady, doc);
     }
 }
+
+#[cfg(test)]
+mod grip_tests;
 
 #[cfg(test)]
 mod select_all_tests;
