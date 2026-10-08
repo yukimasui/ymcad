@@ -226,11 +226,14 @@ fn initialize(server: &mut Server, params: &Map<String, Value>) -> Result<Value,
 }
 
 /// クライアントへ渡す使い方の要約（LLM が読む）。
-const INSTRUCTIONS: &str = "ymcad（2D CAD）の図面ファイル（.ymc / .dxf）を開いて調べ、保存するサーバーです。\
-角度は度、座標は f64 の数値（点は {\"x\":..,\"y\":..}）。\
+const INSTRUCTIONS: &str = "ymcad（2D CAD）の図面ファイル（.ymc / .dxf）を開いて調べ、描いて変え、保存するサーバーです。\
+角度は度、座標は f64 の数値（点は {\"x\":..,\"y\":..} か [x, y]）。数値には式の文字列（\"100*2+5\"、\"sqrt(2)*50\"）も書けます。\
 図形 ID は d<起動の印>-<図面>e<番号>g<世代> の文字列で、図面を開き直す・サーバーをつなぎ直すと変わります（古い ID は拒まれます）。\
+図面を変える道具（add_entities・modify_entities・delete_entities・move/rotate/scale/mirror_entities・set_entity_layer・add/update/delete_layer）は\
+1 回の呼び出しが undo 1 回ぶんで、1 つでも不正な値があれば何も変えません。非表示・ロック中のレイヤの図形は変えられません。\
+変えた図面はファイルに書かれていないので、残すなら save_drawing で保存してください。\
 読み書きできるのは起動時に指定した root の配下の .ymc / .dxf だけです。\
-.ymc が保存形式（無損失）、.dxf は交換用（R12・非可逆。保存すると警告が出ます）。\
+.ymc が保存形式（無損失）、.dxf は交換用（R12・非可逆。保存すると警告が出ます。開いた .dxf へは path を省いて保存できません）。\
 未保存の変更があるときの new_drawing / open_drawing は discard_changes: true、\
 開いたファイル以外の既存ファイルや他で書き換えられたファイルへの保存は overwrite: true が必要です。";
 

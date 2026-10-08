@@ -14,9 +14,13 @@
 //! - 道具の説明は日本語、フィールド名は英語
 
 mod args;
+mod draw;
 mod file;
 mod history;
+mod layers;
+mod mutate;
 mod query;
+mod transform;
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -56,6 +60,18 @@ const TOOLS: &[Tool] = &[
     query::GET_ENTITIES,
     query::LIST_LAYERS,
     query::LIST_COMPONENTS,
+    // 段階 1b: 作図・変更・変形・レイヤ（図面を変える。1 回の呼び出しが undo 1 回ぶん）
+    draw::ADD_ENTITIES,
+    draw::MODIFY_ENTITIES,
+    draw::DELETE_ENTITIES,
+    transform::MOVE_ENTITIES,
+    transform::ROTATE_ENTITIES,
+    transform::SCALE_ENTITIES,
+    transform::MIRROR_ENTITIES,
+    transform::SET_ENTITY_LAYER,
+    layers::ADD_LAYER,
+    layers::UPDATE_LAYER,
+    layers::DELETE_LAYER,
     history::UNDO,
     history::REDO,
 ];
@@ -238,6 +254,53 @@ pub(crate) mod test_support {
     /// いまの図面の、世代 0 の図形 ID（テストで ID を書くため）。
     pub fn eid(s: &Server, index: u32) -> String {
         format!("{}e{index}g0", s.tag().name())
+    }
+
+    /// 図面を変えるはずの呼び出し。段階 1b の約束を確かめて `structuredContent` を返す:
+    ///
+    /// - 成功し、履歴がちょうど 1 つ増える（`MacroCommand` で束ねていること）
+    /// - `undo` 1 回で、適用前と `.ymc` のバイト列まで一致する。`redo` で適用後に戻る
+    ///
+    /// **作った図形の ID は `redo` で振り直される**（`AddEntities` は適用のたびに新しいスロットに入れる）。
+    /// 返り値の新しい ID を後で使うテストは [`ok`] を使う。
+    pub fn mutate(s: &mut Server, name: &str, args: Value) -> Value {
+        use cad_core::native::write::write_to_bytes;
+        let before = write_to_bytes(&s.doc);
+        let history = s.doc.history().len();
+        let revision = s.doc.revision();
+        let r = ok(s, name, args.clone());
+        assert_eq!(
+            s.doc.history().len(),
+            history + 1,
+            "{name} {args}: 履歴がちょうど 1 つ増える"
+        );
+        assert!(s.doc.revision() > revision);
+        assert!(s.doc.is_dirty());
+        let after = write_to_bytes(&s.doc);
+        s.doc.undo().unwrap();
+        assert_eq!(
+            write_to_bytes(&s.doc),
+            before,
+            "{name} {args}: undo 1 回で適用前に戻る"
+        );
+        s.doc.redo().unwrap();
+        assert_eq!(write_to_bytes(&s.doc), after, "{name}: redo で適用後に戻る");
+        r
+    }
+
+    /// 図面を変える道具の失敗。履歴も版番号も図面のバイト列も変わらないことを確かめ、説明の文を返す。
+    pub fn rejected(s: &mut Server, name: &str, args: Value) -> String {
+        use cad_core::native::write::write_to_bytes;
+        let before = write_to_bytes(&s.doc);
+        let history = s.doc.history().len();
+        let revision = s.doc.revision();
+        let dirty = s.doc.is_dirty();
+        let msg = err(s, name, args.clone());
+        assert_eq!(s.doc.history().len(), history, "{name} {args}: 履歴は不変");
+        assert_eq!(s.doc.revision(), revision, "{name} {args}: 版番号は不変");
+        assert_eq!(s.doc.is_dirty(), dirty);
+        assert_eq!(write_to_bytes(&s.doc), before, "{name} {args}: 図面は不変");
+        msg
     }
 
     /// 失敗するはずの呼び出し。説明の文を返す。
