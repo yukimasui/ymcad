@@ -35,6 +35,10 @@ const PALETTE: [AciColor; 9] = [
 /// パネル全体ではなく移動だけが使えないと読めるようにする。
 pub const MOVE_BUSY_NOTE: &str =
     "コマンド実行中は移動できません（終えるか Esc で中断。中断すると選択も外れます）";
+/// グリップを掴んでいる間に「移動」の行へ出す案内。グリップの Esc は掴みだけを取り消し、
+/// 選択は残る（Issue #30 段階 1 の操作レビュー 1）。
+pub const MOVE_GRIP_NOTE: &str =
+    "グリップで編集中は移動できません（クリックで確定、Esc で取り消し。選択は残ります）";
 
 /// 欄の外のクリックなどで改名をやめたとき、名前を変えていれば出す案内。
 pub const RENAME_DROPPED_NOTE: &str = "レイヤ名の変更をやめました（確定は Enter）";
@@ -182,6 +186,7 @@ impl LayerPanel {
     ///
     /// `busy` … コマンド（選択待ちを含む）を実行中か。真の間は「移動」の行を押せなくする
     /// （プロパティパネルと同じ規則。実行中のツールが覚えている図形を横から動かさない）。
+    /// `gripping` … そのコマンドがグリップ編集か（案内の文言を変える）。
     /// `drop_note` … 図形をロック・非表示のレイヤへ移して選択から外れたときの案内。
     #[must_use]
     pub fn show(
@@ -190,6 +195,7 @@ impl LayerPanel {
         doc: &Document,
         selection: &Selection,
         busy: bool,
+        gripping: bool,
         drop_note: Option<&str>,
     ) -> Vec<Box<dyn Command>> {
         let mut commands: Vec<Box<dyn Command>> = Vec::new();
@@ -225,7 +231,12 @@ impl LayerPanel {
             });
 
         ui.separator();
-        self.show_move_row(ui, doc, selection, busy, drop_note, &mut commands);
+        let busy_note = busy.then_some(if gripping {
+            MOVE_GRIP_NOTE
+        } else {
+            MOVE_BUSY_NOTE
+        });
+        self.show_move_row(ui, doc, selection, busy_note, drop_note, &mut commands);
 
         commands
     }
@@ -455,16 +466,17 @@ impl LayerPanel {
         ui: &mut egui::Ui,
         doc: &Document,
         selection: &Selection,
-        busy: bool,
+        busy_note: Option<&str>,
         drop_note: Option<&str>,
         commands: &mut Vec<Box<dyn Command>>,
     ) {
+        let busy = busy_note.is_some();
         if let Some(note) = drop_note {
             ui.colored_label(DROP_NOTE_COLOR, note);
         }
         // 選択が空なら移すものが無い（「先に図形を選択してください」だけで足りる）。
-        if busy && !selection.is_empty() {
-            ui.colored_label(BUSY_COLOR, MOVE_BUSY_NOTE);
+        if let (Some(note), false) = (busy_note, selection.is_empty()) {
+            ui.colored_label(BUSY_COLOR, note);
         }
         ui.horizontal_wrapped(|ui| {
             if selection.is_empty() {

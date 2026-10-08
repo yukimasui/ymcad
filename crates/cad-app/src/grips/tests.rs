@@ -116,7 +116,10 @@ fn polyline_xline_and_instance() {
             (Handle::Vertex(0), p(0.0, 0.0)),
             (Handle::Vertex(1), p(5.0, 0.0)),
             (Handle::Vertex(2), p(5.0, 5.0)),
-        ]
+            (Handle::Edge(0), p(2.5, 0.0)),
+            (Handle::Edge(1), p(5.0, 2.5)),
+        ],
+        "頂点と、開いたポリラインの辺（頂点の数 − 1 本）の中点"
     );
     let x = Geometry::Xline(Xline::horizontal(p(2.0, 3.0)));
     assert_eq!(grips_of(&x), vec![(Handle::XlineOrigin, p(2.0, 3.0))]);
@@ -135,6 +138,26 @@ fn labels_say_what_happens() {
     assert_eq!(Handle::CircleCenter.label(), "図形ごと移動");
     assert_eq!(Handle::CircleQuadrant(2).label(), "半径を変える");
     assert_eq!(Handle::Vertex(3).label(), "頂点を動かす");
+    assert_eq!(Handle::Edge(0).label(), "辺を動かす");
+}
+
+/// 閉じたポリラインは最後の辺（最後の頂点 → 先頭の頂点）の中点も持つ。
+#[test]
+fn a_closed_polyline_has_a_midpoint_on_its_closing_edge() {
+    let rect = Geometry::Polyline(Polyline::rectangle(p(0.0, 0.0), p(4.0, 2.0)));
+    let edges: Vec<(Handle, Point2)> = grips_of(&rect)
+        .into_iter()
+        .filter(|(h, _)| matches!(h, Handle::Edge(_)))
+        .collect();
+    assert_eq!(
+        edges,
+        vec![
+            (Handle::Edge(0), p(2.0, 0.0)),
+            (Handle::Edge(1), p(4.0, 1.0)),
+            (Handle::Edge(2), p(2.0, 2.0)),
+            (Handle::Edge(3), p(0.0, 1.0)),
+        ]
+    );
 }
 
 // ---- 形の変え方 ------------------------------------------------------------
@@ -207,6 +230,58 @@ fn a_polyline_vertex_moves_alone_and_keeps_the_count() {
             vec![p(0.0, 0.0), p(6.0, -1.0), p(5.0, 5.0)],
             true
         )))
+    );
+}
+
+/// 辺の中点は辺を平行移動する（両端の頂点を同じだけ動かす。頂点の数は変えない）。
+#[test]
+fn moving_an_edge_translates_both_of_its_ends() {
+    let open = Geometry::Polyline(Polyline::new(
+        vec![p(0.0, 0.0), p(4.0, 0.0), p(4.0, 2.0)],
+        false,
+    ));
+    assert_eq!(
+        apply(&open, Handle::Edge(0), p(2.0, -1.0)),
+        Ok(Geometry::Polyline(Polyline::new(
+            vec![p(0.0, -1.0), p(4.0, -1.0), p(4.0, 2.0)],
+            false
+        ))),
+        "開いたポリラインの最初の辺"
+    );
+    // 矩形の右の辺を右へ 3 → 幅が 4 から 7 に。
+    let rect = Geometry::Polyline(Polyline::rectangle(p(0.0, 0.0), p(4.0, 2.0)));
+    assert_eq!(
+        apply(&rect, Handle::Edge(1), p(7.0, 1.0)),
+        Ok(Geometry::Polyline(Polyline::rectangle(
+            p(0.0, 0.0),
+            p(7.0, 2.0)
+        )))
+    );
+    // 閉じたポリラインの最後の辺（頂点 3 → 頂点 0）。
+    assert_eq!(
+        apply(&rect, Handle::Edge(3), p(-1.0, 1.0)),
+        Ok(Geometry::Polyline(Polyline::new(
+            vec![p(-1.0, 0.0), p(4.0, 0.0), p(4.0, 2.0), p(-1.0, 2.0)],
+            true
+        ))),
+        "最後の辺は最後の頂点と先頭の頂点を動かす"
+    );
+    assert_eq!(dimension_base(&rect, Handle::Edge(1)), Some(p(4.0, 1.0)));
+    assert!(tracks(Handle::Edge(1)), "辺は直交・極が効く");
+    assert!(!Handle::Edge(0).moves_whole());
+}
+
+/// 辺を動かして線分が 1 本も残らない形（全部の頂点が重なる）は断る。
+#[test]
+fn moving_an_edge_onto_the_rest_is_refused() {
+    // 長さ 0 の辺（頂点 0 と 1 が重なる）を頂点 2 へ重ねる。
+    let pl = Geometry::Polyline(Polyline::new(
+        vec![p(0.0, 0.0), p(0.0, 0.0), p(3.0, 0.0)],
+        false,
+    ));
+    assert_eq!(
+        apply(&pl, Handle::Edge(0), p(3.0, 0.0)),
+        Err(GripError::ZeroLength)
     );
 }
 
@@ -409,9 +484,15 @@ fn hit_takes_the_nearest_inside_the_square_and_the_newest_on_a_tie() {
         },
     ];
     let got = hit(&grips, p(0.1, 0.0), 0.5).expect("当たる");
-    assert_eq!(got.id, ids[1], "同じ距離なら新しい方");
+    assert_eq!(
+        got.representative().id,
+        ids[1],
+        "同じ位置なら新しい方が代表"
+    );
+    assert_eq!(got.grips().len(), 2, "同じ位置の 2 つを束ねる");
     let got = hit(&grips, p(0.9, 0.0), 0.5).expect("当たる");
-    assert_eq!(got.handle, Handle::LineEnd, "近い方");
+    assert_eq!(got.representative().handle, Handle::LineEnd, "近い方");
+    assert_eq!(got.grips().len(), 1);
     // 正方形の角（距離は半径より大きいが、正方形の中）。
     assert!(hit(&grips, p(0.45, 0.45), 0.5).is_some(), "正方形の角");
     assert!(hit(&grips, p(0.0, 0.6), 0.5).is_none(), "正方形の外");
@@ -503,6 +584,9 @@ fn moving_a_grip_to_where_it_is_returns_the_same_shape() {
 /// 検査を一切しない素朴な形の変え方（`apply` と同じ計算の順）。円弧の 3 点が一直線なら `None`。
 fn naive(geom: &Geometry, handle: Handle, to: Point2) -> Option<Geometry> {
     let from = position(geom, handle)?;
+    if to.eq_tol(from) {
+        return Some(geom.clone());
+    }
     Some(match (geom, handle) {
         (Geometry::Line(l), Handle::LineStart) => Geometry::Line(Line::new(to, l.b)),
         (Geometry::Line(l), Handle::LineEnd) => Geometry::Line(Line::new(l.a, to)),
@@ -521,6 +605,13 @@ fn naive(geom: &Geometry, handle: Handle, to: Point2) -> Option<Geometry> {
         (Geometry::Polyline(pl), Handle::Vertex(i)) => {
             let mut v = pl.vertices.clone();
             v[i] = to;
+            Geometry::Polyline(Polyline::new(v, pl.closed))
+        }
+        (Geometry::Polyline(pl), Handle::Edge(i)) => {
+            let mut v = pl.vertices.clone();
+            let n = v.len();
+            v[i] += to - from;
+            v[(i + 1) % n] += to - from;
             Geometry::Polyline(Polyline::new(v, pl.closed))
         }
         _ => geom.translated(to - from),
@@ -648,4 +739,373 @@ fn shapes_refused_for_degeneracy_are_refused_by_the_document_too() {
             "{geom:?}"
         );
     }
+}
+
+// ---- 重なったグリップの束（段階 2） --------------------------------------------
+
+/// 図形の列を図面に足し、全部のグリップと ID を返す（`Session::grips` と同じ並び: 図形ごとに
+/// `grips_of` の順）。
+fn scene(doc: &mut Document, geoms: &[Geometry]) -> (Vec<EntityId>, Vec<Grip>) {
+    let before: Vec<EntityId> = doc.entities().ids().collect();
+    doc.apply(Box::new(AddEntities::many(
+        "TEST",
+        geoms
+            .iter()
+            .map(|g| Entity::new(g.clone(), LayerId::ZERO))
+            .collect(),
+    )))
+    .expect("足せる");
+    let ids: Vec<EntityId> = doc
+        .entities()
+        .ids()
+        .filter(|id| !before.contains(id))
+        .collect();
+    let grips = ids
+        .iter()
+        .zip(geoms)
+        .flat_map(|(id, g)| {
+            grips_of(g).into_iter().map(move |(handle, at)| Grip {
+                id: *id,
+                handle,
+                at,
+            })
+        })
+        .collect();
+    (ids, grips)
+}
+
+/// 線分 4 本の矩形（(0,0)-(10,0)-(10,5)-(0,5)、つながった順）。
+fn four_lines() -> Vec<Geometry> {
+    vec![
+        line(0.0, 0.0, 10.0, 0.0),
+        line(10.0, 0.0, 10.0, 5.0),
+        line(10.0, 5.0, 0.0, 5.0),
+        line(0.0, 5.0, 0.0, 0.0),
+    ]
+}
+
+/// 束の図形ごとの形を `to` へ動かした結果（`apply_group` の引数を作って呼ぶ）。
+fn move_group(doc: &Document, group: &GripGroup, to: Point2) -> Result<Vec<Geometry>, PartError> {
+    let parts = group.parts();
+    let originals: Vec<Geometry> = parts
+        .iter()
+        .map(|(id, _)| doc.entities().get(*id).expect("ある").geom.clone())
+        .collect();
+    let args: Vec<(&Geometry, &[Handle])> = originals
+        .iter()
+        .zip(&parts)
+        .map(|(g, (_, h))| (g, h.as_slice()))
+        .collect();
+    apply_group(&args, to)
+}
+
+/// 矩形の角では、隣り合う 2 本の端点が 1 つの束になる。代表は EntityId の大きい方。
+#[test]
+fn a_shared_corner_is_one_group_of_two_grips() {
+    let mut doc = Document::new();
+    let (ids, grips) = scene(&mut doc, &four_lines());
+    let group = hit(&grips, p(10.1, 0.1), 0.5).expect("当たる");
+    assert_eq!(group.grips().len(), 2, "{group:?}");
+    let rep = group.representative();
+    assert_eq!(
+        (rep.id, rep.handle),
+        (ids[1], Handle::LineStart),
+        "代表は新しい方"
+    );
+    assert_eq!(
+        group.parts(),
+        vec![
+            (ids[1], vec![Handle::LineStart]),
+            (ids[0], vec![Handle::LineEnd])
+        ]
+    );
+    assert_eq!(group.label(), "端点を動かす（2 個）");
+    // 辺の中点は 1 本だけ。
+    let mid = hit(&grips, p(5.0, 0.0), 0.5).expect("当たる");
+    assert_eq!(mid.grips().len(), 1);
+    assert_eq!(mid.label(), "図形ごと移動");
+}
+
+/// 矩形の角を動かすと、隣り合う 2 本がつながったまま動く（ほかの 2 本は変わらない）。
+#[test]
+fn moving_a_shared_corner_keeps_the_rectangle_connected() {
+    let mut doc = Document::new();
+    let (_, grips) = scene(&mut doc, &four_lines());
+    let group = hit(&grips, p(10.0, 0.0), 0.5).expect("当たる");
+    let moved = move_group(&doc, &group, p(12.0, -1.0)).expect("動かせる");
+    assert_eq!(
+        moved,
+        vec![line(12.0, -1.0, 10.0, 5.0), line(0.0, 0.0, 12.0, -1.0)],
+        "代表（2 本目の始点）と 1 本目の終点がどちらも行き先へ"
+    );
+}
+
+/// 種類が混ざった束は「点を動かす」。線分の端点と円の中心が重なっていれば、端点が動き、円は移動する。
+#[test]
+fn a_mixed_group_moves_each_by_its_own_rule() {
+    let mut doc = Document::new();
+    let (ids, grips) = scene(
+        &mut doc,
+        &[
+            line(0.0, 0.0, 10.0, 0.0),
+            Geometry::Circle(Circle::new(p(10.0, 0.0), 2.0)),
+        ],
+    );
+    let group = hit(&grips, p(10.0, 0.0), 0.5).expect("当たる");
+    assert_eq!(group.representative().id, ids[1], "代表は円の中心");
+    assert_eq!(group.label(), "点を動かす（2 個）");
+    let moved = move_group(&doc, &group, p(10.0, 4.0)).expect("動かせる");
+    assert_eq!(
+        moved,
+        vec![
+            Geometry::Circle(Circle::new(p(10.0, 4.0), 2.0)),
+            line(0.0, 0.0, 10.0, 4.0),
+        ]
+    );
+}
+
+/// 始点と終点が同じ位置の開いたポリラインは、その角の頂点 2 つを一緒に動かす（閉じた形のまま）。
+#[test]
+fn coincident_vertices_of_one_polyline_move_together() {
+    let mut doc = Document::new();
+    let pl = Geometry::Polyline(Polyline::new(
+        vec![p(0.0, 0.0), p(4.0, 0.0), p(4.0, 3.0), p(0.0, 0.0)],
+        false,
+    ));
+    let (ids, grips) = scene(&mut doc, &[pl]);
+    let group = hit(&grips, p(0.0, 0.0), 0.5).expect("当たる");
+    assert_eq!(
+        group.parts(),
+        vec![(ids[0], vec![Handle::Vertex(0), Handle::Vertex(3)])]
+    );
+    assert_eq!(group.label(), "頂点を動かす", "図形は 1 つ");
+    let moved = move_group(&doc, &group, p(-1.0, -1.0)).expect("動かせる");
+    assert_eq!(
+        moved,
+        vec![Geometry::Polyline(Polyline::new(
+            vec![p(-1.0, -1.0), p(4.0, 0.0), p(4.0, 3.0), p(-1.0, -1.0)],
+            false
+        ))]
+    );
+}
+
+/// 全部か無しか。1 つでも断られたら全体を断り、どの図形が断ったか（添字）と理由を返す。
+#[test]
+fn a_group_is_all_or_nothing() {
+    let mut doc = Document::new();
+    let arc = Arc::new(p(0.0, 0.0), 5.0, 0.0, PI);
+    // 線分の終点を円弧の終点 (-5,0) に重ねる。行き先を円弧の始点 (5,0) にすると円弧の両端が重なる。
+    let (ids, grips) = scene(&mut doc, &[line(-8.0, 3.0, -5.0, 0.0), Geometry::Arc(arc)]);
+    let group = hit(&grips, arc.end_point(), 0.5).expect("当たる");
+    assert_eq!(group.parts().len(), 2);
+    assert_eq!(group.representative().id, ids[1]);
+    let err = move_group(&doc, &group, arc.start_point()).expect_err("断る");
+    assert_eq!(
+        err,
+        PartError {
+            index: 0,
+            error: GripError::ArcEndsMeet
+        },
+        "代表（円弧）が断った"
+    );
+    // 線分の側が断る場合（長さ 0）。
+    let err = move_group(&doc, &group, p(-8.0, 3.0)).expect_err("断る");
+    assert_eq!(
+        err,
+        PartError {
+            index: 1,
+            error: GripError::ZeroLength
+        }
+    );
+}
+
+/// 同じ位置でない（トレランスより離れた）グリップは束にしない。
+#[test]
+fn nearby_but_distinct_grips_are_not_grouped() {
+    let mut doc = Document::new();
+    let (ids, grips) = scene(
+        &mut doc,
+        &[line(0.0, 0.0, 10.0, 0.0), line(10.1, 0.0, 20.0, 0.0)],
+    );
+    let group = hit(&grips, p(10.02, 0.0), 0.5).expect("当たる");
+    assert_eq!(group.grips().len(), 1);
+    assert_eq!(group.representative().id, ids[0], "近い方");
+}
+
+/// 共有点を持つ図形を乱数で作る。共有点の列も返す。全種類を混ぜ、同じ図形の重なった頂点
+/// （始点と終点が同じ開いたポリライン）や、辺の中点が共有点になるポリラインも混ぜる。
+fn random_scene(rng: &mut Lcg, def: cad_core::DefinitionId) -> (Vec<Geometry>, Vec<Point2>) {
+    let rnd = |rng: &mut Lcg| p(rng.next_f64(-100.0, 100.0), rng.next_f64(-100.0, 100.0));
+    let shared: Vec<Point2> = (0..3).map(|_| rnd(rng)).collect();
+    let mut out = Vec::new();
+    for _ in 0..7 {
+        let s = shared[rng.below(3) as usize];
+        let s2 = shared[rng.below(3) as usize];
+        let g = match rng.below(10) {
+            0 => Geometry::Line(Line::new(s, rnd(rng))),
+            1 => Geometry::Line(Line::new(rnd(rng), s)),
+            2 => Geometry::Circle(Circle::new(s, rng.next_f64(0.5, 30.0))),
+            3 => {
+                // 端点が共有点の円弧。
+                let c = s + Vec2::polar(rng.next_f64(0.0, TAU), rng.next_f64(1.0, 30.0));
+                let at = (s - c).angle();
+                let sweep = rng.next_f64(0.2, TAU - 0.2);
+                if rng.below(2) == 0 {
+                    Geometry::Arc(Arc::new(c, c.dist(s), at, at + sweep))
+                } else {
+                    Geometry::Arc(Arc::new(c, c.dist(s), at - sweep, at))
+                }
+            }
+            4 => Geometry::Polyline(Polyline::new(vec![s, rnd(rng), rnd(rng)], false)),
+            5 => Geometry::Polyline(Polyline::new(vec![s, rnd(rng), rnd(rng), s], false)),
+            6 => Geometry::Polyline(Polyline::new(vec![rnd(rng), s, rnd(rng)], true)),
+            7 => {
+                // 辺の中点が共有点。
+                let d = Vec2::new(rng.next_f64(-10.0, 10.0), rng.next_f64(-10.0, 10.0));
+                Geometry::Polyline(Polyline::new(vec![s - d, s + d, rnd(rng)], false))
+            }
+            8 => {
+                if s.eq_tol(s2) {
+                    Geometry::Xline(Xline::at_angle(s, rng.next_f64(0.0, TAU)))
+                } else {
+                    Geometry::Line(Line::new(s, s2))
+                }
+            }
+            _ => Geometry::Instance(Instance::new(def, Placement::at(s))),
+        };
+        out.push(g);
+    }
+    (out, shared)
+}
+
+/// 束の行き先の候補。乱数の点・元の位置・束の図形のほかのグリップ（断られやすい）・ほぼ重なる点。
+fn group_targets(rng: &mut Lcg, doc: &Document, group: &GripGroup) -> Vec<Point2> {
+    let from = group.representative().at;
+    let mut v = vec![
+        from,
+        p(rng.next_f64(-150.0, 150.0), rng.next_f64(-150.0, 150.0)),
+        from + Vec2::new(rng.next_f64(-1.0, 1.0), rng.next_f64(-1.0, 1.0)),
+        from + Vec2::new(EPS_LEN * 0.5, 0.0),
+        p(f64::MAX, f64::MAX),
+    ];
+    for (id, _) in group.parts() {
+        let g = &doc.entities().get(id).expect("ある").geom;
+        for (_, q) in grips_of(g) {
+            v.push(q);
+        }
+        if let Geometry::Arc(a) = g {
+            v.push(a.start_point().lerp(a.end_point(), rng.next_f64(-1.0, 2.0)));
+        }
+    }
+    v
+}
+
+/// 元の位置へ動かすと、束のどの図形も元の形そのもの。
+#[test]
+fn moving_a_group_to_where_it_is_returns_the_same_shapes() {
+    let mut doc = Document::new();
+    let def = with_definition(&mut doc);
+    let mut rng = Lcg::new(3030);
+    let mut grouped = 0;
+    for _ in 0..300 {
+        let (geoms, shared) = random_scene(&mut rng, def);
+        let (_, grips) = scene(&mut doc, &geoms);
+        for s in shared {
+            // 共有点を使った図形が無いこともある。
+            let Some(group) = hit(&grips, s, 0.001) else {
+                continue;
+            };
+            let originals: Vec<Geometry> = group
+                .parts()
+                .iter()
+                .map(|(id, _)| doc.entities().get(*id).expect("ある").geom.clone())
+                .collect();
+            for g in group.grips() {
+                assert_eq!(
+                    move_group(&doc, &group, g.at),
+                    Ok(originals.clone()),
+                    "{group:?}"
+                );
+            }
+            if group.parts().len() > 1 {
+                grouped += 1;
+            }
+        }
+    }
+    assert!(grouped > 300, "束を十分に試した: {grouped}");
+}
+
+/// `apply_group` が成功する ⇔ 素朴に作った形の列を実際の図面で 1 回の `ReplaceGeometries` に渡して
+/// 成功する（どれかの図形で円弧の両端が重なる・3 点が一直線になる場合は、`apply_group` が必ず断る）。
+/// 成功したら図面の形は `apply_group` の結果で、Undo 1 回で全部戻る。
+#[test]
+fn apply_group_succeeds_exactly_when_replace_geometries_does() {
+    let mut doc = Document::new();
+    let def = with_definition(&mut doc);
+    let mut rng = Lcg::new(4343);
+    let (mut ok, mut refused_by_doc, mut excluded) = (0, 0, 0);
+    for _ in 0..300 {
+        let (geoms, shared) = random_scene(&mut rng, def);
+        let (_, grips) = scene(&mut doc, &geoms);
+        for s in shared {
+            // 共有点を使った図形が無いこともある。
+            let Some(group) = hit(&grips, s, 0.001) else {
+                continue;
+            };
+            let parts = group.parts();
+            for to in group_targets(&mut rng, &doc, &group) {
+                let ours = move_group(&doc, &group, to);
+                let what = format!("{group:?} → {to:?}");
+                // 図形ごとに素朴に動かす。断られて当然のもの（円弧の両端・一直線）があれば
+                // `apply_group` も断ること。
+                let mut naive_all = Vec::new();
+                let mut must_refuse = false;
+                for (id, handles) in &parts {
+                    let mut g = doc.entities().get(*id).expect("ある").geom.clone();
+                    for h in handles {
+                        let n = naive(&g, *h, to);
+                        if arc_ends_meet(&g, *h, to, n.as_ref()) || n.is_none() {
+                            must_refuse = true;
+                            break;
+                        }
+                        g = n.expect("上で見た");
+                    }
+                    naive_all.push((*id, g));
+                }
+                if must_refuse {
+                    assert!(ours.is_err(), "{what}: {ours:?}");
+                    excluded += 1;
+                    continue;
+                }
+                let before: Vec<Geometry> = parts
+                    .iter()
+                    .map(|(id, _)| doc.entities().get(*id).expect("ある").geom.clone())
+                    .collect();
+                let result = doc.apply(Box::new(ReplaceGeometries::new("GRIP", naive_all.clone())));
+                assert_eq!(
+                    ours.is_ok(),
+                    result.is_ok(),
+                    "{what}: {ours:?} / {result:?}"
+                );
+                if result.is_ok() {
+                    let expected: Vec<Geometry> =
+                        naive_all.iter().map(|(_, g)| g.clone()).collect();
+                    assert_eq!(ours.as_ref().ok(), Some(&expected), "{what}: 同じ形");
+                    doc.undo().expect("戻せる");
+                    let after: Vec<Geometry> = parts
+                        .iter()
+                        .map(|(id, _)| doc.entities().get(*id).expect("ある").geom.clone())
+                        .collect();
+                    assert_eq!(after, before, "{what}: Undo 1 回で全部戻る");
+                    ok += 1;
+                } else {
+                    refused_by_doc += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        ok > 1000 && refused_by_doc > 50 && excluded > 50,
+        "どの場合も十分に試した: ok {ok}, 図面が断った {refused_by_doc}, 円弧 {excluded}"
+    );
 }

@@ -30,6 +30,10 @@ pub const EMPTY_NOTE: &str = "図形を選ぶと、ここに値が出ます";
 /// 選び直しになる人が出ないよう、そう書いておく。
 pub const BUSY_NOTE: &str =
     "コマンド実行中は変更できません（終えるか Esc で中断。中断すると選択も外れます）";
+/// グリップを掴んでいる間の案内。グリップの Esc は掴みだけを取り消し、選択は残る
+/// （`Session::cancel`。Issue #30 段階 1 の操作レビュー 1）。
+pub const GRIP_BUSY_NOTE: &str =
+    "グリップで編集中は変更できません（クリックで確定、Esc で取り消し。選択は残ります）";
 /// レイヤへの移動（`MoveEntitiesToLayer`）の名前。パネルから返るコマンドを見分けるのに使う。
 pub const MOVE_TO_LAYER_COMMAND: &str = "LAYER_MOVE_ENTITIES";
 /// 選択がまたぐレイヤが 1 つに決まらないときの、ドロップダウンの表示。
