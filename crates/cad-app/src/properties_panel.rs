@@ -27,7 +27,10 @@ use crate::properties::{
 use crate::selection::Selection;
 
 /// コマンド実行中の案内の色（ステータスバーの「コマンド実行中」と同じ琥珀色）。
-const BUSY_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
+pub const BUSY_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
+
+/// 選択から外れた案内の色（コマンド実行中の琥珀色とは別にして、状態の案内と区別する）。
+pub const DROP_NOTE_COLOR: egui::Color32 = egui::Color32::from_rgb(0x80, 0xcb, 0xc4);
 
 /// 項目名の欄の幅 [px]。
 const LABEL_WIDTH: f32 = 84.0;
@@ -75,6 +78,8 @@ impl PropertiesPanel {
     /// パネルを描画し、実行すべきコマンドを返す。
     ///
     /// `busy` … コマンド（選択待ちを含む）を実行中か。真の間は表示だけになる。
+    /// `drop_note` … 図形をロック・非表示のレイヤへ移して選択から外れたときの案内
+    /// （`Session::drop_note`）。選択が空の表示の上に出す。
     #[must_use]
     pub fn show(
         &mut self,
@@ -82,6 +87,7 @@ impl PropertiesPanel {
         doc: &Document,
         selection: &Selection,
         busy: bool,
+        drop_note: Option<&str>,
     ) -> Vec<Box<dyn Command>> {
         let mut commands: Vec<Box<dyn Command>> = Vec::new();
         if !self.open {
@@ -97,6 +103,10 @@ impl PropertiesPanel {
 
         let summary = self.summary.get(doc, selection);
         let (Some(layer), true) = (summary.layer, summary.total > 0) else {
+            if let Some(note) = drop_note {
+                ui.colored_label(DROP_NOTE_COLOR, note);
+                ui.separator();
+            }
             ui.weak(EMPTY_NOTE);
             return commands;
         };
@@ -180,11 +190,8 @@ fn show_layer_row(
 
 /// 1 つ選んだときの項目の一覧（段階 1 では表示だけ）。
 fn show_items(ui: &mut egui::Ui, doc: &Document, selection: &Selection) {
-    let Some(entity) = selection
-        .iter()
-        .next()
-        .and_then(|id| doc.entities().get(id))
-    else {
+    // 見出しの「1 つ」は図面に実在する数（`summarize`）なので、実在する最初の図形を取る。
+    let Some(entity) = selection.iter().find_map(|id| doc.entities().get(id)) else {
         return;
     };
     egui::Grid::new(("properties_items", kind_of(&entity.geom) as u8))
