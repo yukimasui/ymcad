@@ -12,7 +12,7 @@ use crate::file_ops::{self, FileOps, FileOutcome};
 use crate::hover::Hover;
 use crate::input::{self, ViewAction};
 use crate::layer_panel::{LayerPanel, PanelNotice};
-use crate::properties_panel::PropertiesPanel;
+use crate::properties_panel::{PanelInput, PropertiesPanel};
 use crate::render;
 use crate::resolved::ResolvedInstances;
 use crate::ribbon::Ribbon;
@@ -495,6 +495,16 @@ impl CadApp {
 
         let preview = self.session.preview(self.cursor_model, &self.doc);
         render::draw_preview(&painter, &self.viewport, self.doc.definitions(), &preview);
+        // プロパティパネルで値をドラッグしている間の仮の形（Issue #31 段階 2）。図面はまだ変えて
+        // いないので、ラバーバンドと同じ経路で描く。
+        if let Some(g) = self.properties_panel.drag_preview() {
+            render::draw_preview(
+                &painter,
+                &self.viewport,
+                self.doc.definitions(),
+                std::slice::from_ref(g),
+            );
+        }
 
         if let Some(hit) = tracked.and_then(|t| t.polar) {
             render::draw_polar_guide(&painter, &self.viewport, &hit);
@@ -915,6 +925,9 @@ impl CadApp {
         *hover = Hover::new();
         // 改名中・色見本表示中のレイヤ ID。
         layer_panel.document_replaced();
+        // 選択の要約と、編集中の値（打ちかけ・ドラッグ中）と理由（#31 段階 2）。編集中の値は版番号に
+        // 結び付けているが、版番号は新しい図面と重なりうるので、残すと前の図面で打ちかけた値が
+        // 新しい図面の同じ番号の図形へ確定されうる。
         // 選択の要約。`document_replaced` が選択を空にして選択の版は進むが、版番号が
         // 偶然重なっても古い要約が残らないよう明示的に捨てる。
         properties_panel.invalidate();
@@ -1101,15 +1114,16 @@ impl CadApp {
         )
         .show(ui, |ui| {
             own_width(ui, "properties_scroll", |ui| {
-                // 選択待ちを含め、コマンドを実行している間は表示だけにする。
-                let busy = self.session.active_command().is_some();
-                let commands = self.properties_panel.show(
-                    ui,
-                    &self.doc,
-                    &self.session.selection,
-                    busy,
-                    self.session.drop_note(&self.doc),
-                );
+                let input = PanelInput {
+                    doc: &self.doc,
+                    selection: &self.session.selection,
+                    // 選択待ちを含め、コマンドを実行している間は表示だけにする。
+                    busy: self.session.active_command().is_some(),
+                    drop_note: self.session.drop_note(&self.doc),
+                    component_edit: self.session.editing(),
+                    length_step: self.viewport.px_to_model_len(1.0),
+                };
+                let commands = self.properties_panel.show(ui, &input);
                 // 選択から外れたときの案内は `Session::apply_external` が出す（レイヤパネルと共通）。
                 for cmd in commands {
                     self.session.apply_external(cmd, &mut self.doc);
@@ -1203,6 +1217,7 @@ mod behavior_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cad_core::geom::tolerance::eq_len;
 
     #[test]
     fn draw_timer_reports_zero_when_empty() {
@@ -1216,8 +1231,8 @@ mod tests {
         t.push(Duration::from_micros(1000)); // 1.0ms
         t.push(Duration::from_micros(3000)); // 3.0ms
         let (avg, max) = t.stats_ms();
-        assert!((avg - 2.0).abs() < 1e-9, "平均は 2.0ms のはず: {avg}");
-        assert!((max - 3.0).abs() < 1e-9, "最大は 3.0ms のはず: {max}");
+        assert!(eq_len(avg, 2.0), "平均は 2.0ms のはず: {avg}");
+        assert!(eq_len(max, 3.0), "最大は 3.0ms のはず: {max}");
     }
 
     /// 窓を越えても古いサンプルで壊れないこと。
@@ -1228,8 +1243,8 @@ mod tests {
             t.push(Duration::from_micros(500));
         }
         let (avg, max) = t.stats_ms();
-        assert!((avg - 0.5).abs() < 1e-9);
-        assert!((max - 0.5).abs() < 1e-9);
+        assert!(eq_len(avg, 0.5));
+        assert!(eq_len(max, 0.5));
     }
 
     /// 座標の欄は桁の多い座標で広がり、小さい座標に戻っても縮まない。

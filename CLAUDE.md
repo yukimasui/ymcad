@@ -130,7 +130,7 @@ URL は `docs/PROGRESS.md` の「次のセッションへ」に書く。
 
 1. **座標はすべて `f64`。** `f32` になるのは `crates/cad-app/src/viewport.rs` で
    egui へ渡す直前だけ
-2. **トレランスは `crates/cad-core/src/geom/tolerance.rs` に一元管理。**
+2. **トレランスは `crates/cad-core/src/geom/tolerance.rs` に一元管理。**（`cad-app` でも同じ。CI は `crates/` 全体を検査する）
    ソース中に `1e-9` 等を直書きしない（**テストコードも対象**）
 3. **エンティティストアは世代つきアリーナ。** `Vec` の添字を ID にしない
 4. **エンティティを変更できるのは `Command` だけ。**
@@ -167,9 +167,11 @@ URL は `docs/PROGRESS.md` の「次のセッションへ」に書く。
 | 依存方向 | `cad-core` が egui / eframe / winit / wgpu / rfd などに依存しないこと |
 | f64 のみ | `crates/cad-core/src` に `f32` が出てこないこと |
 | 縮小変換の局所化 | `as f32` が `crates/cad-app/src/viewport.rs` の外に出ないこと |
-| トレランス | `1e-9` 等の直書きが `geom/tolerance.rs` の外に無いこと |
+| トレランス | `1e-9` 等の指数表記の負指数が、`crates/` 配下のすべての `.rs`（`cad-core` / `cad-app` の `src`・`tests`・`examples`）で `geom/tolerance.rs` の外に無いこと |
 
 > grep の除外は「行頭が `//` の行」だけなので、**行末コメントに書いても引っかかる**。
+> 比較には `cad_core::geom::tolerance` の関数（`eq_len` など）を使う。トレランスではない小さな値
+> （表示倍率の下限など）も指数表記の負指数は使えない。`1.0 / MAX_SCALE` のように式で書く。
 
 ## 検証コマンド
 

@@ -84,6 +84,7 @@ mod tests {
     use super::*;
     use cad_core::command::{AddEntities, DefineComponent, InsertInstance};
     use cad_core::component::Placement;
+    use cad_core::geom::tolerance::eq_len;
     use cad_core::geom::{Line, Point2};
     use cad_core::{Entity, LayerId};
 
@@ -128,7 +129,7 @@ mod tests {
             panic!("線分のはず: {:?}", resolved[0]);
         };
         // 基点 (0,0) の定義を (10,0) へ置いたので、線分も 10 ずれる。
-        assert!((l.a.x - 10.0).abs() < 1e-9, "x = {}", l.a.x);
+        assert!(eq_len(l.a.x, 10.0), "x = {}", l.a.x);
     }
 
     /// **版が同じ間は作り直さないこと。**

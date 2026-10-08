@@ -301,3 +301,117 @@ fn ui_snapshot_properties_layer_panel_long_names() {
     hover(&mut h, CANVAS_CENTER);
     shot(&mut h, "properties_o_layer_long_names");
 }
+
+// ---- 数値の編集（段階 2） ------------------------------------------------------
+
+/// 行の項目名 `label` と同じ高さにある数値の欄の中心（同じ名前のラベルがステータスバーなどに
+/// あっても、右に数値の欄が並んでいる行を取る）。
+fn field_center(h: &Harness<'_, CadApp>, label: &str) -> egui::Pos2 {
+    use egui_kittest::kittest::Queryable as _;
+
+    let fields: Vec<egui::Rect> = h
+        .query_all_by_role(egui::accesskit::Role::SpinButton)
+        .map(|n| n.rect())
+        .collect();
+    h.query_all_by_label(label)
+        .map(|n| n.rect())
+        .find_map(|row| {
+            let y = row.center().y;
+            // 同じ高さに隣のパネルの欄があることもあるので、項目名にいちばん近いものを取る。
+            fields
+                .iter()
+                .filter(|r| r.min.y <= y && y <= r.max.y && r.min.x > row.min.x)
+                .min_by(|a, b| a.min.x.total_cmp(&b.min.x))
+                .copied()
+        })
+        .unwrap_or_else(|| panic!("項目 {label} の欄が無い"))
+        .center()
+}
+
+/// 欄をクリックして `text` を打ち、`enter` なら Enter で確定する。
+fn type_into(h: &mut Harness<'_, CadApp>, label: &str, text: &str, enter: bool) {
+    let pos = field_center(h, label);
+    super::click(h, pos);
+    type_text(h, text);
+    if enter {
+        press(h, egui::Key::Enter);
+    }
+}
+
+/// 線分の「始点 X」に値を打っている途中（入力欄になり、まだ確定していない）。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_properties_editing_a_value() {
+    let (mut h, _) = opened(|d| vec![d.line]);
+    type_into(&mut h, "始点 X", "25.5", false);
+    shot(&mut h, "properties_p_editing");
+}
+
+/// 不正な値（長さ 0）を確定しようとした後。項目のすぐ下に理由が赤字で出て、値は元のまま。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_properties_invalid_value() {
+    let (mut h, _) = opened(|d| vec![d.line]);
+    type_into(&mut h, "長さ", "0", true);
+    hover(&mut h, CANVAS_CENTER);
+    shot(&mut h, "properties_q_invalid");
+
+    // 円弧の開始角を終了角と同じにしようとした（掃引 0°）。
+    let (mut h, _) = opened(|d| vec![d.arc]);
+    type_into(&mut h, "開始角", "180", true);
+    hover(&mut h, CANVAS_CENTER);
+    shot(&mut h, "properties_q_invalid_arc");
+}
+
+/// 円の半径をドラッグしている途中。図面の円はそのままで、仮の円がラバーバンドの色で出る。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_properties_drag_preview() {
+    let (mut h, _) = opened(|d| vec![d.circle]);
+    let from = field_center(&h, "半径");
+    h.event(egui::Event::PointerMoved(from));
+    h.event(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    let mut at = from;
+    for _ in 0..8 {
+        at += egui::vec2(8.0, 0.0);
+        h.event(egui::Event::PointerMoved(at));
+    }
+    h.run_steps(STEPS);
+    shot(&mut h, "properties_r_drag_preview");
+}
+
+/// 3 枚のパネルを開き、中身が最大になる状態（インスタンスを選び、倍率に不正な値を入れて理由の行を
+/// 出した）。1280px・1024px・800px で、項目・欄・理由がパネルの中に収まり、隣へはみ出さないこと。
+#[test]
+#[ignore = "GPU(またはソフトウェア Vulkan)が必要。--ignored で明示実行する"]
+fn ui_snapshot_properties_crowded_with_a_reason() {
+    for width in [1280.0, 1024.0, 800.0] {
+        let mut h = Harness::builder()
+            .with_size(egui::vec2(width, 800.0))
+            .wgpu()
+            .build_eframe(|cc| {
+                let font = crate::jp_font::install(&cc.egui_ctx)
+                    .map(|f| format!("{} (face {})", f.path.display(), f.index));
+                CadApp::new(font)
+            });
+        h.run_steps(STEPS);
+        let (doc, session) = h.state_mut().parts_mut();
+        let drawing = draw(doc);
+        session.selection.insert(drawing.instance);
+        h.run_steps(STEPS);
+        for command in ["LA", "CS"] {
+            type_text(&mut h, command);
+            press(&mut h, egui::Key::Enter);
+        }
+        h.key_press_modifiers(egui::Modifiers::CTRL, egui::Key::Num1);
+        h.run_steps(STEPS);
+        type_into(&mut h, "倍率", "-2", true);
+        hover(&mut h, egui::pos2(width / 8.0, 350.0));
+        shot(&mut h, &format!("properties_s_crowded_reason_{width}"));
+    }
+}
