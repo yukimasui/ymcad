@@ -62,6 +62,12 @@ pub static TABS: &[TabSpec] = &[
                 title: "プロパティ",
                 commands: &["PROPERTIES"],
             },
+            // 末尾に足した（AutoCAD もホームの右寄りの「ユーティリティ」に置く）。既存のボタンの
+            // 位置を動かさないため。Ctrl+A を知らなくても見つけられるように置く（ADR-0044）。
+            GroupSpec {
+                title: "選択",
+                commands: &["SELECTALL"],
+            },
         ],
     },
     TabSpec {

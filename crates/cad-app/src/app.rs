@@ -1132,6 +1132,11 @@ impl eframe::App for CadApp {
         self.session
             .cmdline
             .begin_frame(&ctx, allow_suggestions, self.files.is_confirming());
+        // Ctrl+A（全選択）。効く段階か（待機中・選択待ちだけ）は `select_all` が決める。
+        // 確定（Enter）より前に選ぶ。同じフレームに Ctrl+A と Enter が来たら、選んでから確定する。
+        if self.session.cmdline.take_select_all() {
+            self.session.select_all(&self.doc);
+        }
         egui::Panel::bottom("cmdline").show(ui, |ui| self.command_area(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         self.layer_area(ui);
