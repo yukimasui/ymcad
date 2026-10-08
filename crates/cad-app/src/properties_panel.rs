@@ -1,4 +1,5 @@
-//! プロパティパネル（Issue #31 段階 1: 表示とレイヤの変更、段階 2: 数値の編集）。
+//! プロパティパネル（Issue #31 段階 1: 表示とレイヤの変更、段階 2: 数値の編集、
+//! 段階 3: インプレース編集中の束縛）。
 //!
 //! 選んだ図形の種類ごとの値を出し、レイヤをドロップダウンで変える。AutoCAD の PROPERTIES
 //! （Ctrl+1）にあたるが、クイックプロパティのようにカーソル横へ飛び出さず、レイヤ・
@@ -28,8 +29,14 @@
 //! （#37 の教訓。パネルの開閉は実行中のコマンドを中断しないので、開いたままコマンドを
 //! 始められる）。
 //!
-//! 中身を決める部分は egui に依存しない純粋な関数として `properties.rs` と
-//! `properties_edit.rs` にある。
+//! # インプレース編集中は、束縛（式）で決まる項目だけ表示だけ（段階 3）
+//!
+//! コンポーネントの編集中（ADR-0033）に選んだ中身は、定義の束縛で決まる項目を表示だけにし、
+//! 値の横に式を出す（長い式は省略し、ツールチップで全体）。束縛の無い項目は変えられ、`ENDCOMP` の
+//! 後も定義に残る。どの項目がどの束縛で決まるかは `properties_bind.rs` の対応表が決める。
+//!
+//! 中身を決める部分は egui に依存しない純粋な関数として `properties.rs`・
+//! `properties_edit.rs`・`properties_bind.rs` にある。
 
 use std::cell::Cell;
 
@@ -41,6 +48,7 @@ use crate::properties::{
     self, fmt_num, kind_of, CommonLayer, Editor, Summary, SummaryCache, BUSY_NOTE, EMPTY_NOTE,
     MIXED_LAYER, MULTI_NOTE,
 };
+use crate::properties_bind::{EntityBindings, Key, Lock};
 use crate::properties_edit::{
     edit_number, edit_toggle, parse_number, same_on_screen, Field, Toggle,
 };
@@ -56,8 +64,11 @@ pub const DROP_NOTE_COLOR: egui::Color32 = egui::Color32::from_rgb(0x80, 0xcb, 0
 pub const EDIT_COMMAND: &str = "PROPERTIES";
 /// 編集できるときに、項目の表の下に出す操作の案内。
 pub const EDIT_HINT: &str = "値はドラッグで増減、クリックで入力（Enter で確定・Esc で取り消し）";
-/// コンポーネントの編集中、束縛（式）を持つ中身を選んだときの案内。
-pub const BOUND_NOTE: &str = "この図形はコンポーネントの式で決まる値を持つため、数値は表示だけです";
+/// コンポーネントの編集中、束縛（式）で決まる項目があるときの案内。
+pub const BOUND_NOTE: &str =
+    "「←」の付いた値はコンポーネントの式で決まるため表示だけです（ほかの値は変えられます）";
+/// 束縛（式）の案内の色（コマンド実行中の琥珀色・選択から外れた案内の青緑とは別にする）。
+pub const BOUND_COLOR: egui::Color32 = egui::Color32::from_rgb(0xb3, 0x9d, 0xdb);
 /// 編集中に図面が変わったため、入力を捨てたときの案内。
 pub const STALE_NOTE: &str = "編集中に図面が変わったため、入力した値は確定しませんでした";
 
@@ -107,13 +118,6 @@ struct Target<'a> {
     doc: &'a Document,
     id: EntityId,
     geom: &'a Geometry,
-}
-
-/// 項目（数値か、はい・いいえか）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Key {
-    Number(Field),
-    Toggle(Toggle),
 }
 
 /// 編集中の項目。フォーカスを得たとき・ドラッグを始めたときに作る。
@@ -322,6 +326,85 @@ fn show_layer_row(
         });
 }
 
+/// 項目の編集のしかたから、項目のキー。
+fn editor_key(editor: Editor) -> Key {
+    match editor {
+        Editor::Number(field, _) => Key::Number(field),
+        Editor::Toggle(toggle, _) => Key::Toggle(toggle),
+    }
+}
+
+/// 式の案内のうち、省略してよい残り（式）に少なくとも取りたい幅 [px]。これが取れないほど狭ければ、
+/// 案内を値の横ではなく次の行に出す。
+const BADGE_REST_MIN_WIDTH: f32 = 40.0;
+
+/// 表示だけの値。束縛（式）で決まるなら、横に式の案内を出す（ツールチップで式の全体と理由）。
+///
+/// 案内は**折り返さずに 1 行**で出し、入り切らなければ式の側だけを省略する（`← 式` は残す）。
+/// 折り返すと、表の行の高さが増えた分だけ次の行の欄の下に 2 行目が隠れた（PR #82 の操作レビュー）。
+/// 値の横に `← 式` と式の頭も入らないほど狭いとき（3 枚のパネルを開いた狭い画面）は、表に 1 行
+/// 足して、値の下の行に出す。表の行は 1 行ずつなので、欄と重ならない。
+///
+/// 呼び出し側は、いつもどおりこの後で `end_row` する。
+fn show_value(ui: &mut egui::Ui, value: String, lock: Option<&Lock>) {
+    let width_of = |ui: &egui::Ui, text: &str, style: egui::TextStyle| {
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), style.resolve(ui.style()), BOUND_COLOR)
+            .size()
+            .x
+    };
+    let Some(lock) = lock else {
+        ui.add(
+            egui::Label::new(egui::RichText::new(value).monospace())
+                .selectable(false)
+                .extend(),
+        );
+        return;
+    };
+    let (head, _) = lock.badge_parts();
+    let needed = width_of(ui, &value, egui::TextStyle::Monospace)
+        + ui.spacing().item_spacing.x
+        + width_of(ui, head, egui::TextStyle::Body)
+        + BADGE_REST_MIN_WIDTH;
+    let beside = ui.available_width() >= needed;
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::Label::new(egui::RichText::new(value).monospace())
+                .selectable(false)
+                .extend(),
+        );
+        if beside {
+            show_badge(ui, lock);
+        }
+    });
+    if !beside {
+        ui.end_row();
+        ui.label("");
+        ui.horizontal(|ui| show_badge(ui, lock));
+    }
+}
+
+/// 式の案内（`← 式` と、入り切らなければ省略する式）。ツールチップは式の全体と理由。
+fn show_badge(ui: &mut egui::Ui, lock: &Lock) {
+    let (head, rest) = lock.badge_parts();
+    let text = |s: String| egui::RichText::new(s).color(BOUND_COLOR);
+    let head = ui.add(
+        egui::Label::new(text(head.to_owned()))
+            .selectable(false)
+            .extend(),
+    );
+    // 頭と残りは続けて 1 つの文に見せる。
+    ui.spacing_mut().item_spacing.x = 0.0;
+    let rest = ui.add(
+        egui::Label::new(text(rest))
+            .selectable(false)
+            .truncate()
+            // 省略されたときの egui 既定のツールチップ（式の文字だけ）は出さず、理由つきの方を出す。
+            .show_tooltip_when_elided(false),
+    );
+    head.union(rest).on_hover_text(lock.tooltip());
+}
+
 impl PropertiesPanel {
     /// 1 つ選んだときの項目の一覧。編集できる項目は `DragValue` かチェックボックスにする。
     fn show_items(
@@ -340,14 +423,38 @@ impl PropertiesPanel {
         else {
             return;
         };
-        // コンポーネントの編集中、束縛（式）を持つ中身は数値を表示だけにする（段階 3 で項目ごとにする）。
-        let bound = input.component_edit.is_some_and(|s| s.is_bound(doc, id));
-        if bound {
-            ui.colored_label(BUSY_COLOR, BOUND_NOTE);
-        }
-        let editable = !input.busy && !bound;
+        let geom = &entity.geom;
+        let kind = kind_of(geom);
+        // コンポーネントの編集中は、束縛（式）で決まる項目だけを表示だけにする（段階 3）。
+        // どの項目がどの束縛で決まるかは `properties_bind` の対応表が決める。
+        let bindings = input
+            .component_edit
+            .map(|s| EntityBindings::new(s.placement(), s.bindings(doc, id)))
+            .filter(|b| !b.is_empty());
+        let lock_of = |key: Key| bindings.as_ref().and_then(|b| b.lock(kind, key));
+        let vertex_rows = bindings
+            .as_ref()
+            .map(|b| b.vertex_rows(geom))
+            .unwrap_or_default();
+        let editable = !input.busy;
         if !editable {
             self.discard_edit();
+        }
+        // 編集中の項目が束縛で決まるようになっていたら（念のため。束縛はコマンドでしか変わらず、
+        // コマンド実行中は上で捨てている）、打ちかけの値で確定しない。
+        if self
+            .editing
+            .is_some_and(|e| e.id == id && lock_of(Key::Number(e.field)).is_some())
+        {
+            self.discard_edit();
+        }
+        let lock_of_item =
+            |item: &properties::Item| item.editor.and_then(|e| lock_of(editor_key(e)));
+        let any_locked = properties::items(geom, doc.definitions())
+            .iter()
+            .any(|item| lock_of_item(item).is_some());
+        if any_locked || !vertex_rows.is_empty() {
+            ui.colored_label(BOUND_COLOR, BOUND_NOTE);
         }
         // 古い理由（図面が変わった後、別の図形を選んだ後）は出さない。
         if self
@@ -358,7 +465,6 @@ impl PropertiesPanel {
             self.note = None;
         }
 
-        let geom = &entity.geom;
         let target = Target { doc, id, geom };
         // ドラッグ中は、表示だけの項目（円の直径・円周、円弧の掃引角・弧長、線分の中点など）も
         // 仮の形から出す。図形は仮の形に変わって見えるのに、数字だけ元のままになるのを防ぐ。
@@ -371,15 +477,17 @@ impl PropertiesPanel {
             })
             .unwrap_or(geom);
         let mut has_number = false;
-        egui::Grid::new(("properties_items", kind_of(geom) as u8))
+        egui::Grid::new(("properties_items", kind as u8))
             .num_columns(2)
             .min_col_width(LABEL_WIDTH)
             .spacing(GRID_SPACING)
             .show(ui, |ui| {
                 for item in properties::items(shown_geom, doc.definitions()) {
+                    // 項目の種類と並びは仮の形でも同じ（同じ種類の図形なので）。
+                    let lock = lock_of_item(&item);
                     ui.add(egui::Label::new(item.label).selectable(false));
-                    let key = match (item.editor, editable) {
-                        (Some(Editor::Number(field, value)), true) => {
+                    let key = match (item.editor, editable, lock) {
+                        (Some(Editor::Number(field, value)), true, None) => {
                             let step = match field {
                                 Field::Scale => SCALE_STEP,
                                 f if f.is_angle() => ANGLE_STEP,
@@ -389,15 +497,12 @@ impl PropertiesPanel {
                             has_number = true;
                             Some(Key::Number(field))
                         }
-                        (Some(Editor::Toggle(toggle, value)), true) => {
+                        (Some(Editor::Toggle(toggle, value)), true, None) => {
                             self.toggle_field(ui, target, toggle, value, commands);
                             Some(Key::Toggle(toggle))
                         }
-                        _ => {
-                            ui.add(
-                                egui::Label::new(egui::RichText::new(item.value).monospace())
-                                    .selectable(false),
-                            );
+                        (_, _, lock) => {
+                            show_value(ui, item.value, lock.as_ref());
                             None
                         }
                     };
@@ -418,6 +523,12 @@ impl PropertiesPanel {
                         );
                         ui.end_row();
                     }
+                }
+                // ポリラインの束縛された頂点（頂点はパネルの項目に無いので、表示だけの行を足す）。
+                for row in vertex_rows {
+                    ui.add(egui::Label::new(row.label).selectable(false));
+                    show_value(ui, row.value, Some(&row.lock));
+                    ui.end_row();
                 }
             });
         // 数値の欄があるときだけ（ポリラインはチェックボックスだけなので出さない）。

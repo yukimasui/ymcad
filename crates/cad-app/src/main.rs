@@ -18,6 +18,7 @@ mod input;
 mod jp_font;
 mod layer_panel;
 mod properties;
+mod properties_bind;
 mod properties_edit;
 mod properties_panel;
 mod render;
