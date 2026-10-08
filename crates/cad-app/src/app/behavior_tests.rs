@@ -17,6 +17,7 @@ use crate::cmdline::LineKind;
 
 mod hover;
 mod properties;
+mod select_all;
 mod trim_preview;
 
 /// 画面の大きさ [px]。
@@ -2912,14 +2913,59 @@ fn ribbon_layer_keeps_the_running_polyline() {
     );
 }
 
+/// ホームのボタンが全部見える幅 [px]。
+///
+/// Issue #34 段階 3 で「選択」グループ（SELECTALL）を末尾に足して、ホームの並びが約 1310px になり、
+/// 1280px では収まらなくなった（[`only_buttons_with_a_shortcut_are_past_the_edge_at_1280`]）。
+/// 収まる幅での振る舞いはこの幅で確かめる。
+const RIBBON_FITS_WIDTH: f32 = 1400.0;
+
+/// [`RIBBON_FITS_WIDTH`] の幅のアプリ。
+fn app_where_the_ribbon_fits() -> Harness<'static, CadApp> {
+    let mut h = app();
+    h.set_size(egui::vec2(RIBBON_FITS_WIDTH, SCREEN.y));
+    settle(&mut h);
+    h
+}
+
+/// 1280px では、ホームの末尾の PROPERTIES と SELECTALL だけが「›」の帯の下か表示範囲の外にあり、
+/// ほかのボタンはすべて帯にかからずに見えている。
+///
+/// はみ出すと両端に帯の幅の余白が付くので、末尾の SELECTALL だけでなく PROPERTIES も帯の下になる。
+/// どちらもキー（Ctrl+1 / Ctrl+A）でも使えるので、送った先にあっても困りにくい（ADR-0044）。
+/// ホームにボタンを足して、キーの無いボタンまで 1280px で隠れるようになったら、ここで気づける。
+#[test]
+fn only_buttons_with_a_shortcut_are_past_the_edge_at_1280() {
+    let mut h = app();
+    h.set_size(egui::vec2(1280.0, SCREEN.y));
+    settle(&mut h);
+    let probe = h.state().ribbon.probe().clone();
+    assert_eq!(probe.overflow, (false, true), "右へ送れる");
+    let viewport = probe.viewport.expect("リボン");
+    let hidden: Vec<&str> = ribbon_buttons(&h)
+        .iter()
+        .filter(|b| !b.quick)
+        .filter(|b| {
+            !viewport.contains_rect(b.rect)
+                || probe
+                    .hints
+                    .iter()
+                    .flatten()
+                    .any(|band| band.intersects(b.rect))
+        })
+        .map(|b| b.name)
+        .collect();
+    assert_eq!(hidden, vec!["PROPERTIES", "SELECTALL"]);
+}
+
 /// 幅が足りないときだけ、送れる側の端に印が出る。
 #[test]
 fn overflow_hints_follow_the_scroll_position() {
-    let mut h = app();
+    let mut h = app_where_the_ribbon_fits();
     assert_eq!(
         h.state().ribbon.probe().overflow,
         (false, false),
-        "1280px では収まる"
+        "{RIBBON_FITS_WIDTH}px では収まる"
     );
 
     h.set_size(egui::vec2(800.0, 600.0));
@@ -3107,16 +3153,20 @@ fn edge_buttons_are_clear_of_the_hints_at_both_ends() {
     );
 }
 
-/// はみ出していない幅（1280px のホーム）では、帯も両端の余白も出さない。
+/// はみ出していない幅（[`RIBBON_FITS_WIDTH`] のホーム）では、帯も両端の余白も出さない。
 ///
 /// 余白は「はみ出している間だけ」足す（端まで送ったとき端のボタンを帯から出すため）。
 /// 常に足すように壊しても他のテストは通ってしまい、収まる幅で並びが 28px 右へずれても
 /// 気づけなかった（PR #32 のコード再レビュー）。
 #[test]
 fn no_hints_or_padding_when_the_ribbon_fits() {
-    let h = app();
+    let h = app_where_the_ribbon_fits();
     let probe = h.state().ribbon.probe().clone();
-    assert_eq!(probe.overflow, (false, false), "前提: 1280px では収まる");
+    assert_eq!(
+        probe.overflow,
+        (false, false),
+        "前提: {RIBBON_FITS_WIDTH}px では収まる"
+    );
     assert!(
         probe.hints.iter().all(Option::is_none),
         "帯は両方とも無い: {:?}",

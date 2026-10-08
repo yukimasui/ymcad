@@ -447,7 +447,12 @@ impl Session {
     /// 文字列が確定された場合。
     fn handle_text(&mut self, text: &str, doc: &mut Document) {
         if self.awaiting_selection {
-            // 選択待ち中は文字入力を受け付けない（誤操作を防ぐ）。
+            // 全選択だけは選択待ちのまま受け付ける（Ctrl+A と同じ。ERASE → SELECTALL → Enter で
+            // 全部を消せる）。ほかの文字入力は受け付けない（誤操作を防ぐ）。
+            if tools::immediate(text) == Some(Immediate::SelectAll) {
+                self.select_all(doc);
+                return;
+            }
             self.cmdline
                 .error("選択中です。オブジェクトをクリックするか Enter で確定してください");
             return;
@@ -520,13 +525,15 @@ impl Session {
     /// - 履歴に `> LINE` を残し、空 `Enter` での再実行の対象にする（`start` が覚える）
     /// - コマンドラインに打ちかけの文字があれば捨てる。押したコマンドと無関係なので
     ///
-    /// 例外が 2 つある（PR #32 のレビュー）。
+    /// 例外がある（PR #32 のレビューほか）。
     /// - **変換中（IME）は何もしない。** バッファには未確定の文字列が入っていて、捨てると
     ///   入力欄が「変換中」のまま空になり、以後の Enter が効かなくなる（ADR-0002）。
     ///   確定か取り消しを促すエラーだけを出す
     /// - **パネルを開閉するだけのコマンド（LAYER / COMPONENTS / PROPERTIES）は実行中のコマンドを中断しない**
     ///   （[`Immediate::keeps_running_command`]）。実行中のツール・選択・打ちかけの文字は
     ///   そのままで、再実行の対象も実行中のコマンドのまま変えない
+    /// - **選択待ち（「オブジェクトを選択」）の SELECTALL は中断せずに選び足す**（Ctrl+A と同じ。
+    ///   ADR-0044）。点や値の入力中に押したときは、ほかのボタンと同じく中断してから全選択する
     ///
     /// 入口の関係:
     /// - コマンドラインで打った名前 … `handle_submission` → `handle_text` → [`Self::start`]
@@ -540,7 +547,13 @@ impl Session {
             return;
         }
         let busy = self.tool.is_some() || self.awaiting_selection;
-        if let Some(cmd) = tools::immediate(name).filter(|c| busy && c.keeps_running_command()) {
+        // 選択待ちの SELECTALL は中断せずに選び足す（Ctrl+A・打った名前と同じ。ADR-0044）。
+        // 中断すると、ERASE を始めてから押したときに ERASE が消えてしまう。
+        let selects_into_waiting =
+            |c: &Immediate| *c == Immediate::SelectAll && self.awaiting_selection;
+        if let Some(cmd) = tools::immediate(name)
+            .filter(|c| busy && (c.keeps_running_command() || selects_into_waiting(c)))
+        {
             self.cmdline.push_line(LineKind::Input, format!("> {name}"));
             self.run_immediate(cmd, doc);
             return;
@@ -617,6 +630,10 @@ impl Session {
             }
             Immediate::PropertiesPanel => {
                 self.ui_actions.push(UiAction::TogglePropertiesPanel);
+                return;
+            }
+            Immediate::SelectAll => {
+                self.select_all(doc);
                 return;
             }
             Immediate::EndComponentEdit => {
@@ -819,6 +836,49 @@ impl Session {
         }
     }
 
+    /// いま全選択（Ctrl+A / SELECTALL）が効くか。待機中と選択待ち（「オブジェクトを選択」）だけ真。
+    ///
+    /// 点や値の入力中・図形を指す段階（TRIM など）では効かない（Issue #34 ユーザー判断 3）。
+    /// クリックが選択として扱われる段階（[`PickStage::Select`]）と同じ。
+    #[must_use]
+    pub fn can_select_all(&self) -> bool {
+        self.pick_stage() == PickStage::Select
+    }
+
+    /// 選べる図形をすべて選択に足し、選んだ数を案内する（Ctrl+A / SELECTALL の唯一の入口）。
+    ///
+    /// 対象はクリックで拾える図形と同じ判定（`selection::selectable_ids`）。非表示・ロックされた
+    /// レイヤの図形は入らず、グループのうちロック・非表示の一員も入らない（Issue #51 案 A）。
+    /// インプレース編集中に薄く表示されている図形も入る（クリックで拾えるので。ユーザー判断 6）。
+    ///
+    /// 選択は UI の状態なので `Command` にはしない（図面も Undo の履歴も変えない）。
+    /// 選択待ちなら選択待ちのまま（Enter で確定すると ERASE などが全部に効く）。
+    /// 効かない段階（[`Self::can_select_all`] が偽）では何もせず `false` を返す。
+    pub fn select_all(&mut self, doc: &Document) -> bool {
+        if !self.can_select_all() {
+            return false;
+        }
+        let mut selected = 0;
+        for id in selection::selectable_ids(doc) {
+            self.selection.insert(id);
+            selected += 1;
+        }
+        let excluded = doc.entities().len().saturating_sub(selected);
+        let note = if excluded > 0 {
+            format!("（非表示・ロック中のレイヤの {excluded} 個は除く）")
+        } else {
+            String::new()
+        };
+        if selected == 0 {
+            self.cmdline
+                .info(format!("全選択: 選べるオブジェクトがありません{note}"));
+        } else {
+            self.cmdline
+                .info(format!("全選択: {selected} 個のオブジェクトを選択{note}"));
+        }
+        true
+    }
+
     /// キャンバス上で矩形ドラッグによる選択が行われた。
     pub fn handle_rect_select(
         &mut self,
@@ -862,6 +922,9 @@ impl Session {
         self.feed_tool(StepInput::SelectionReady, doc);
     }
 }
+
+#[cfg(test)]
+mod select_all_tests;
 
 #[cfg(test)]
 mod tests {
