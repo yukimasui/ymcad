@@ -4,8 +4,8 @@ LLM（Claude Code などの MCP クライアント）が、ymcad の図面ファ
 描いて変え、保存できるようにするサーバーです。標準入出力で JSON-RPC を話します（1 行 1 メッセージ）。
 GUI のアプリ（`cad-app`）には触りません。
 
-> **段階 1b（作図・変更・レイヤ）と 1c（描画）までの内容です。** コンポーネントの操作（1d）は
-> 後の段階で足します（Issue #70）。
+> **段階 1（1a 骨組み・1b 作図と変更・1c 描画・1d コンポーネント）の内容です**（Issue #70）。
+> 起動中のアプリとつなぐ段階 2 は別の Issue で扱います。
 > 設計判断は `docs/DECISIONS.md` の ADR-0046。
 
 ## ビルド
@@ -52,6 +52,12 @@ Claude Code 2.1.294 から `--mcp-config` でつなぎ、`sample.ymc`（`write_s
 半径 `"25*1.5"`（式の文字列）の円を 1 回の `add_entities` で描き、円を `move_entities` の `copy: true` で複製して
 `house.ymc` へ保存させた。保存したファイルは `validate_ymc.py --expect polyline=1,circle=2` に通った。
 
+段階 1d（2026-10-09）: 同じく Claude Code 2.1.294（haiku）から、`define_component`（線分と円の「窓」）→
+`set_component_params`（幅: number・既定 100・範囲 10〜500）→ `bind`（線分の `end.x` = `幅`）→
+`insert_component`（`params: {幅: 200}`）→ `set_instance_params`（幅 300）→ `render`（PNG）で線分が約 300 に伸びたことを
+読み取らせ、`window.ymc` へ保存させた。保存したファイルは `validate_ymc.py --expect line=1,circle=1,instance=1` に通った
+（定義 1 件・パラメータ 1 件・束縛 1 件）。
+
 ## 約束ごと
 
 | 項目 | 約束 |
@@ -67,7 +73,23 @@ Claude Code 2.1.294 から `--mcp-config` でつなぎ、`sample.ymc`（`write_s
 | 結果 | 成功は `structuredContent`（オブジェクト）と、同じ JSON の text の両方で返します |
 | 図面の変更 | 図面を変える道具は、**1 回の呼び出しで Undo 1 回ぶん**（`undo` の 1 回 = 呼び出し 1 回）。**1 つでも不正な値があれば何も変えません**（一部だけ処理しない） |
 | 編集できない図形 | **非表示・ロック中のレイヤの図形**を対象にすると、呼び出しごと拒みます（アプリでも選べない図形なので）。置く・移す先のレイヤも同じ。`update_layer` で表示する・ロックを外してから |
-| 新しい図形の ID | `add_entities` は `ids`、複製（`copy` / `keep_original`）は `created` に、入力と同じ順で返します。**`undo` の後に `redo` すると、作り直された図形の ID は変わります**（取り消してやり直した図形は新しく作られるため。消した図形を `undo` で戻すと同じ ID です） |
+| 新しい図形の ID | `add_entities` は `ids`、複製（`copy` / `keep_original`）は `created` に、入力と同じ順で返します。**`undo` の後に `redo` すると、作り直された図形の ID は変わります**（取り消してやり直した図形は新しく作られるため。消した図形を `undo` で戻すと同じ ID です）。下の「redo で ID が変わることの影響」も読んでください |
+| インスタンスの ID | `insert_component` の `id` と `define_component` の `instance` は、**`undo` → `redo` でも同じ ID** です（この 2 つの道具の中で ID を保っています） |
+
+### redo で ID が変わることの影響（Issue #92）
+
+cad-core の `AddEntities`（`add_entities` と複製）と `AddLayer`（`add_layer`）は、やり直しのたびに新しい ID を振ります
+（アプリでも同じ。[Issue #92](https://github.com/yukimasui/ymcad/issues/92) で直す予定）。そのため、**作った図形・レイヤを
+後の呼び出しが使っていると、`redo{steps: 2}` のようなまとめてのやり直しが壊れます**。
+
+- **後の呼び出しのやり直しが失敗する**: `add_entities` → その ID で `move_entities` → `undo{steps:2}` → `redo{steps:2}` は、
+  2 回目のやり直しが「エンティティが見つかりません」で失敗します。失敗した操作はやり直しの列から消え、もう戻せません
+- **図形が黙って存在しないレイヤに付く**: `add_layer` → そのレイヤに `add_entities` → `undo{steps:2}` → `redo{steps:2}` は、
+  失敗を返さずに図形の `layer` が `null` になります（どの道具からも変えられず、保存するとレイヤ 0 として書かれます）
+
+避け方: 作ってすぐ後の操作を取り消したいときは、`undo` / `redo` をまたがず、消して作り直す（`delete_entities` →
+`add_entities`）か、`undo` の後は `redo` せずに呼び直してください。`redo` した後は `list_entities` / `list_layers` で
+ID とレイヤを取り直してください。`insert_component` / `define_component` で置いたインスタンスはこの影響を受けません。
 
 ## 道具
 
@@ -82,7 +104,7 @@ Claude Code 2.1.294 から `--mcp-config` でつなぎ、`sample.ymc`（`write_s
 | `list_entities{layer?, type?, bbox?, limit?, offset?}` | 図形の要約（id・type・layer・bbox）の一覧。既定 100 件・上限 1000 件。続きは `next_offset` | 読むだけ |
 | `get_entities{ids}` | 図形の全体（レイヤ・色・グループ・形）。1 つでも使えない ID があれば全体を拒む | 読むだけ |
 | `list_layers` | レイヤ（名前・色・表示・ロック・線種・現在か・図形の数） | 読むだけ |
-| `list_components` | コンポーネント定義（パラメータ・束縛の式・インスタンスの数）。束縛の対象 `field` は図形の JSON の項目名（`start.x`・`radius`・`vertices[3].y` など） | 読むだけ |
+| `list_components{name?, contents?}` | コンポーネント定義（パラメータ・束縛の式・インスタンスの数）。束縛の対象 `field` は図形の JSON の項目名（`start.x`・`radius`・`vertices[3].y` など）。`contents: true` で定義の中の図形（`index` と `geometry`）も返す | 読むだけ |
 | `undo{steps?}` / `redo{steps?}` | 取り消し・やり直し（既定 1 回、上限 256 回。尽きたら止まる） | 図面を変える |
 | `render{format?, width?, height?, region?, background?}` | 図面を PNG / SVG にして返す（下の「描画」） | 読むだけ |
 
@@ -112,13 +134,72 @@ Claude Code 2.1.294 から `--mcp-config` でつなぎ、`sample.ymc`（`write_s
 | `xline`（無限の作図線） | `origin` と、`angle`（度）・`direction`・`through`（もう 1 つの通過点）のどれか |
 | `polyline` | `vertices`（点の配列）, `closed`（省略時 `false`。閉じるなら頂点 3 個以上） |
 
-インスタンス（`instance`）は `add_entities` では置けません（コンポーネントの道具で置く。段階 1d）。
+インスタンス（`instance`）は `add_entities` では置けません（`insert_component` で置く）。
 `modify_entities` では配置（`origin`・`rotation`・`scale`・`flipped`）を変えられます。
 参照するコンポーネントとパラメータの上書き（`overrides`）は変えられません（同じ値を渡し返すのはかまいません）。
+上書きは `set_instance_params`、別のコンポーネントにするなら `delete_entities` と `insert_component` で。
 
 拒むもの: 長さ 0 の線分・半径 0 以下の円・一直線上の 3 点の円弧・頂点の足りないポリライン・NaN・無限大・
 絶対値が 10 億（`1e9`）を超える座標、変形した結果がこれらになるもの、種類の変更、ポリラインの頂点の数の変更
 （作り直すなら `delete_entities` と `add_entities`。ID は変わります）。
+
+### コンポーネント（段階 1d）
+
+コンポーネントはパラメトリックなブロックです。定義は**ふつうの図形 + 疎な式の束縛**（ADR-0029）で、
+パラメータは型付き（数値・真偽・選択）、既定値と束縛は**テキストの式**（ADR-0031。式の中の角度は度）。
+インスタンスはパラメータを個別に上書きでき、上書きしていないパラメータは定義の既定値に従います。
+
+| 道具 | 内容 | Undo の名前 |
+|---|---|---|
+| `define_component{name, origin, from_ids? \| entities?, replace_with_instance?}` | 定義を作る。`from_ids` なら既定で元の図形を消し、同じ場所にインスタンス 1 つを置く（アプリの COMPONENT と同じ。`instance` に ID）。`entities`（`add_entities` と同じ形。`instance` で入れ子も可）なら定義だけ。返り値の `contents` は中身の `index` と種類 | `COMPONENT` |
+| `set_component_params{component, params}` | パラメータの宣言を**丸ごと置き換える**（下の表）。使われなくなるインスタンスの上書きは `warnings` | `PARAM` |
+| `bind{component, entity_index, slot, expr}` | 定義の中の図形 1 項目に式を束縛する（同じ項目は置き換え）。`slot` は `list_components` の `field` と同じ綴り | `BIND` |
+| `insert_component{component, origin, rotation_deg?, scale?, flipped?, layer?, params?}` | インスタンスを置く。`params` の上書きも同じ 1 回で | `INSERT` |
+| `set_instance_params{id, values}` | インスタンスの上書きを変える。値を `null` にすると既定値へ戻す | `PSET` |
+
+`set_component_params` の `params` の各要素（`list_components` の `params` の形 ── `choices`・`range`・`'候補'` の既定値 ── も
+そのまま渡せます）:
+
+| 項目 | 内容 |
+|---|---|
+| `name` | 式の中でそのまま書ける名前（英字・日本語・下線で始め、空白・記号・全角英数字なし。`真`・`if`・`sin` などは不可） |
+| `type` | `number` / `bool` / `choice` |
+| `default` | `number`: 数値か式（他のパラメータを参照してよい。例 `"幅 / 2"`）。`bool`: `true` / `false` か式。`choice`: 候補の名前（省くと最初の候補） |
+| `min` / `max` | `number` の範囲（両端を含む。両方そろえる） |
+| `options` | `choice` の候補（引用符・前後の空白・全角の記号を含まない文字列） |
+
+`bind` の `slot`（角度は度）:
+
+| 図形 | 項目 |
+|---|---|
+| `line` | `start.x`, `start.y`, `end.x`, `end.y` |
+| `circle` | `center.x`, `center.y`, `radius` |
+| `arc` | `center.x`, `center.y`, `radius`, `start_angle`, `end_angle` |
+| `xline` | `origin.x`, `origin.y`, `angle` |
+| `polyline` | `vertices[i].x`, `vertices[i].y` |
+| `instance`（入れ子） | `origin.x`, `origin.y`, `rotation`, `scale` |
+
+上書きの値（`insert_component` の `params`・`set_instance_params` の `values`）は**宣言の型で読みます**: 数値は JSON の数値か
+式の文字列（パラメータは使えない）、真偽は `true` / `false`、選択は候補の名前。
+
+拒むもの: 既にある名前・使えない名前、宣言されていないパラメータの参照、既定値どうしの循環、型の違う既定値・範囲の外の既定値、
+束縛が使っているパラメータを消す・数値でなくすこと、図形に合わない `slot`・範囲の外の `entity_index`・数値にならない式、
+型・範囲・候補に合わない上書き、非表示・ロック中のレイヤの図形（`from_ids`・`set_instance_params` の対象・置く先）。
+既定のパラメータで使えない値（半径が 0 以下など）になる束縛は拒まず `warnings` に出します（そのインスタンスではその項目が定義のままになる）。
+自分自身を入れ子にする定義は作れません（作る前なので「コンポーネントがありません」で拒みます）。
+
+例（窓: 幅で線分の長さが変わる）:
+
+```json
+{"name": "define_component", "arguments": {"name": "窓", "origin": [0, 0], "entities": [
+  {"type": "line", "start": [0, 0], "end": [100, 0]}, {"type": "circle", "center": [50, 20], "radius": 10}]}}
+{"name": "set_component_params", "arguments": {"component": "窓", "params": [
+  {"name": "幅", "type": "number", "default": 100, "min": 10, "max": 500},
+  {"name": "向き", "type": "choice", "options": ["左", "右"]}]}}
+{"name": "bind", "arguments": {"component": "窓", "entity_index": 0, "slot": "end.x", "expr": "幅"}}
+{"name": "insert_component", "arguments": {"component": "窓", "origin": [300, 0], "params": {"幅": 200, "向き": "右"}}}
+{"name": "set_instance_params", "arguments": {"id": "<insert_component の id>", "values": {"幅": 150, "向き": null}}}
+```
 
 各道具の引数の詳しい説明は `tools/list` の `description` / `inputSchema` にあります（日本語）。
 **知らない引数を渡すと、動かす前に拒みます**（綴り違いのフラグを黙って無視しないため）。
@@ -130,7 +211,7 @@ Claude Code 2.1.294 から `--mcp-config` でつなぎ、`sample.ymc`（`write_s
 | 引数 | 内容 |
 |---|---|
 | `format` | `png`（既定。`image` ブロック）/ `svg`（`text` ブロック）/ `both`（image と text） |
-| `width` / `height` | 画像の大きさ px。既定 1024 × 768、**一辺 16〜4096**（超えると拒みます） |
+| `width` / `height` | 画像の大きさ px。既定 1024 × 768、**一辺 16〜4096**（超えると拒みます）。LLM が見るなら 1024〜1568 px で十分。Claude の API は長辺が約 1568 px を超える画像を縮小して読む |
 | `region` | 見せるモデルの範囲 `{"min": [x, y], "max": [x, y]}`。幅と高さは 0 より大きく。省くと、表示中の図形（インスタンスの中身を含む。作図線は除く）の範囲に 5% の余白を付けた範囲 |
 | `background` | `dark`（既定。アプリと同じ暗い背景 `#0a0a0a`）/ `light`（白。このとき白（ACI 7）の線は黒で描く） |
 
@@ -177,7 +258,7 @@ Claude Code 2.1.294 から `--mcp-config` でつなぎ、`sample.ymc`（`write_s
 - **図面を変える道具が内部エラー（panic）で止まったら、その図面は保存できなくなる**（図面が書きかけかもしれないため）。
   `drawing_info` の `poisoned` が `true` になる。`open_drawing` / `new_drawing` で外れる
 - 上限: 1 行 4 MiB（超えた行は読み捨てて `-32700`）、開くファイル 64 MiB、一覧 1000 件、ID 1000 個、undo / redo 256 回、
-  1 回で描く・変える図形 1000 個、ポリラインの頂点 10,000 個、図面の図形 100 万個、座標の絶対値 10 億、式 1 KiB、
+  1 回で描く・変える図形 1000 個（コンポーネントの中身も）、パラメータ 256 個・選択の候補 256 個、コンポーネント名・パラメータ名・候補 255 文字、ポリラインの頂点 10,000 個、図面の図形 100 万個、座標の絶対値 10 億、式 1 KiB、
   レイヤ名 255 文字、画像の一辺 4096 px（最大でも 4096 × 4096 × 4 = 64 MiB の画素）、PNG 3.5 MiB・SVG 256 KiB（`render` の返す大きさ）、
   **道具の結果（JSON の text）256 KiB**（読むだけの道具は超えたら `isError` で絞り込みを促す。図面を変える道具は
   変更を済ませたうえで結果だけ省く。`render` の画像・SVG のブロックはこの数に入らない）
@@ -213,7 +294,8 @@ printf '%s\n' \
 cargo test -p cad-mcp        # 単体（Server::handle を直接）と結合（バイナリを起動）
 
 # Python の標準ライブラリだけのクライアントで通しで動かし、保存したファイルを validate_ymc.py に通す（CI でも実行）。
-# render の SVG（xml.etree で解析）と PNG（シグネチャ・IHDR・CRC・IDAT）もここで検査する
+# render の SVG（xml.etree で解析）と PNG（シグネチャ・IHDR・CRC・IDAT）、コンポーネントの通し
+# （定義 → パラメータ → 束縛 → 上書き付きの配置 → 上書きの変更 → components.ymc。--expect で instance= の件数まで）もここで検査する
 mkdir -p /tmp/mcp
 cargo run -p cad-core --example write_sample -- /tmp/mcp/sample.ymc
 cargo run -p cad-core --example write_sample -- /tmp/mcp/sample.dxf

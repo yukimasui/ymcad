@@ -3694,9 +3694,9 @@ Shift を見ない、基点を元の位置にする、四分点にも直交・�
 
 ## ADR-0046: MCP サーバーは別クレート `cad-mcp` に置き、SDK を使わず標準入出力の JSON-RPC を自前で書く
 
-- **状態**: 確定（段階 1a・1b・1c。推奨で決めた点はユーザーの見直し待ち: Issue #70 の 2026-10-08 夜の計画コメント「推奨で決めたこと」1〜14）
+- **状態**: 確定（段階 1a・1b・1c・1d = 段階 1 の完了。推奨で決めた点はユーザーの見直し待ち: Issue #70 の 2026-10-08 夜の計画コメント「推奨で決めたこと」1〜14）
 - **日付**: 2026-10-08
-- **関連**: [Issue #70](https://github.com/yukimasui/ymcad/issues/70)、[ADR-0004](#adr-0004-エンティティストアは-slotmap-ではなく自前のアリーナにする)、[ADR-0026](#adr-0026-ネイティブ形式-ymc-を導入しdxf-を交換専用に降格する)、[ADR-0027](#adr-0027-保存は一時ファイル--rename-でアトミックに行う)、[ADR-0040](#adr-0040-既存の図形の形は-replacegeometries-で丸ごと置き換え同じ種類どうしに限る)
+- **関連**: [Issue #70](https://github.com/yukimasui/ymcad/issues/70)、[Issue #92](https://github.com/yukimasui/ymcad/issues/92)、ADR-0029〜0033（コンポーネント）、[ADR-0004](#adr-0004-エンティティストアは-slotmap-ではなく自前のアリーナにする)、[ADR-0026](#adr-0026-ネイティブ形式-ymc-を導入しdxf-を交換専用に降格する)、[ADR-0027](#adr-0027-保存は一時ファイル--rename-でアトミックに行う)、[ADR-0040](#adr-0040-既存の図形の形は-replacegeometries-で丸ごと置き換え同じ種類どうしに限る)
 - （ADR-0045 は Issue #30 グリップが使うので、番号は 0046。）
 
 ### 背景
@@ -3995,3 +3995,63 @@ ADR-0040）は、作り直し方まで書いた説明で先に拒む。`get_enti
 わざと壊して落ちることを確かめたもの: `MacroCommand` を外す（履歴が 3 つ増えて落ちる）・ロック中と非表示の検査・
 変形の事前検査・同名レイヤの検査・新しい ID の拾い方・結果の大きさの上限・panic 後の保存拒否・開いた DXF への
 path なしの保存・`recheck_for_write`・`float_roundtrip`。
+
+### 段階 1d: コンポーネントの道具（2026-10-09）
+
+道具: `define_component` / `set_component_params` / `bind` / `insert_component` / `set_instance_params`
+（一覧と引数は `docs/MCP.md`「コンポーネント」）。決定 11・12・13 の約束（apply 1 回・検査は先に・ロック中と非表示の拒否・
+数値は式の文字列も可）はそのまま守る。`list_components` に `name` と `contents`（定義の中の図形）を足した。
+cad-core・cad-app は変えていない。
+
+**決定 18: インスタンスを置くのは cad-mcp の中の 1 つのコマンド（`PlaceInstance`）。redo では初回と同じ ID で戻す。**
+
+- `MacroCommand` の中では前のコマンドの結果を後へ渡せない。`define_component` の置き換えは、アプリの COMPONENT と
+  同じく `DefineComponent` + `DeleteEntities` + **定義を名前で引き直して置く**コマンドに束ねる（`InsertNewlyDefined` の
+  橋渡しを cad-mcp に複製。推奨 10）。`insert_component` は既にある定義の ID で持つ（定義の ID は `DefineComponent` も
+  `DeleteDefinition` も元の ID で戻すので undo / redo で変わらない。名前で持つと、将来アプリから名前を変えたときに
+  redo で別の定義に付きうる）
+- 上書きは同じコマンドの中で、`InsertInstance` が作った図形の ID に `SetInstanceOverride` を順に掛ける
+  （型と範囲の検査を cad-core と同じにするため、コマンドを中で使う）。途中で失敗したら置いた図形を外して失敗する
+- **取り消しでは外した図形を取っておき、やり直しでは `EditCtx::restore_entity` で初回の ID のまま戻す。**
+  `InsertInstance` は適用のたびに新しいスロットへ入れるので、そのままだと返した ID を使う後の呼び出し
+  （`set_instance_params` など）の redo が失敗する（Issue #92 と同じ根）。置いたインスタンスはこの道具の返り値の ID で
+  後から触られるのが普通なので、ここだけは ID を保つ。やり直しの前に、名前（または ID）で引き直した定義が取っておいた
+  図形の参照先と同じことを確かめる
+- 採らなかった案: cad-core の `InsertInstance` を直す（Issue #92 の範囲。cad-core の挙動の変更はユーザーの確認待ち）。
+  `add_entities` の ID が redo で変わることはこの段階では変えず、影響と避け方を `docs/MCP.md` に書いた
+
+**決定 19: 式・型・範囲の検査は cad-core のコマンドと二重にし、名前と値を入れた日本語で先に説明する。**
+`SetDefinitionParams` などの失敗は「値がパラメータの型または範囲に合いません」のような固定の文で、どのパラメータの
+どの値かが分からない。同じ検査（参照先・`param_cycle`・既定値の型と範囲・束縛を消す / 数値でなくす・上書きの型と範囲）を
+適用の前に行い、失敗の文に名前・式・範囲を入れる。コマンドの検査は最後の防波堤として残る。
+
+**決定 20: 入力の細部。**
+- **パラメータ名は式の中でそのまま読める名前に限る**（`parse(名前) == Var(名前)`）。アプリの PARAM は名前を確かめないが、
+  空白・記号を含む名前、`真`・`if`・`sin` のような語、全角英数字（式の中では半角に直される）を宣言すると、どの束縛からも
+  参照できない。選択肢の候補も `'候補'` として読み戻せるもの（引用符・全角の記号を含まない）に限る
+- `set_component_params` は宣言を**丸ごと置き換える**（`SetDefinitionParams` と同じ）。`list_components` の出力
+  （`choices`・`range`・`'候補'` の形の既定値）もそのまま受け、渡し返しても図面は 1 バイトも変わらない（テストあり）。
+  範囲は両端を揃えて指定させる（片側だけの範囲は cad-core が持てない）
+- 上書きの値は**宣言の型で読む**（数値の文字列は式、選択の文字列は候補の名前）。1b の `overrides_from_json` は宣言を
+  見ずに文字列を選択肢として読むが、ここでは宣言があるので型ごとに読み分けられる
+- 使われなくなる上書き（宣言から消えた・新しい型や範囲に合わない）は拒まずに `warnings` で知らせる（アプリも拒まず、
+  その上書きは解決で使われず既定値になる）。既定のパラメータで使えない値（半径 0 以下・形が成り立たない）になる束縛も
+  拒まず `warnings` にする（他の値では成り立つかもしれないため）
+- `define_component` の `entities` の中身はレイヤ 0 に置く（ブロックの中身をレイヤ 0 に置く慣習。描画はインスタンス自身の
+  レイヤで行う）。入れ子のインスタンスの上書きは宣言に照らして確かめる（`geometry_from_json` は型を見ないので）。
+  自分自身を入れ子にする定義は、作る前にはその名前のコンポーネントが無いので拒まれ、循環は作れない
+- `from_ids` の既定は置き換え（`replace_with_instance: true`。アプリの COMPONENT と同じ）。`entities` では置き換える元が
+  無いので `replace_with_instance: true` を拒み、`insert_component` へ案内する
+- 1b で `modify_entities` が拒んでいた `overrides`・`component` の変更、`add_entities` の `instance` は、拒む文で
+  `set_instance_params` / `insert_component` へ案内する
+
+**テスト。** 道具ごとに `test_support::mutate`（履歴 +1・undo でバイト列が適用前と一致・redo で適用後と一致）と
+`rejected`（履歴・版番号・バイト列が不変）。存在しない定義・使えない名前・型の違う既定値・範囲の外・宣言されていない参照・
+既定値の循環・束縛が使うパラメータの削除と型変更・図形に合わないスロット・範囲の外の添字・式の誤りと 0 除算・ロック中と
+非表示・別の起動の ID・自分自身の入れ子を拒む。定義 → パラメータ → 束縛 → 配置 → 上書きを 6 回取り消して 6 回やり直しても
+通り、インスタンスの ID が変わらないこと。`mcp_smoke.py` に同じ通しを足し、`components.ymc` を
+`validate_ymc.py --expect`（`instance=` を含む件数。定義の中身も数える）で照合する。
+
+わざと壊して落ちることを確かめたもの: redo で同じ ID に戻さない（単体 3 本と smoke）・`define_component` を
+`MacroCommand` に束ねない・上書きを掛けない・`set_instance_params` のロック中の検査・回転の度 → ラジアン・上書きの警告・
+名前の橋渡し（最初の定義を使う）・上書きの範囲の検査・パラメータ名の検査。

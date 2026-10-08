@@ -20,8 +20,10 @@ JSON-RPC を話し、保存されたファイルを validate_ymc.py に通す。
 6. root の外・.. を含むパス・上書きの確認・開いた .dxf への path なしの保存が isError になること
 7. 新規図面に、レイヤを作り、図形を描き、変え、動かし・回し・拡大し・鏡に映し（複製も）、
    レイヤを移し、消し、undo / redo し、レイヤを変え・消して edited.ymc へ保存（段階 1b）
-8. stdin を閉じ、正常終了すること。stdout にプロトコル以外が出ていないこと
-9. 保存したファイルを validate_ymc.py に通す（edited.ymc は図形の種類ごとの件数まで）
+8. 新規図面で、図形からコンポーネントを定義 → パラメータ → 束縛 → 上書き付きの配置 →
+   上書きの変更 → undo / redo（置いたインスタンスの ID が変わらないこと）→ components.ymc へ保存（段階 1d）
+9. stdin を閉じ、正常終了すること。stdout にプロトコル以外が出ていないこと
+10. 保存したファイルを validate_ymc.py に通す（edited.ymc・components.ymc は図形の種類ごとの件数まで）
 
 使い方
 ------
@@ -53,6 +55,10 @@ SAMPLE_EXPECT = "arc=1,xline=1,polyline=1,instance=3,circle=2"
 # 段階 1b の通しで描いた図面の中身（edit_session の手順から数えた値）。
 EDITED_EXPECT = "line=5,circle=1,arc=2,xline=0,polyline=2,instance=0"
 
+# 段階 1d の通しで作った図面の中身。validate_ymc.py は定義の中の図形も数えるので、
+# 図面のインスタンス 2 つ + 定義「窓」の中身（線分 1・円 1）。
+COMPONENTS_EXPECT = "line=1,circle=1,arc=0,xline=0,polyline=0,instance=2"
+
 EXPECTED_TOOLS = {
     "new_drawing",
     "open_drawing",
@@ -77,6 +83,12 @@ EXPECTED_TOOLS = {
     "add_layer",
     "update_layer",
     "delete_layer",
+    # 段階 1d
+    "define_component",
+    "set_component_params",
+    "bind",
+    "insert_component",
+    "set_instance_params",
 }
 
 # 図面を変える道具（readOnlyHint が false であること）。
@@ -296,6 +308,81 @@ def edit_session(c: Client) -> None:
     check(saved["entity_count"] == 10 and saved["format"] == "ymc", f"保存: {saved}")
 
 
+def components_session(c: Client) -> None:
+    """段階 1d: 定義 → パラメータ → 束縛 → 上書き付きの配置 → 上書きの変更 → components.ymc へ保存。"""
+    c.ok("new_drawing", {})
+    drawn = c.ok(
+        "add_entities",
+        {"entities": [
+            {"type": "line", "start": [0, 0], "end": [100, 0]},
+            {"type": "circle", "center": [50, 20], "radius": 10},
+        ]},
+    )
+    line, circle = drawn["ids"]
+
+    # 図形からコンポーネントを作ると、元の図形は同じ場所のインスタンス 1 つに置き換わる。
+    defined = c.ok("define_component", {"name": "窓", "origin": [0, 0], "from_ids": [line, circle]})
+    check(defined["removed"] == 2 and defined["instance"], f"define_component: {defined}")
+    check([x["type"] for x in defined["contents"]] == ["line", "circle"], f"contents: {defined}")
+    first = defined["instance"]
+    check(count(c) == 1, "置き換えの後の図形の数")
+    c.fails("get_entities", {"ids": [line]}, "ありません")
+
+    params = c.ok(
+        "set_component_params",
+        {"component": "窓", "params": [
+            {"name": "幅", "type": "number", "default": 100, "min": 10, "max": 500},
+            {"name": "開く", "type": "bool", "default": False},
+            {"name": "向き", "type": "choice", "options": ["左", "右"]},
+        ]},
+    )["component"]["params"]
+    check([p["name"] for p in params] == ["幅", "開く", "向き"], f"params: {params}")
+    check(params[0]["range"] == [10, 500] and params[2]["choices"] == ["左", "右"], f"params: {params}")
+    c.fails("set_component_params", {"component": "窓", "params": [{"name": "a b", "type": "number", "default": 1}]}, "名前")
+
+    bound = c.ok("bind", {"component": "窓", "entity_index": 0, "slot": "end.x", "expr": "幅 * 2"})
+    check(bound["value"] == 200 and bound["binding"]["field"] == "end.x", f"bind: {bound}")
+    c.fails("bind", {"component": "窓", "entity_index": 0, "slot": "radius", "expr": "幅"}, "束縛できません")
+    c.fails("bind", {"component": "窓", "entity_index": 0, "slot": "end.x", "expr": "高さ"}, "高さ")
+
+    # 上書き付きの配置は 1 回の呼び出し = undo 1 回。
+    placed = c.ok(
+        "insert_component",
+        {"component": "窓", "origin": [300, 0], "params": {"幅": 50, "向き": "右"}},
+    )
+    second = placed["id"]
+    check(placed["overrides"] == {"幅": 50, "向き": "右"}, f"insert_component: {placed}")
+    check(placed["params"] == {"幅": 50, "開く": False, "向き": "右"}, f"insert_component: {placed}")
+    c.fails("insert_component", {"component": "窓", "origin": [0, 0], "params": {"幅": 5}}, "範囲")
+    c.fails("insert_component", {"component": "窓", "origin": [0, 0], "params": {"向き": "上"}}, "左 / 右")
+    check(count(c) == 2, "拒まれた配置で図形の数が変わった")
+
+    changed = c.ok("set_instance_params", {"id": second, "values": {"幅": 150, "開く": True, "向き": None}})
+    check(changed["overrides"] == {"幅": 150, "開く": True}, f"set_instance_params: {changed}")
+    # modify_entities では上書きを変えられず、set_instance_params へ案内される。
+    c.fails("modify_entities", {"changes": [{"id": second, "set": {"overrides": {"幅": 20}}}]}, "set_instance_params")
+
+    # まとめて取り消してやり直しても、置いたインスタンスの ID は変わらない（後の呼び出しがその ID を使える）。
+    check(c.ok("undo", {"steps": 2})["undone"] == ["PSET", "INSERT"], "undo の名前")
+    check(count(c) == 1, "undo で配置が消えない")
+    check(c.ok("redo", {"steps": 2})["count"] == 2, "redo が途中で止まった")
+    got = c.ok("get_entities", {"ids": [first, second]})["entities"]
+    check(got[1]["geometry"]["overrides"] == {"幅": 150, "開く": True}, f"redo の後の上書き: {got[1]}")
+    check(got[1]["geometry"]["origin"] == {"x": 300, "y": 0}, f"配置: {got[1]}")
+
+    # 束縛が効いていること: 2 つ目は 幅 150 → 線分の終点 x = 300 + 150 * 2 = 600（束縛が無ければ 400）。
+    # render の既定の範囲は表示中の図形（インスタンスの中身を含む）の範囲に余白を付けたもの。
+    view = c.ok("render", {"format": "svg", "width": 400, "height": 200})
+    check(view["entities_drawn"] == 2, f"render: {view}")
+    check(view["view"]["max"]["x"] >= 600 and view["view"]["min"]["x"] <= 0, f"束縛が効いていない: {view}")
+    listed = c.ok("list_components", {"name": "窓", "contents": True})["components"][0]
+    check(listed["instance_count"] == 2 and len(listed["contents"]) == 2, f"list_components: {listed}")
+    check(listed["bindings"][0]["expr"] == "幅 * 2", f"bindings: {listed}")
+
+    saved = c.ok("save_drawing", {"path": "components.ymc"})
+    check(saved["entity_count"] == 2, f"保存: {saved}")
+
+
 SVG_NS = "{http://www.w3.org/2000/svg}"
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -463,7 +550,7 @@ def run(binary: Path, root: Path) -> list[Path]:
         check(p.is_file(), f"{p} がありません（write_sample で作ってください）")
 
     # 前の実行の出力を消す（残っていると上書きの確認で止まる）。
-    for name in ("from_dxf.ymc", "roundtrip.ymc", "edited.ymc"):
+    for name in ("from_dxf.ymc", "roundtrip.ymc", "edited.ymc", "components.ymc"):
         (root / name).unlink(missing_ok=True)
 
     c = Client(binary, root)
@@ -545,6 +632,7 @@ def run(binary: Path, root: Path) -> list[Path]:
     c.fails("new_drawing", {"bogus": 1}, "bogus")
 
     edit_session(c)
+    components_session(c)
 
     r = c.request("tools/call", {"name": "no_such_tool", "arguments": {}})
     check(r.get("error", {}).get("code") == -32602, f"知らない道具が -32602 でない: {r}")
@@ -559,7 +647,7 @@ def run(binary: Path, root: Path) -> list[Path]:
         roundtrip.read_bytes() == sample_ymc.read_bytes(),
         "開いて保存しただけの .ymc が元とバイト単位で一致しない",
     )
-    return [root / "from_dxf.ymc", roundtrip, root / "edited.ymc"]
+    return [root / "from_dxf.ymc", roundtrip, root / "edited.ymc", root / "components.ymc"]
 
 
 def validate(paths: list[Path]) -> None:
@@ -569,6 +657,8 @@ def validate(paths: list[Path]) -> None:
             args += ["--expect", SAMPLE_EXPECT]
         if p.name == "edited.ymc":
             args += ["--expect", EDITED_EXPECT]
+        if p.name == "components.ymc":
+            args += ["--expect", COMPONENTS_EXPECT]
         done = subprocess.run(args, capture_output=True, text=True)
         check(done.returncode == 0, f"validate_ymc.py が {p} を不合格にした:\n{done.stdout}{done.stderr}")
         print(f"OK: validate_ymc.py {p.name}")

@@ -15,7 +15,7 @@ use crate::convert::{apply_fields, check_extent, geometry_from_json};
 use crate::limits::{MAX_IDS_PER_CALL, MAX_SHAPES_PER_CALL};
 use crate::server::Server;
 
-/// `add_entities` で作れる種類。インスタンスはコンポーネントの道具（段階 1d）で置く。
+/// `add_entities` で作れる種類。インスタンスは `insert_component` で置く。
 const DRAWABLE: [&str; 5] = ["line", "circle", "arc", "xline", "polyline"];
 
 pub(super) const ADD_ENTITIES: Tool = Tool {
@@ -62,7 +62,7 @@ pub(super) const MODIFY_ENTITIES: Tool = Tool {
 項目名は get_entities の geometry と同じ（line: start, end / circle: center, radius / arc: center, radius, start_angle, end_angle か 3 点 start, through, end / \
 xline: origin, angle・direction・through / polyline: vertices, closed / instance: origin, rotation, scale, flipped）。角度は度、数値は式の文字列も可。\
 get_entities の geometry をそのまま set に渡してもよい。変えられないもの: 種類、ポリラインの頂点の数（作り直すなら delete_entities と add_entities）、\
-インスタンスの component と overrides（同じ値なら渡してよい）。非表示・ロック中のレイヤの図形、1 つでも成立しない形があれば何も変えない。",
+インスタンスの component と overrides（同じ値なら渡してよい。上書きは set_instance_params で変える）。非表示・ロック中のレイヤの図形、1 つでも成立しない形があれば何も変えない。",
     schema: || {
         (
             json!({
@@ -117,7 +117,7 @@ pub(super) fn ids_schema(description: &str) -> Value {
 }
 
 /// オブジェクトの配列の引数（必須・1 個以上 `max` 個以下）。
-fn object_list<'a>(
+pub(super) fn object_list<'a>(
     a: &'a Args,
     key: &str,
     max: usize,
@@ -140,7 +140,7 @@ fn object_list<'a>(
 }
 
 /// 問題の一覧を 1 つのエラーにする。
-fn join_problems(problems: Vec<String>, tail: &str) -> Result<(), String> {
+pub(super) fn join_problems(problems: Vec<String>, tail: &str) -> Result<(), String> {
     if problems.is_empty() {
         Ok(())
     } else {
@@ -159,7 +159,7 @@ fn add_entities(s: &mut Server, a: &Args) -> ToolResult {
         let ty = item.get("type").and_then(Value::as_str).unwrap_or_default();
         if ty == "instance" {
             problems.push(format!(
-                "entities[{i}]: インスタンスは add_entities では置けません（コンポーネントの道具で置きます）"
+                "entities[{i}]: インスタンスは add_entities では置けません（insert_component で置きます。パラメータの上書きもそこで渡せます）"
             ));
             continue;
         }
@@ -444,7 +444,7 @@ pub(super) mod tests {
             ),
             (
                 json!({"type": "instance", "component": "X", "origin": [0, 0]}),
-                "インスタンス",
+                "insert_component",
             ),
             (json!({"type": "spline"}), "扱えません"),
             (
@@ -732,19 +732,27 @@ pub(super) mod tests {
             }
         }
 
-        // 上書き・参照先を変えるのは拒む（コンポーネントの道具の役目）。配置は変えられる。
+        // 上書き・参照先を変えるのは拒む（set_instance_params・insert_component の役目）。配置は変えられる。
         let msg = rejected(
             &mut s,
             "modify_entities",
             json!({"changes": [{"id": inst, "set": {"overrides": {"長さ": 50}}}]}),
         );
         assert!(msg.contains("overrides"), "{msg}");
+        assert!(
+            msg.contains("set_instance_params"),
+            "1d の道具へ案内する: {msg}"
+        );
         let msg = rejected(
             &mut s,
             "modify_entities",
             json!({"changes": [{"id": inst, "set": {"component": "NUT"}}]}),
         );
         assert!(msg.contains("コンポーネント"), "{msg}");
+        assert!(
+            msg.contains("insert_component"),
+            "1d の道具へ案内する: {msg}"
+        );
         mutate(
             &mut s,
             "modify_entities",

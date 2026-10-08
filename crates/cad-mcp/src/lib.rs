@@ -88,6 +88,15 @@ pub mod limits {
     /// レイヤ名の長さ（文字数）。
     pub const MAX_LAYER_NAME_CHARS: usize = 255;
 
+    /// コンポーネント名・パラメータ名・選択肢の候補の長さ（文字数）。レイヤ名と同じ。
+    pub const MAX_NAME_CHARS: usize = 255;
+
+    /// 1 つのコンポーネントに宣言できるパラメータの数。
+    pub const MAX_PARAMS: usize = 256;
+
+    /// 選択パラメータの候補の数。
+    pub const MAX_CHOICE_OPTIONS: usize = 256;
+
     /// 道具の結果（JSON の text）の最大バイト数。超えたら `isError` で絞り込みを促す。
     ///
     /// 入力を 1 行 4 MiB で止めるのと対にする。クライアントの側にも出力の上限がある

@@ -261,8 +261,9 @@ pub fn geometry_to_json(g: &Geometry, defs: &DefinitionTable) -> Value {
 /// （[`geometry_to_json`] は両方を出すので、出力をそのまま渡せる）。
 ///
 /// インスタンスの `overrides`（パラメータの上書き）も読む（[`geometry_to_json`] の出力をそのまま
-/// 渡せるように）。**型と範囲はここでは確かめない**。上書きを変える経路はコンポーネントの道具
+/// 渡せるように）。**型と範囲はここでは確かめない**。上書きを変える経路は `set_instance_params`
 /// （`SetInstanceOverride`）で、`ReplaceGeometries` は上書きが元と違えば拒む（ADR-0040）。
+/// `define_component` の `entities` で入れ子にするときは、道具の側で宣言に合うか確かめる。
 ///
 /// 組み立てた図形は `Geometry::validate` に通す（長さ 0 の線分・半径 0 の円などを拒む）。
 ///
@@ -594,7 +595,7 @@ pub fn apply_fields(
                 let now = defs.get(i.definition).map(|d| d.name.as_str());
                 if c.as_str() != now {
                     return Err(
-                        "インスタンスの参照するコンポーネントは変えられません（置き換えるなら削除して挿し直してください）"
+                        "インスタンスの参照するコンポーネントは変えられません（別のコンポーネントにするなら delete_entities で消して insert_component で置き直してください。ID は変わります）"
                             .to_owned(),
                     );
                 }
@@ -603,6 +604,7 @@ pub fn apply_fields(
                 if overrides_from_json(o)? != i.overrides {
                     return Err(
                         "インスタンスのパラメータ（overrides）は modify_entities では変えられません。\
+                         set_instance_params{id, values: {名前: 値}} で変えてください（null で既定値に戻す）。\
                          同じ値を渡し返すのはかまいません（get_entities の出力をそのまま使えるように）"
                             .to_owned(),
                     );
@@ -921,6 +923,335 @@ pub fn component_to_json(def: &Definition, instance_count: usize) -> Value {
         "params": def.params.iter().map(param_decl_to_json).collect::<Vec<_>>(),
         "bindings": def.bindings.iter().map(|b| binding_to_json(b, def)).collect::<Vec<_>>(),
     })
+}
+
+/// 定義の中の図形の一覧（`list_components` の `contents`）。`index` は束縛の `entity` と同じ添字。
+/// 形は定義座標（基点 `origin` が挿入点に来る）。
+#[must_use]
+pub fn definition_contents_json(def: &Definition, defs: &DefinitionTable) -> Value {
+    Value::Array(
+        def.entities
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                json!({
+                    "index": i,
+                    "geometry": geometry_to_json(&e.geom, defs),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// 図形に束縛できる項目名（[`slot_name`] の綴り）の説明。`bind` の誤りの説明に使う。
+#[must_use]
+pub fn slot_fields_hint(g: &Geometry) -> String {
+    match g {
+        Geometry::Line(_) => "start.x, start.y, end.x, end.y".to_owned(),
+        Geometry::Circle(_) => "center.x, center.y, radius".to_owned(),
+        Geometry::Arc(_) => "center.x, center.y, radius, start_angle, end_angle".to_owned(),
+        Geometry::Xline(_) => "origin.x, origin.y, angle".to_owned(),
+        Geometry::Polyline(p) => format!(
+            "vertices[i].x, vertices[i].y（i は 0〜{}）",
+            p.vertices.len().saturating_sub(1)
+        ),
+        Geometry::Instance(_) => "origin.x, origin.y, rotation, scale".to_owned(),
+    }
+}
+
+// ---- パラメータ（入力） -------------------------------------------------------
+
+/// パラメータの型の名前（JSON の `type`）。[`param_decl_to_json`] と同じ綴り。
+pub const PARAM_TYPES: [&str; 3] = ["number", "bool", "choice"];
+
+/// 式の文字列を読む（長さの上限つき）。パラメータを参照してよい。参照先と型は呼び出し側で確かめる。
+///
+/// # Errors
+///
+/// 長すぎる・式として読めない場合。
+pub fn expr_from_str(src: &str, what: &str) -> Result<cad_core::expr::Expr, String> {
+    if src.len() > crate::limits::MAX_EXPR_BYTES {
+        return Err(format!(
+            "{what} の式が長すぎます（上限 {} バイト）",
+            crate::limits::MAX_EXPR_BYTES
+        ));
+    }
+    cad_core::expr::parse(src).map_err(|e| format!("{what} の式 {src:?} を読めません: {e}"))
+}
+
+/// パラメータ名として使えるか。**式の中でその名前のまま参照できること**。
+///
+/// アプリの `PARAM` は名前を確かめないが、式で読めない名前（空白・記号を含む、`真` や `sin` のような
+/// 語、全角英数字 = 式の中では半角に直される）を宣言すると、どの束縛からも参照できない。
+///
+/// # Errors
+///
+/// 使えない名前の場合。
+pub fn check_param_name(name: &str) -> Result<(), String> {
+    use cad_core::expr::{parse, Expr};
+    if name.chars().count() > crate::limits::MAX_NAME_CHARS {
+        return Err(format!(
+            "パラメータ名が長すぎます（上限 {} 文字）",
+            crate::limits::MAX_NAME_CHARS
+        ));
+    }
+    if parse(name).ok() == Some(Expr::Var(name.to_owned())) {
+        return Ok(());
+    }
+    Err(format!(
+        "パラメータ名 {name:?} は式の中で名前として読めません（英字・日本語・下線で始め、空白・記号・全角英数字を含めない。\
+         真・偽・true・false・if・then・else や sin などの関数名は使えない）"
+    ))
+}
+
+/// 選択肢の候補として使えるか。式の中の `'候補'` と同じ文字列として読めること。
+fn check_choice_option(opt: &str, what: &str) -> Result<(), String> {
+    use cad_core::expr::{parse, Expr};
+    let literal = parse(&format!("'{opt}'")).ok();
+    if opt.is_empty()
+        || opt.trim() != opt
+        || opt.chars().count() > crate::limits::MAX_NAME_CHARS
+        || literal != Some(Expr::Literal(ParamValue::Choice(opt.to_owned())))
+    {
+        return Err(format!(
+            "{what} の候補 {opt:?} は使えません（空・前後の空白・引用符・全角の記号や英数字を含まない、{} 文字までの文字列）",
+            crate::limits::MAX_NAME_CHARS
+        ));
+    }
+    Ok(())
+}
+
+/// パラメータの宣言を JSON から読む（`set_component_params`）。
+///
+/// `{name, type, default, min?, max?, options?}`。`type` は [`PARAM_TYPES`]。
+/// [`param_decl_to_json`]（`list_components`）の出力もそのまま読めるよう、`options` の代わりの `choices`、
+/// `min` / `max` の代わりの `range: [下限, 上限]` も受け付ける。`null` の項目は書かなかったのと同じ。
+///
+/// | 型 | `default` |
+/// |---|---|
+/// | `number` | 数値か式の文字列（他のパラメータを参照してよい）。必須 |
+/// | `bool` | 真偽か式の文字列。必須 |
+/// | `choice` | 候補の名前そのもの（`'候補'` のように引用符で囲んでもよい）か式の文字列。省くと最初の候補 |
+///
+/// ここでは形だけを読む。既定値の型・範囲・参照先・循環は、宣言の全体を見て道具の側で確かめる
+/// （他のパラメータを参照する既定値があるため）。
+///
+/// # Errors
+///
+/// 形が違う・名前が使えない・候補が無い・範囲が逆などの場合。
+pub fn param_decl_from_json(v: &Value, what: &str) -> Result<ParamDecl, String> {
+    use cad_core::expr::Expr;
+    let m = v.as_object().ok_or_else(|| {
+        format!("{what} は {{name, type, default, …}} のオブジェクトで指定してください")
+    })?;
+    let allowed = [
+        "name", "type", "default", "min", "max", "options", "choices", "range",
+    ];
+    if let Some(extra) = m.keys().find(|k| !allowed.contains(&k.as_str())) {
+        return Err(format!(
+            "{what} に不明な項目 {extra} があります（使えるのは {}）",
+            allowed.join(", ")
+        ));
+    }
+    let get = |k: &str| m.get(k).filter(|v| !v.is_null());
+    let name = get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{what}.name を文字列で指定してください"))?;
+    check_param_name(name).map_err(|e| format!("{what}: {e}"))?;
+    let what = format!("{what}（{name}）");
+    let ty = get("type").and_then(Value::as_str).ok_or_else(|| {
+        format!(
+            "{what}.type を {} のどれかで指定してください",
+            PARAM_TYPES.join(" / ")
+        )
+    })?;
+
+    // 候補（options か choices のどちらか一方）。
+    let options = match (get("options"), get("choices")) {
+        (Some(_), Some(_)) => {
+            return Err(format!(
+                "{what}: options と choices は同じものです。どちらか一方で指定してください"
+            ))
+        }
+        (Some(o), None) | (None, Some(o)) => Some(o),
+        (None, None) => None,
+    };
+    // 範囲（min と max か、range のどちらか）。
+    let range = match (get("min"), get("max"), get("range")) {
+        (None, None, None) => None,
+        (Some(lo), Some(hi), None) => Some((
+            number_from_json(lo, &format!("{what}.min"))?,
+            number_from_json(hi, &format!("{what}.max"))?,
+        )),
+        (None, None, Some(r)) => match r.as_array().map(Vec::as_slice) {
+            Some([lo, hi]) => Some((
+                number_from_json(lo, &format!("{what}.range[0]"))?,
+                number_from_json(hi, &format!("{what}.range[1]"))?,
+            )),
+            _ => return Err(format!("{what}.range は [下限, 上限] で指定してください")),
+        },
+        (_, _, Some(_)) => {
+            return Err(format!(
+                "{what}: range と min / max は同じものです。どちらか一方で指定してください"
+            ))
+        }
+        _ => {
+            return Err(format!(
+                "{what}: 範囲は min と max を両方指定してください（片側だけの範囲は持てません）"
+            ))
+        }
+    };
+    if let Some((lo, hi)) = range {
+        if lo > hi {
+            return Err(format!(
+                "{what}: 範囲の下限 {lo} が上限 {hi} より大きいです"
+            ));
+        }
+    }
+
+    let default_expr = |v: &Value| -> Result<Expr, String> {
+        match v {
+            Value::String(src) => expr_from_str(src, &format!("{what}.default")),
+            Value::Number(_) => Ok(Expr::number(number_from_json(
+                v,
+                &format!("{what}.default"),
+            )?)),
+            Value::Bool(b) => Ok(Expr::Literal(ParamValue::Bool(*b))),
+            _ => Err(format!(
+                "{what}.default は数値・真偽・式の文字列で指定してください"
+            )),
+        }
+    };
+
+    let (ty, default) = match ty {
+        "number" | "bool" => {
+            if options.is_some() {
+                return Err(format!(
+                    "{what}: options（選択肢）は type が choice のときだけ使えます"
+                ));
+            }
+            if ty == "bool" && range.is_some() {
+                return Err(format!(
+                    "{what}: 範囲（min / max）は type が number のときだけ使えます"
+                ));
+            }
+            let d = get("default")
+                .ok_or_else(|| format!("{what}.default（既定値）を指定してください"))?;
+            let ty = if ty == "number" {
+                ParamType::Number
+            } else {
+                ParamType::Bool
+            };
+            (ty, default_expr(d)?)
+        }
+        "choice" => {
+            if range.is_some() {
+                return Err(format!(
+                    "{what}: 範囲（min / max）は type が number のときだけ使えます"
+                ));
+            }
+            let list = options
+                .and_then(Value::as_array)
+                .ok_or_else(|| format!("{what}.options（候補の文字列の配列）を指定してください"))?;
+            if list.is_empty() || list.len() > crate::limits::MAX_CHOICE_OPTIONS {
+                return Err(format!(
+                    "{what}.options は 1 個以上 {} 個以下で指定してください",
+                    crate::limits::MAX_CHOICE_OPTIONS
+                ));
+            }
+            let mut opts: Vec<String> = Vec::with_capacity(list.len());
+            for o in list {
+                let o = o
+                    .as_str()
+                    .ok_or_else(|| format!("{what}.options の要素は文字列で指定してください"))?;
+                check_choice_option(o, &what)?;
+                if opts.iter().any(|x| x == o) {
+                    return Err(format!("{what}.options に {o:?} が重複しています"));
+                }
+                opts.push(o.to_owned());
+            }
+            let default = match get("default") {
+                None => Expr::Literal(ParamValue::Choice(opts[0].clone())),
+                Some(Value::String(s)) => {
+                    // 候補の名前そのもの、または list_components が出す '候補' の形。
+                    let unquoted = s
+                        .strip_prefix('\'')
+                        .and_then(|t| t.strip_suffix('\''))
+                        .or_else(|| s.strip_prefix('"').and_then(|t| t.strip_suffix('"')))
+                        .unwrap_or(s);
+                    if opts.iter().any(|o| o == unquoted) {
+                        Expr::Literal(ParamValue::Choice(unquoted.to_owned()))
+                    } else {
+                        expr_from_str(s, &format!("{what}.default"))?
+                    }
+                }
+                Some(other) => default_expr(other)?,
+            };
+            (ParamType::Choice(opts), default)
+        }
+        other => {
+            return Err(format!(
+                "{what}.type {other} は扱えません（{}）",
+                PARAM_TYPES.join(" / ")
+            ))
+        }
+    };
+    Ok(ParamDecl {
+        name: name.to_owned(),
+        ty,
+        default,
+        range,
+    })
+}
+
+/// 宣言の型と範囲の説明（「数値（範囲 0〜100）」「選択（引違い / 開き）」など）。
+#[must_use]
+pub fn describe_param_type(decl: &ParamDecl) -> String {
+    match (&decl.ty, decl.range) {
+        (ParamType::Number, Some((lo, hi))) => format!("数値（範囲 {lo}〜{hi}）"),
+        (ParamType::Number, None) => "数値".to_owned(),
+        (ParamType::Bool, _) => "真偽".to_owned(),
+        (ParamType::Choice(opts), _) => format!("選択（{}）", opts.join(" / ")),
+    }
+}
+
+/// インスタンスのパラメータの値を JSON から読む（`insert_component` の `params`・`set_instance_params`）。
+///
+/// **宣言の型で読み方を決める。** 数値は JSON の数値か式の文字列（パラメータは使えない）、
+/// 真偽は `true` / `false`、選択は候補の名前そのもの。型と範囲に合わなければ拒む
+/// （`SetInstanceOverride` も拒むが、何が違うかをここで説明する）。
+///
+/// # Errors
+///
+/// 型・範囲に合わない場合。
+pub fn param_value_from_json(
+    decl: &ParamDecl,
+    v: &Value,
+    what: &str,
+) -> Result<ParamValue, String> {
+    let value = match (&decl.ty, v) {
+        (ParamType::Number, Value::Number(_) | Value::String(_)) => {
+            ParamValue::Number(number_from_json(v, what)?)
+        }
+        (ParamType::Bool, Value::Bool(b)) => ParamValue::Bool(*b),
+        (ParamType::Choice(_), Value::String(s)) => ParamValue::Choice(s.clone()),
+        _ => {
+            return Err(format!(
+                "{what} はパラメータ {} の型 {} の値で指定してください（受け取った値: {v}）",
+                decl.name,
+                describe_param_type(decl)
+            ))
+        }
+    };
+    if decl.accepts(&value) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "{what} の値 {value} はパラメータ {} の {} に合いません",
+            decl.name,
+            describe_param_type(decl)
+        ))
+    }
 }
 
 #[cfg(test)]
