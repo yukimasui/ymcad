@@ -716,24 +716,26 @@ fn a_refusal_by_one_refuses_the_whole_group() {
 }
 
 /// まとめて掴んだうちの 1 つのレイヤがロックされたら、全体を中断する（ADR-0039）。
+/// ロックされるのは代表でない方（代表だけを確かめていても見逃さない）。
 #[test]
 fn locking_one_of_the_grabbed_entities_aborts_the_group() {
     let mut doc = Document::new();
     doc.apply(Box::new(AddLayer::new("L1", AciColor::WHITE)))
         .expect("足せる");
     let l1 = doc.layers().by_name("L1").expect("ある");
-    let a = add(&mut doc, line_geom(p(0.0, 0.0), p(10.0, 0.0)));
     doc.apply(Box::new(AddEntities::one(
         "LINE",
         Entity::new(line_geom(p(10.0, 0.0), p(10.0, 5.0)), l1),
     )))
     .expect("足せる");
-    let b = doc.entities().ids().last().expect("ある");
+    let on_l1 = doc.entities().ids().last().expect("ある");
+    let other = add(&mut doc, line_geom(p(0.0, 0.0), p(10.0, 0.0)));
     let mut s = Session::new();
-    s.selection.insert(a);
-    s.selection.insert(b);
+    s.selection.insert(on_l1);
+    s.selection.insert(other);
     click(&mut s, &mut doc, p(10.0, 0.0));
     assert_eq!(s.hot_grips().len(), 2, "前提: まとめて掴んだ");
+    assert_eq!(s.hot_grips()[0].id, other, "前提: 代表はロックされない方");
 
     s.apply_external(Box::new(SetLayerProperties::new(l1).locked(true)), &mut doc);
     assert!(!s.is_gripping(), "全体を中断した");
@@ -744,11 +746,11 @@ fn locking_one_of_the_grabbed_entities_aborts_the_group() {
     );
     click(&mut s, &mut doc, p(20.0, 0.0));
     assert_eq!(
-        geom(&doc, a),
+        geom(&doc, other),
         line_geom(p(0.0, 0.0), p(10.0, 0.0)),
         "ロックされていない方も動かない"
     );
-    assert_eq!(geom(&doc, b), line_geom(p(10.0, 0.0), p(10.0, 5.0)));
+    assert_eq!(geom(&doc, on_l1), line_geom(p(10.0, 0.0), p(10.0, 5.0)));
 }
 
 /// 重なったグリップの上では、ホバーの束とクリックで掴む束が同じ（ADR-0042）。
