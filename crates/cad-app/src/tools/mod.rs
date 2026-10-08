@@ -474,6 +474,12 @@ pub static COMMANDS: &[CommandSpec] = &[
         kind: CommandKind::Immediate(Immediate::LayerPanel),
     },
     CommandSpec {
+        name: "PROPERTIES",
+        aliases: &["PR"],
+        summary: "プロパティパネルの開閉（選んだ図形の値とレイヤ）  Ctrl+1",
+        kind: CommandKind::Immediate(Immediate::PropertiesPanel),
+    },
+    CommandSpec {
         name: "NEW",
         aliases: &[],
         summary: "新規図面",
@@ -579,6 +585,8 @@ pub enum Immediate {
     LayerPanel,
     /// コンポーネントパネルの開閉。
     ComponentPanel,
+    /// プロパティパネルの開閉。
+    PropertiesPanel,
     /// コンポーネントの編集を終える。
     EndComponentEdit,
     /// ファイル操作。
@@ -594,6 +602,7 @@ impl Immediate {
             Self::Redo => "REDO",
             Self::LayerPanel => "LAYER",
             Self::ComponentPanel => "COMPONENTS",
+            Self::PropertiesPanel => "PROPERTIES",
             Self::EndComponentEdit => "ENDCOMP",
             Self::File(a) => a.command_name(),
         }
@@ -605,7 +614,7 @@ impl Immediate {
     /// POLYLINE を打っている途中でレイヤパネルを開いても、確定前の図形が消えないように
     /// （AutoCAD の透過コマンドに当たる。ADR-0037 決定 3）。
     ///
-    /// - パネルを開閉するだけのもの（LAYER / COMPONENTS）
+    /// - パネルを開閉するだけのもの（LAYER / COMPONENTS / PROPERTIES）
     /// - 保存（SAVE / SAVEAS）。図形を変えず、`Ctrl+S` は元から実行中のツールに触れない。
     ///   ボタンだけが中断して選択も外していた（PR #42 の操作レビュー）。確定前の図形
     ///   （打っている途中のポリラインなど）は図面に入っていないので、保存されないのは `Ctrl+S` と同じ
@@ -617,6 +626,7 @@ impl Immediate {
         match self {
             Self::LayerPanel
             | Self::ComponentPanel
+            | Self::PropertiesPanel
             | Self::File(FileAction::Save | FileAction::SaveAs) => true,
             Self::Undo
             | Self::Redo
