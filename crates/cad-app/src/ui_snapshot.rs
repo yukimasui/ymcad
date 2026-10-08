@@ -18,6 +18,8 @@ use std::path::PathBuf;
 
 use crate::app::CadApp;
 
+mod properties;
+
 /// 画面の大きさ [px]。
 const SCREEN: egui::Vec2 = egui::vec2(1280.0, 800.0);
 /// キャンバスの中央付近（画面下のコマンドライン・ステータスバーを避けた位置）。

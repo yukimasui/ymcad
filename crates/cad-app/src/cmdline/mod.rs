@@ -260,6 +260,8 @@ pub struct CommandLine {
     focused_last_frame: Option<egui::Id>,
     /// このフレームでモーダルが出ているか。[`Self::begin_frame`] で写す。
     modal_open: bool,
+    /// このフレームのキーの持ち主がコマンドラインか（[`Self::owns_keys`]）。[`Self::begin_frame`] で決める。
+    keys_owned: bool,
     /// コマンド候補。
     suggestions: Suggestions,
     /// [`Self::begin_frame`] で消費したキーが表す確定操作。
@@ -340,6 +342,7 @@ impl CommandLine {
             caret_to_end: false,
             focused_last_frame: None,
             modal_open: false,
+            keys_owned: false,
             suggestions: Suggestions::default(),
             pending: None,
             dynamic: DynamicInput {
@@ -516,6 +519,7 @@ impl CommandLine {
         let owns_keys =
             !modal_open && owns_keys(egui::Id::new(INPUT_ID), self.focused_last_frame, focused);
         self.focused_last_frame = focused;
+        self.keys_owned = owns_keys;
 
         // IME のイベントもキーと同じく、入力欄が持ち主のときだけ拾う。パネルの入力欄で
         // 変換していると、そちら宛ての Preedit でコマンドラインまで「変換中」になり、
@@ -650,6 +654,16 @@ impl CommandLine {
     #[cfg(test)]
     pub fn set_input_for_test(&mut self, text: &str) {
         text.clone_into(&mut self.input);
+    }
+
+    /// このフレームのキーの持ち主がコマンドラインか。
+    ///
+    /// 入力欄にフォーカスがあるか、どこにも無いときだけ真（モーダルが出ている間は偽）。
+    /// パネルの入力欄を編集している間は偽になる（ADR-0035）。Ctrl+1 のように、コマンドライン以外が
+    /// 拾うショートカットも同じ規則に従うために公開している。[`Self::begin_frame`] の後に使うこと。
+    #[must_use]
+    pub fn owns_keys(&self) -> bool {
+        self.keys_owned
     }
 
     /// コマンドラインの入力欄で変換中か。

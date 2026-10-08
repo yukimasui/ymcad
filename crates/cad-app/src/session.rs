@@ -21,6 +21,8 @@ pub enum UiAction {
     ToggleLayerPanel,
     /// コンポーネントパネルの開閉。
     ToggleComponentPanel,
+    /// プロパティパネルの開閉。
+    TogglePropertiesPanel,
     /// ファイル操作。
     File(crate::file_ops::FileAction),
 }
@@ -472,7 +474,7 @@ impl Session {
     /// - **変換中（IME）は何もしない。** バッファには未確定の文字列が入っていて、捨てると
     ///   入力欄が「変換中」のまま空になり、以後の Enter が効かなくなる（ADR-0002）。
     ///   確定か取り消しを促すエラーだけを出す
-    /// - **パネルを開閉するだけのコマンド（LAYER / COMPONENTS）は実行中のコマンドを中断しない**
+    /// - **パネルを開閉するだけのコマンド（LAYER / COMPONENTS / PROPERTIES）は実行中のコマンドを中断しない**
     ///   （[`Immediate::keeps_running_command`]）。実行中のツール・選択・打ちかけの文字は
     ///   そのままで、再実行の対象も実行中のコマンドのまま変えない
     ///
@@ -561,6 +563,10 @@ impl Session {
             }
             Immediate::ComponentPanel => {
                 self.ui_actions.push(UiAction::ToggleComponentPanel);
+                return;
+            }
+            Immediate::PropertiesPanel => {
+                self.ui_actions.push(UiAction::TogglePropertiesPanel);
                 return;
             }
             Immediate::EndComponentEdit => {
@@ -3892,7 +3898,7 @@ mod ui_start_tests {
         assert_eq!(s.take_ui_actions(), vec![UiAction::ToggleLayerPanel]);
     }
 
-    /// パネルを開閉するだけのコマンド（LAYER / COMPONENTS）は、実行中のコマンドを中断しない。
+    /// パネルを開閉するだけのコマンド（LAYER / COMPONENTS / PROPERTIES）は、実行中のコマンドを中断しない。
     /// 確定前の POLYLINE の点・打ちかけの文字・再実行の対象がそのまま残る。
     #[test]
     fn panel_commands_keep_the_running_command() {
@@ -3906,6 +3912,7 @@ mod ui_start_tests {
         for (name, action) in [
             ("LAYER", UiAction::ToggleLayerPanel),
             ("COMPONENTS", UiAction::ToggleComponentPanel),
+            ("PROPERTIES", UiAction::TogglePropertiesPanel),
         ] {
             s.start_command_from_ui(name, &mut doc);
             assert_eq!(s.take_ui_actions(), vec![action], "{name}");
@@ -3943,7 +3950,7 @@ mod ui_start_tests {
         }
     }
 
-    /// 中断しないものは「パネルを開閉するだけ」の 2 つと、保存の 2 つだけ。
+    /// 中断しないものは「パネルを開閉するだけ」の 3 つと、保存の 2 つだけ。
     #[test]
     fn only_panel_toggles_and_saves_keep_the_running_command() {
         let keeping: Vec<_> = tools::COMMANDS
@@ -3951,7 +3958,10 @@ mod ui_start_tests {
             .filter(|c| tools::immediate(c.name).is_some_and(Immediate::keeps_running_command))
             .map(|c| c.name)
             .collect();
-        assert_eq!(keeping, vec!["COMPONENTS", "LAYER", "SAVE", "SAVEAS"]);
+        assert_eq!(
+            keeping,
+            vec!["COMPONENTS", "LAYER", "PROPERTIES", "SAVE", "SAVEAS"]
+        );
     }
 
     /// 何も実行していないときに打ちかけの文字があれば捨てる。

@@ -72,6 +72,7 @@ static ICONS: &[(&str, &[u8])] = &[
     icon!("COMPONENTS"),
     icon!("ZOOM"),
     icon!("LAYER"),
+    icon!("PROPERTIES"),
     icon!("NEW"),
     icon!("OPEN"),
     icon!("SAVE"),
