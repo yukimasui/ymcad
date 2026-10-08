@@ -507,6 +507,34 @@ fn fields_are_display_only_while_a_command_runs() {
     assert!(editable(&h, "始点 X"), "終われば編集できる（対照）");
 }
 
+/// 打っている途中にコマンドが始まったら（リボンの LINE など）、打ちかけの値は確定せずに捨てる。
+/// 始まったコマンドは中断されない。
+#[test]
+fn a_command_started_while_typing_discards_the_input() {
+    let (mut h, id) = one_line();
+    let before = line_of(&h, id);
+    let depth = undo_depth(&h);
+    click_field(&mut h, "始点 X");
+    type_text(&mut h, "77");
+    {
+        let app = h.state_mut();
+        app.session.start_command_from_ui("LINE", &mut app.doc);
+    }
+    settle(&mut h);
+    assert_eq!(
+        h.state().session.active_command(),
+        Some("LINE"),
+        "LINE は続く"
+    );
+    assert!(has(&h, BUSY_NOTE), "パネルは表示だけになる");
+    assert!(
+        !h.state().properties_panel.has_edit_state(),
+        "打ちかけの値は捨てる"
+    );
+    assert_eq!(line_of(&h, id), before, "確定しない");
+    assert_eq!(undo_depth(&h), depth);
+}
+
 /// ポリラインの「閉じ」はチェックボックス。押すと 1 回で確定し、Undo 1 回で戻る。
 /// 頂点が 2 つなら表示だけ。
 #[test]
