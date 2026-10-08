@@ -103,7 +103,7 @@ jobs:
       - name: cad-core の依存が cad-core だけであること
         run: |
           set -euo pipefail
-          DEPS=$(cargo tree -p cad-core --edges normal,build --prefix none --format '{p}' \
+          DEPS=$(cargo tree -p cad-core --target all --edges normal,build --prefix none --format '{p}' \
                  | awk '{print $1}' | sort -u)
           # 依存リストが取れていること自体を先に確認する（fail-closed）。
           if ! printf '%s\n' "$DEPS" | grep -qx 'cad-core'; then
@@ -123,7 +123,7 @@ jobs:
       - name: cad-mcp が GUI のクレートと cad-app に依存していないこと
         run: |
           set -euo pipefail
-          DEPS=$(cargo tree -p cad-mcp --edges normal,build --prefix none --format '{p}' \
+          DEPS=$(cargo tree -p cad-mcp --target all --edges normal,build --prefix none --format '{p}' \
                  | awk '{print $1}' | sort -u)
           for must in cad-mcp cad-core; do
             if ! printf '%s\n' "$DEPS" | grep -qx "$must"; then

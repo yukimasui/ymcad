@@ -127,8 +127,8 @@ class Client:
         return text
 
     def close(self) -> tuple[int, bytes, bytes]:
-        assert self.proc.stdin is not None
-        self.proc.stdin.close()
+        # stdin は communicate() が閉じる。先に閉じると Python 3.12 は閉じたファイルを
+        # flush しようとして ValueError になる（3.14 は無視するので手元では気づけない）。
         try:
             rest, err = self.proc.communicate(timeout=30)
         except subprocess.TimeoutExpired:
