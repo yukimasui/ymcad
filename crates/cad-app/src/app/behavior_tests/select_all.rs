@@ -35,6 +35,18 @@ fn press_ctrl_a(h: &mut Harness<'_, CadApp>) {
     settle(h);
 }
 
+/// Ctrl+A に `extra`（Shift・Alt）を足して押して離す。
+fn press_ctrl_a_with(h: &mut Harness<'_, CadApp>, extra: egui::Modifiers) {
+    frame(
+        h,
+        key_with(
+            egui::Key::A,
+            egui::Modifiers::CTRL | egui::Modifiers::COMMAND | extra,
+        ),
+    );
+    settle(h);
+}
+
 /// パネルからの変更と同じ入口で図面を変える。
 fn external(h: &mut Harness<'_, CadApp>, cmd: Box<dyn cad_core::Command>) {
     let app = h.state_mut();
@@ -236,6 +248,34 @@ fn ctrl_a_does_nothing_while_a_point_is_wanted() {
         super::click(&mut h, P2);
         press(&mut h, egui::Key::Enter);
         assert_eq!(h.state().doc.entities().len(), 5, "線が 1 本増える");
+    }
+}
+
+/// Ctrl+Shift+A・Ctrl+Alt+A では全選択しない（修飾キーを厳密に比べる。Issue #74 の 5）。
+/// 待機中なので、緩く比べていれば全部が選ばれる。素の Ctrl+A なら選ぶ（キーは奪われていない）。
+#[test]
+fn ctrl_a_with_shift_or_alt_does_not_select_everything() {
+    for on in [false, true] {
+        let mut h = app_with_dynamic(on);
+        let free = drawing(&mut h);
+        hover(&mut h, P1);
+        let lines = h.state().session.cmdline.history().count();
+        for extra in [egui::Modifiers::SHIFT, egui::Modifiers::ALT] {
+            press_ctrl_a_with(&mut h, extra);
+            assert!(
+                h.state().session.selection.is_empty(),
+                "{extra:?} つきでは選ばない（動的入力 {on}）"
+            );
+        }
+        assert_eq!(
+            h.state().session.cmdline.history().count(),
+            lines,
+            "案内も出ない（動的入力 {on}）"
+        );
+        assert_eq!(h.state().session.cmdline.input(), "", "入力欄も空のまま");
+
+        press_ctrl_a(&mut h);
+        assert_eq!(selected(&h), free, "素の Ctrl+A なら選ぶ（動的入力 {on}）");
     }
 }
 
