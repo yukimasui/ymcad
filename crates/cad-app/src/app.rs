@@ -808,6 +808,9 @@ impl CadApp {
                 self.session.document_replaced();
                 // 版番号が前の図面と重なりうるので、選択の要約も作り直す。
                 self.properties_panel.invalidate();
+                // ピック用の索引とホバーの結果も版番号をキーにしているので、前の図面のものを捨てる
+                // （PR #63 のレビュー B1。残すとクリックでも新しい図面の図形を拾えない）。
+                self.hover = Hover::new();
                 self.session.cmdline.info(msg);
                 self.snap.release();
                 self.coord_width = COORD_MIN_WIDTH;

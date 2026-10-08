@@ -311,3 +311,45 @@ fn trim_near_an_intersection_trims_the_line_under_the_cursor() {
         );
     }
 }
+
+/// 図面を入れ替えたら（NEW / OPEN）、前の図面の索引と結果を使わない。
+///
+/// 版番号は図面ごとの値なので、別の図面どうしで一致しうる。一致したまま前の図面の索引を
+/// 引くと、新しい図面の図形を強調もクリックもできなかった（PR #63 のレビュー B1）。
+#[test]
+fn replacing_the_drawing_drops_the_old_pick_index() {
+    let mut h = app();
+    hover(&mut h, egui::pos2(500.0, 300.0));
+    let old = add_lines(&mut h, &[(seg(50.0, 250.0, 150.0, 250.0), LayerId::ZERO)]);
+    let pos = screen(&h, Point2::new(100.0, 250.0));
+    hover(&mut h, pos);
+    assert_eq!(highlighted(&h), old, "前提: 前の図面の線分を強調している");
+
+    // 版番号が同じで、図形の位置だけが違う図面。
+    let mut next = cad_core::Document::new();
+    next.apply(Box::new(AddEntities::many(
+        "TEST",
+        vec![cad_core::Entity::new(
+            Geometry::Line(seg(50.0, 100.0, 150.0, 100.0)),
+            LayerId::ZERO,
+        )],
+    )))
+    .expect("追加できるはず");
+    assert_eq!(
+        next.revision(),
+        h.state().doc.revision(),
+        "前提: 版番号が同じ"
+    );
+    let new_id = next.entities().ids().next().expect("1 本ある");
+    {
+        let app = h.state_mut();
+        app.doc = next;
+        app.report_file_outcome(crate::file_ops::FileOutcome::Replaced(
+            "開きました".to_owned(),
+        ));
+    }
+    settle(&mut h);
+
+    let got = assert_hover_matches_click(&mut h, Point2::new(100.0, 100.0), "入れ替えた図面");
+    assert_eq!(got, vec![new_id], "新しい図面の線分");
+}
