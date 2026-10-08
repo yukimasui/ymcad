@@ -6,11 +6,12 @@
 
 use cad_core::command::ExitDefinitionEdit;
 use cad_core::geom::{Aabb, Point2};
-use cad_core::{Document, EntityId, Geometry};
+use cad_core::{Document, Entity, EntityId, Geometry};
 
 use crate::cmdline::{coord, dimension, CommandLine, LineKind, Submission};
 use crate::editing::EditSession;
 use crate::input::ViewAction;
+use crate::properties::{self, MOVE_TO_LAYER_COMMAND};
 use crate::selection::{self, Picker, Selection, WindowMode};
 use crate::tools::entity_preview::Boundaries;
 use crate::tools::{
@@ -77,6 +78,16 @@ impl ClickTarget {
     }
 }
 
+/// 選択から外れた理由の案内（[`Session::drop_note`]）。
+#[derive(Debug)]
+struct DropNote {
+    /// 案内を出した時点の図面の版番号。
+    doc_revision: u64,
+    /// 案内を出した時点の選択の版番号。
+    selection_revision: u64,
+    text: String,
+}
+
 /// 実行中コマンドが無いときのプロンプト。
 const IDLE_PROMPT: &str = "コマンド:";
 /// 選択待ちのプロンプト。
@@ -110,6 +121,13 @@ pub struct Session {
     /// 直接距離入力と寸法入力の `Enter` で、向きや欠けた値をカーソルから決めるのに使う。
     /// カーソルが作図領域の外にあるときは `None`。
     cursor: Option<Point2>,
+    /// 選択から外れた理由の案内と、そのときの図面と選択の版番号。
+    ///
+    /// コマンドラインは画面の下で、操作した人が見ているのは右のパネルなので、パネルにも出す。
+    /// どちらかの版番号が変わったら（選び直した、Undo で戻した、ほかの変更をした）古い案内に
+    /// なるので、[`Self::drop_note`] は返さない。移した直後は選択が空なので、選択の版だけでは
+    /// 空のまま進む操作（Undo など）で消えない。
+    drop_note: Option<DropNote>,
 }
 
 impl Default for Session {
@@ -135,7 +153,22 @@ impl Session {
             ui_actions: Vec::new(),
             settings: ToolSettings::default(),
             cursor: None,
+            drop_note: None,
         }
+    }
+
+    /// 図形をロック・非表示のレイヤへ移して選択から外れたときの案内。次に図面か選択が変わるまで返す。
+    ///
+    /// プロパティパネルとレイヤパネルが、選択が空の表示の上に出す。
+    #[must_use]
+    pub fn drop_note(&self, doc: &Document) -> Option<&str> {
+        self.drop_note
+            .as_ref()
+            .filter(|n| {
+                n.doc_revision == doc.revision()
+                    && n.selection_revision == self.selection.revision()
+            })
+            .map(|n| n.text.as_str())
     }
 
     /// いま表示すべきプロンプト。
@@ -243,8 +276,43 @@ impl Session {
         let name = cmd.name();
         // `apply` は消えた図形を選択から外すので、外れた数は適用の前から数える。
         let selected_before = self.selection.len();
+        let ids_before = self.selection.to_vec();
+        // `revalidate` はツールを中断することがあるので、実行中だったかは適用の前に見る。
+        let was_idle = self.tool.is_none();
         self.apply(cmd, name, doc);
         self.revalidate(doc, selected_before);
+        if was_idle && name == MOVE_TO_LAYER_COMMAND {
+            self.note_moved_out(&ids_before, doc);
+        }
+    }
+
+    /// レイヤへ移した結果、選択から外れた図形があれば案内する（実行中でないときだけ）。
+    ///
+    /// 実行中は [`Self::revalidate`] が「対象から外しました」と案内するので、ここへは来ない。
+    /// 何も実行していないときの選択の入れ替わりは普通は黙っている（ロックのレイヤ操作など）が、
+    /// 「選んだ図形をそのレイヤへ移す」操作は、移した本人にとって図形が消えたように見える。
+    /// 移し先のレイヤは、外れた図形がいま居るレイヤから分かる（`MoveEntitiesToLayer` は
+    /// 移し先を公開していない）。
+    fn note_moved_out(&mut self, ids_before: &[EntityId], doc: &Document) {
+        let dropped: Vec<&Entity> = ids_before
+            .iter()
+            .filter(|id| !self.selection.contains(**id))
+            .filter_map(|id| doc.entities().get(*id))
+            .collect();
+        let Some(dest) = dropped
+            .first()
+            .and_then(|e| doc.layers().get(e.layer))
+            .filter(|l| l.locked || !l.visible)
+        else {
+            return;
+        };
+        let text = properties::moved_out_note(dropped.len(), dest);
+        self.cmdline.info(text.clone());
+        self.drop_note = Some(DropNote {
+            doc_revision: doc.revision(),
+            selection_revision: self.selection.revision(),
+            text,
+        });
     }
 
     /// 図面が入れ替わった（NEW / OPEN）。前の図面の ID を覚えている状態をすべて捨てる。
@@ -255,6 +323,8 @@ impl Session {
     pub fn document_replaced(&mut self) {
         self.cancel();
         self.editing = None;
+        // 前の図面のレイヤ名を出した案内は残さない（版番号は新しい図面と重なりうる）。
+        self.drop_note = None;
     }
 
     /// 実行中のコマンドの外で図面が変わった後に、選択と実行中のツールの前提を確かめる
