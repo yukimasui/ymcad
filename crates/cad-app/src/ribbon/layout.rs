@@ -58,6 +58,10 @@ pub static TABS: &[TabSpec] = &[
                 title: "レイヤ",
                 commands: &["LAYER"],
             },
+            GroupSpec {
+                title: "プロパティ",
+                commands: &["PROPERTIES"],
+            },
         ],
     },
     TabSpec {

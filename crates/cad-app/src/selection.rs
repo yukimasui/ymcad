@@ -12,6 +12,8 @@ use cad_core::{Document, EntityId, Geometry};
 #[derive(Debug, Default, Clone)]
 pub struct Selection {
     ids: BTreeSet<EntityId>,
+    /// 中身が変わるたびに増える版番号（[`Self::revision`]）。
+    revision: u64,
 }
 
 impl Selection {
@@ -50,26 +52,43 @@ impl Selection {
         self.ids.iter().copied().collect()
     }
 
+    /// 中身が実際に変わるたびに増える版番号。
+    ///
+    /// 選択から作る派生データ（プロパティパネルの要約など）が、数え直すかどうかを
+    /// 1 万図形を走査せずに決めるためのキー。同じ図形をもう一度足す・無い図形を外す・
+    /// 空の選択を解除する、のように中身が変わらない操作では増えない。
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
     /// 追加する。
     pub fn insert(&mut self, id: EntityId) {
-        self.ids.insert(id);
+        if self.ids.insert(id) {
+            self.revision += 1;
+        }
     }
 
     /// 取り除く。
     pub fn remove(&mut self, id: EntityId) {
-        self.ids.remove(&id);
+        if self.ids.remove(&id) {
+            self.revision += 1;
+        }
     }
 
     /// すべて解除する。
     pub fn clear(&mut self) {
-        self.ids.clear();
+        if !self.ids.is_empty() {
+            self.ids.clear();
+            self.revision += 1;
+        }
     }
 
     /// 消えたエンティティを選択から外す。
     ///
     /// Undo / Redo で図面が変わった後に呼ぶ。世代が変わった ID もここで落ちる。
     pub fn retain_existing(&mut self, doc: &Document) {
-        self.ids.retain(|id| doc.entities().contains(*id));
+        self.retain(|id| doc.entities().contains(id));
     }
 
     /// 編集できなくなったエンティティ（削除・ロック・非表示のレイヤ）を選択から外す。
@@ -77,7 +96,16 @@ impl Selection {
     ///
     /// パネルの操作など、実行中のコマンドの外で図面が変わった後に呼ぶ（ADR-0039）。
     pub fn retain_editable(&mut self, doc: &Document) {
-        self.ids.retain(|id| is_editable(doc, *id));
+        self.retain(|id| is_editable(doc, id));
+    }
+
+    /// 条件に合うものだけ残す。外れたものがあれば版番号を進める。
+    fn retain(&mut self, mut keep: impl FnMut(EntityId) -> bool) {
+        let before = self.ids.len();
+        self.ids.retain(|id| keep(*id));
+        if self.ids.len() != before {
+            self.revision += 1;
+        }
     }
 }
 
@@ -343,6 +371,44 @@ mod tests {
         assert!(s.contains(id) && s.len() == 1);
         s.remove(id);
         assert!(s.is_empty());
+    }
+
+    /// 版番号は中身が実際に変わったときだけ増える（プロパティパネルの要約キャッシュのキー）。
+    #[test]
+    fn revision_advances_only_when_the_contents_change() {
+        let mut d = doc_with(vec![line(0.0, 0.0, 1.0, 0.0), line(0.0, 1.0, 1.0, 1.0)]);
+        let ids: Vec<_> = d.entities().ids().collect();
+        let mut s = Selection::new();
+        let r0 = s.revision();
+
+        s.clear();
+        s.remove(ids[0]);
+        s.retain_existing(&d);
+        assert_eq!(s.revision(), r0, "空の選択への操作では増えない");
+
+        s.insert(ids[0]);
+        let r1 = s.revision();
+        assert!(r1 > r0);
+        s.insert(ids[0]);
+        assert_eq!(s.revision(), r1, "同じ図形をもう一度足しても増えない");
+        s.retain_existing(&d);
+        s.retain_editable(&d);
+        assert_eq!(s.revision(), r1, "何も外れなければ増えない");
+
+        s.insert(ids[1]);
+        let r2 = s.revision();
+        assert!(r2 > r1);
+        s.remove(ids[1]);
+        let r3 = s.revision();
+        assert!(r3 > r2);
+
+        d.undo().unwrap(); // 追加を取り消す（2 本とも消える）
+        s.retain_existing(&d);
+        assert!(s.revision() > r3, "消えた図形が外れたら増える");
+        let r4 = s.revision();
+        s.insert(ids[0]);
+        s.clear();
+        assert!(s.revision() > r4 + 1, "解除でも増える");
     }
 
     /// Undo などで消えた要素が選択に残らないこと。

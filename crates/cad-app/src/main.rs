@@ -16,6 +16,8 @@ mod hover;
 mod input;
 mod jp_font;
 mod layer_panel;
+mod properties;
+mod properties_panel;
 mod render;
 mod resolved;
 mod ribbon;

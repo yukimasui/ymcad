@@ -12,6 +12,7 @@ use crate::file_ops::{self, FileOps, FileOutcome};
 use crate::hover::Hover;
 use crate::input::{self, ViewAction};
 use crate::layer_panel::LayerPanel;
+use crate::properties_panel::PropertiesPanel;
 use crate::render;
 use crate::resolved::ResolvedInstances;
 use crate::ribbon::Ribbon;
@@ -31,6 +32,8 @@ fn default_drawing_limits() -> Aabb {
 
 /// ZOOM 時に取る余白の割合。
 const FIT_MARGIN: f64 = 0.05;
+/// プロパティパネルの既定の幅 [px]。レイヤ・コンポーネントより狭い（値が主で、長い表は無い）。
+const PROPERTIES_PANEL_WIDTH: f32 = 300.0;
 /// クリック選択の拾い半径 [px]。画面上で一定になるようモデル空間へ換算して使う。
 const PICK_RADIUS_PX: f32 = 6.0;
 /// この距離[px]を超えてドラッグしたら、クリックではなく矩形選択とみなす。
@@ -108,6 +111,8 @@ pub struct CadApp {
     layer_panel: LayerPanel,
     /// コンポーネントのパネル。
     component_panel: ComponentPanel,
+    /// プロパティパネル（選んだ図形の値とレイヤ）。
+    properties_panel: PropertiesPanel,
     /// リボン（画面上端のタブつきアイコンバー）。
     ribbon: Ribbon,
     /// ファイル操作と未保存確認。
@@ -145,6 +150,7 @@ impl CadApp {
             resolved: ResolvedInstances::new(),
             layer_panel: LayerPanel::new(),
             component_panel: ComponentPanel::new(),
+            properties_panel: PropertiesPanel::new(),
             ribbon: Ribbon::new(),
             files: FileOps::new(),
             quitting: false,
@@ -343,6 +349,7 @@ impl CadApp {
             match action {
                 UiAction::ToggleLayerPanel => self.layer_panel.toggle(),
                 UiAction::ToggleComponentPanel => self.component_panel.toggle(),
+                UiAction::TogglePropertiesPanel => self.properties_panel.toggle(),
                 UiAction::File(a) => {
                     let outcome = self.files.request(a, &mut self.doc);
                     self.report_file_outcome(outcome);
@@ -799,6 +806,8 @@ impl CadApp {
                 // コンポーネントの編集）とスナップを捨てる（ADR-0039）。
                 // 座標の欄も最小の幅へ戻す（広がったままにしない）。
                 self.session.document_replaced();
+                // 版番号が前の図面と重なりうるので、選択の要約も作り直す。
+                self.properties_panel.invalidate();
                 self.session.cmdline.info(msg);
                 self.snap.release();
                 self.coord_width = COORD_MIN_WIDTH;
@@ -897,6 +906,63 @@ impl CadApp {
 }
 
 impl CadApp {
+    /// プロパティパネルを描画し、返ってきたコマンドを適用する。Ctrl+1 もここで扱う。
+    fn properties_area(&mut self, ui: &mut egui::Ui) {
+        self.handle_properties_shortcut(ui.ctx());
+        if !self.properties_panel.is_open() {
+            return;
+        }
+        egui::Panel::right("properties")
+            .default_size(PROPERTIES_PANEL_WIDTH)
+            .show(ui, |ui| {
+                // 選択待ちを含め、コマンドを実行している間は表示だけにする。
+                let busy = self.session.active_command().is_some();
+                let commands = self.properties_panel.show(
+                    ui,
+                    &self.doc,
+                    &self.session.selection,
+                    busy,
+                );
+                for cmd in commands {
+                    let before = self.session.selection.len();
+                    self.session.apply_external(cmd, &mut self.doc);
+                    let dropped = before.saturating_sub(self.session.selection.len());
+                    // 実行中は `apply_external` が案内する（ここへ来るのは実行中でないときだけ）。
+                    // ロック・非表示のレイヤへ移すと選択から外れる。パネルは空の表示に変わるので、
+                    // 黙っていると消えたように見える。
+                    if dropped > 0 && !busy {
+                        self.session.cmdline.info(format!(
+                            "PROPERTIES: 移し先のレイヤがロックか非表示のため、{dropped} 個が選択から外れました"
+                        ));
+                    }
+                }
+            });
+    }
+
+    /// Ctrl+1 でプロパティパネルを開閉する。
+    ///
+    /// キーの持ち主はコマンドラインの扱いに従う（ADR-0035）。日本語の変換中、パネルの入力欄に
+    /// フォーカスがあるとき、モーダル（未保存確認）が出ているときは奪わない。ボタンやコマンド名と
+    /// 違って履歴には残さず、打ちかけの文字も捨てない（キーボードで開閉するだけの操作）。
+    /// 実行中のコマンドは中断しない（開閉の他のコマンドと同じ。ADR-0037）。
+    fn handle_properties_shortcut(&mut self, ctx: &egui::Context) {
+        let cmdline = &self.session.cmdline;
+        if !cmdline.owns_keys() || cmdline.is_composing() {
+            return;
+        }
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::CTRL, egui::Key::Num1)) {
+            self.properties_panel.toggle();
+        }
+    }
+
+    /// 図面とセッションを直接触る（スナップショットのテストが図形を並べるため。`ui_snapshot` は別モジュール）。
+    #[cfg(test)]
+    pub fn parts_mut(&mut self) -> (&mut Document, &mut Session) {
+        (&mut self.doc, &mut self.session)
+    }
+}
+
+impl CadApp {
     /// リボンの状態（スクリーンショットのテスト用。`ui_snapshot` は別モジュールなので）。
     #[cfg(test)]
     pub fn ribbon(&self) -> &Ribbon {
@@ -941,6 +1007,7 @@ impl eframe::App for CadApp {
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
         self.layer_area(ui);
         self.component_area(ui);
+        self.properties_area(ui);
         egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
         self.dynamic_input_area(&ctx);
     }
