@@ -15,6 +15,7 @@ use egui_kittest::Harness;
 use super::CadApp;
 use crate::cmdline::LineKind;
 
+mod grips;
 mod hover;
 mod properties;
 mod rename;
