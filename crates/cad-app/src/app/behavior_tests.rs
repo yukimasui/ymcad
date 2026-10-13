@@ -18,6 +18,7 @@ use crate::cmdline::LineKind;
 mod file_dialog;
 mod grips;
 mod hint;
+mod hint_actions;
 mod hover;
 mod properties;
 mod rename;

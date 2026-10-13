@@ -14,11 +14,13 @@
 //! また変換を確定する `Enter` と、コマンドを確定する `Enter` は別の打鍵になる
 //! （変換中は winit がキー入力イベントを送らないため、自然にそうなる）。
 
+pub mod actions;
 pub mod command_help;
 pub mod coord;
 pub mod dimension;
 pub mod dynamic;
 pub mod hint;
+pub mod prompt;
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -305,6 +307,8 @@ pub struct CommandLine {
 struct HintView {
     /// オンか。既定はオン（お試し）。ステータスバーの `HINT` で切り替える。
     enabled: bool,
+    /// 実行中のコマンドの段階と作図補助の状態（[`CommandLine::set_hint_stage`]）。
+    stage: Option<(actions::Stage, actions::Assists)>,
     // 前のフレームの中身や大きさは持たない。大きさは毎フレーム、見えない `Area` で測り直す
     // （[`CommandLine::show_hint`]）。なので動的入力をオフにしたフレーム（`show_floating` が
     // 早めに戻る）にも、片付けるべき状態が残らない。段階 2 で中身の種類が増えても同じ。
@@ -411,6 +415,7 @@ impl CommandLine {
             select_all_requested: false,
             hint: HintView {
                 enabled: true,
+                stage: None,
                 #[cfg(test)]
                 shown: None,
                 #[cfg(test)]
@@ -593,7 +598,7 @@ impl CommandLine {
     ///
     /// - `allow_suggestions` … コマンド候補を出してよいか。
     ///   ツール実行中や選択待ち中は座標やオプションを打っている段階なので `false` を渡す
-    /// - `modal_open` … モーダル（未保存確認）が出ているか。出ている間、キーと IME の
+    /// - `modal_open` … モーダル（未保存確認・ファイルダイアログ待ち）が出ているか。出ている間、キーと IME の
     ///   持ち主はモーダルで、コマンドラインは扱わない（Issue #24）。モーダルのボタンに
     ///   フォーカスが無いと、フォーカスだけでは「誰も持っていない」に見えるため
     pub fn begin_frame(&mut self, ctx: &egui::Context, allow_suggestions: bool, modal_open: bool) {
@@ -918,16 +923,46 @@ impl CommandLine {
 
         // ヒントは入力欄の枠を描き終えてから、その矩形の外側に別の `Area` で出す。
         // 入力欄の枠の位置・大きさには一切影響しない（ADR-0048）。
-        self.show_hint(ctx, canvas, area.response.rect, anchor, visible);
+        self.show_hint(
+            ctx,
+            prompt,
+            canvas,
+            area.response.rect,
+            anchor,
+            visible,
+            fields,
+        );
     }
 
     /// いま出すヒントの中身。出すものが無ければ `None`。
     ///
-    /// 段階 1 は、候補が出ていれば `Enter` で実行される候補（`⏎` の行）の説明。
-    /// 段階 2（実行中に今できること）はここに足す。
-    fn current_hint(&self) -> Option<Hint> {
-        let index = self.suggestions.effective_index(&self.input)?;
-        hint::for_command(self.suggestions.items.get(index)?.name)
+    /// - 候補が出ていれば、`Enter` で実行される候補（`⏎` の行）の説明（段階 1）
+    /// - コマンドの実行中なら、今の段階でできること（段階 2）。プロンプト・`Session` の段階
+    ///   （[`Self::set_hint_stage`]）・寸法入力の欄・作図補助の状態から組み立てる
+    ///
+    /// 実行中は候補を出さないので、2 つが同時に当てはまることは無い。
+    fn current_hint(&self, prompt: &str, fields: bool) -> Option<Hint> {
+        if let Some(index) = self.suggestions.effective_index(&self.input) {
+            return hint::for_command(self.suggestions.items.get(index)?.name);
+        }
+        let (stage, assists) = self.hint.stage?;
+        let dim = fields.then(|| actions::DimHint {
+            kind: self.dim.kind,
+            field: self.dim.state.field,
+            locked: !self.dim.state.locks.is_empty(),
+            has_input: matches!(
+                dimension::classify(&self.input),
+                dimension::BufferKind::Number(_) | dimension::BufferKind::Incomplete
+            ),
+        });
+        let built = actions::build(prompt, stage, dim, assists);
+        (!built.items.is_empty()).then_some(Hint::Actions(built))
+    }
+
+    /// 実行中のコマンドの段階と作図補助の状態を伝える（「今できること」の材料。Issue #27 段階 2）。
+    /// 動的入力を描く前に毎フレーム呼ぶ。何も実行していなければ `None`。
+    pub fn set_hint_stage(&mut self, stage: Option<(actions::Stage, actions::Assists)>) {
+        self.hint.stage = stage;
     }
 
     /// 動的入力の枠のそばにヒントを出す（Issue #27、ADR-0048）。
@@ -941,13 +976,16 @@ impl CommandLine {
     /// 見せる `Area` の大きさは前フレームの実寸なので、中身が変わったフレームにそれを使うと、
     /// 古い大きさで置いて枠やカーソルに重なりうる（ADR-0048 決定 3）。
     /// どこにも入らなければ出さない（[`hint::place_hint`]）。
+    #[allow(clippy::too_many_arguments)]
     fn show_hint(
         &mut self,
         ctx: &egui::Context,
+        prompt: &str,
         canvas: egui::Rect,
         box_rect: egui::Rect,
         cursor: Point,
         box_visible: bool,
+        fields: bool,
     ) {
         let situation = hint::Situation {
             enabled: self.hint.enabled,
@@ -959,7 +997,7 @@ impl CommandLine {
         if !hint::allowed(situation) {
             return;
         }
-        let Some(content) = self.current_hint() else {
+        let Some(content) = self.current_hint(prompt, fields) else {
             return;
         };
 
@@ -1379,11 +1417,67 @@ fn draw_hint(
                     Hint::Command { name, description } => {
                         show_command_hint(ui, name, description);
                     }
+                    Hint::Actions(actions) => show_actions_hint(ui, actions),
                 });
         })
         .response
         .rect;
     DrawnHint { rect, visible }
+}
+
+/// 「今できること」のヒント。キーを強く、意味を普通の色で、` · ` で区切って折り返す。
+/// 2 行目に作図補助（F3 / F8 / F10）の状態を薄く出す（効く段階だけ）。
+fn show_actions_hint(ui: &mut egui::Ui, actions: &actions::Actions) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    action_row(ui, &actions.items, false);
+    if !actions.status.is_empty() {
+        action_row(ui, &actions.status, true);
+    }
+}
+
+/// 操作を 1 段落に並べる。`weak` なら全体を薄く小さく。
+///
+/// 1 つの操作（キー・意味・後ろの区切り）を 1 つのラベルにして、操作の途中で折り返さない。
+/// 区切りは後ろに付けるので、行頭に `·` が来ない。
+fn action_row(ui: &mut egui::Ui, items: &[actions::Action], weak: bool) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let size = if weak {
+            HINT_TEXT_SIZE - 1.0
+        } else {
+            HINT_TEXT_SIZE
+        };
+        let (key_color, text_color) = if weak {
+            (
+                ui.visuals().weak_text_color(),
+                ui.visuals().weak_text_color(),
+            )
+        } else {
+            (ui.visuals().strong_text_color(), ui.visuals().text_color())
+        };
+        let sep_color = ui.visuals().weak_text_color();
+        let font = egui::FontId::proportional(size);
+        let format = |color| egui::TextFormat {
+            font_id: font.clone(),
+            color,
+            ..Default::default()
+        };
+        for (i, item) in items.iter().enumerate() {
+            let mut job = egui::text::LayoutJob::default();
+            if !item.key.is_empty() {
+                job.append(&item.key, 0.0, format(key_color));
+            }
+            if !item.text.is_empty() {
+                let gap = if item.key.is_empty() { 0.0 } else { size / 3.0 };
+                job.append(&item.text, gap, format(text_color));
+            }
+            if i + 1 < items.len() {
+                job.append("·", size / 2.0, format(sep_color));
+                job.append(" ", size / 2.0, format(sep_color));
+            }
+            ui.add(egui::Label::new(job).wrap_mode(egui::TextWrapMode::Extend));
+        }
+    });
 }
 
 /// コマンドの説明のヒント。左にリボンと同じアイコン、右に名前と説明。
