@@ -149,7 +149,7 @@ fn classify(picked: Option<PathBuf>, failure: Option<String>) -> DialogReply {
 #[must_use]
 pub fn unavailable_message(request: &DialogRequest, reason: &str) -> String {
     format!(
-        "{}のダイアログを出せませんでした（{reason}）。\
+        "「{}」のダイアログを出せませんでした（{reason}）。\
          xdg-desktop-portal か zenity が必要です。\
          Ubuntu / WSL では `sudo apt install zenity` で入ります",
         request.title()
