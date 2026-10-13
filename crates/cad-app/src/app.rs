@@ -503,8 +503,8 @@ impl CadApp {
 
         // F3 で OSNAP を切り替える。コマンドラインより先に取る必要はないが、
         // TextEdit は F3 を消費しないのでここで拾って問題ない。
-        // モーダル（未保存確認）が出ている間はどちらも扱わない（Issue #24）。
-        let modal = self.files.is_confirming();
+        // モーダル（未保存確認・ファイルダイアログ待ち）が出ている間はどちらも扱わない（Issue #24・#98）。
+        let modal = self.files.is_modal();
         if !modal && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F3)) {
             self.toggle_osnap();
         }
@@ -1132,8 +1132,12 @@ impl CadApp {
 
     /// ショートカットとウィンドウの終了要求を処理する。
     fn handle_file_input(&mut self, ctx: &egui::Context) {
-        // 確認ダイアログ表示中はショートカットを受け付けない。
-        if !self.files.is_confirming() {
+        // ファイルダイアログの結果が届いていれば、開く・保存する（Issue #98）。
+        let outcome = self.files.poll(&mut self.doc);
+        self.report_file_outcome(outcome);
+
+        // 確認ダイアログ・ファイルダイアログの最中はショートカットを受け付けない。
+        if !self.files.is_modal() {
             if let Some(action) = file_ops::shortcut(ctx) {
                 let outcome = self.files.request(action, &mut self.doc);
                 self.report_file_outcome(outcome);
@@ -1142,7 +1146,14 @@ impl CadApp {
 
         // ウィンドウの ✕ ボタン。未保存なら一旦止めて確認する。
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
-            if self.doc.is_dirty() {
+            if self.files.is_choosing_file() {
+                // ダイアログの結果を待っている間は終了しない。保存の途中で終わると変更を失い、
+                // 開く途中で終わると未保存確認を済ませた意味が無くなる。
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.session.cmdline.error(
+                    "ファイルを選んでいる間は終了できません。ダイアログを閉じてから終了してください",
+                );
+            } else if self.doc.is_dirty() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 let outcome = self
                     .files
@@ -1153,6 +1164,8 @@ impl CadApp {
             }
         }
 
+        let outcome = self.files.show_waiting(ctx);
+        self.report_file_outcome(outcome);
         let outcome = self.files.show_confirm(ctx, &mut self.doc);
         self.report_file_outcome(outcome);
 
@@ -1330,6 +1343,12 @@ impl CadApp {
         }
     }
 
+    /// ファイル操作を差し替える（スナップショットのテストがダイアログを偽物にするため）。
+    #[cfg(test)]
+    pub fn set_file_ops(&mut self, files: FileOps) {
+        self.files = files;
+    }
+
     /// 図面とセッションを直接触る（スナップショットのテストが図形を並べるため。`ui_snapshot` は別モジュール）。
     #[cfg(test)]
     pub fn parts_mut(&mut self) -> (&mut Document, &mut Session) {
@@ -1367,7 +1386,7 @@ impl CadApp {
 }
 
 impl eframe::App for CadApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // 順序に依存する: `handle_file_input` が先でなければ、このフレームで開いた
         // モーダルを `begin_frame` が知らず、1 フレーム分キーを奪ってしまう（Issue #24）。
@@ -1386,7 +1405,7 @@ impl eframe::App for CadApp {
             .set_dimension_base(dimension_base, dimension_kind);
         self.session
             .cmdline
-            .begin_frame(&ctx, allow_suggestions, self.files.is_confirming());
+            .begin_frame(&ctx, allow_suggestions, self.files.is_modal());
         // Shift の一時反転（Issue #36）。キーの持ち主と変換中が決まった後、ステータスバーと
         // キャンバスより前に 1 回だけ決める（同じフレームの表示と拘束が同じ Shift の値を見る）。
         self.shift_flip = self.shift_flip_for_frame(&ctx);
@@ -1402,6 +1421,9 @@ impl eframe::App for CadApp {
         self.properties_area(ui);
         egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
         self.dynamic_input_area(&ctx);
+        // このフレームで頼まれたファイルダイアログを開く。親ウィンドウに `frame` が要るので
+        // ここで開く（ブロックしない。結果は次以降のフレームの `handle_file_input` が受け取る）。
+        self.files.launch(Some(frame), &ctx);
     }
 }
 
