@@ -534,6 +534,7 @@ dependencies = [
  "egui",
  "egui_extras",
  "egui_kittest",
+ "log",
  "rfd",
 ]
 

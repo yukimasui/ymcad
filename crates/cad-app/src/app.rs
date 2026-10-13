@@ -55,6 +55,8 @@ const PROPERTIES_PANEL_MIN_WIDTH: f32 = 200.0;
 const PICK_RADIUS_PX: f32 = 6.0;
 /// この距離[px]を超えてドラッグしたら、クリックではなく矩形選択とみなす。
 const DRAG_THRESHOLD_PX: f32 = 4.0;
+/// 動的入力がオフで効いていない間の、ステータスバーの `HINT` の ON の色の濃さ（Issue #27）。
+const HINT_DORMANT_OPACITY: f32 = 0.45;
 
 /// 直近の描画時間を保持して平均と最大を出す。
 ///
@@ -323,6 +325,11 @@ impl CadApp {
             self.cursor_model
                 .map(|c| crate::cmdline::dimension::live(base, c))
         });
+        let hint_stage = self
+            .session
+            .hint_stage()
+            .map(|stage| (stage, self.hint_assists()));
+        self.session.cmdline.set_hint_stage(hint_stage);
         self.session.cmdline.show_floating(
             ctx,
             &prompt,
@@ -337,6 +344,28 @@ impl CadApp {
             ctx.request_repaint();
         }
         self.apply_submission(submission);
+    }
+
+    /// ヒントの 2 行目に出す作図補助の状態（Issue #27 段階 2）。**効く段階のものだけ**、
+    /// **実際に効いている状態**（Shift の一時反転・直交の優先を反映した後）で返す。
+    ///
+    /// スナップは点の入力を待っている段階（図形を指す段階を除く。`canvas` の `snap_wanted` と同じ条件）、
+    /// 直交・極は基準点のある点の指定（`Session::tracking_base`）で効く。
+    fn hint_assists(&self) -> crate::cmdline::actions::Assists {
+        let snap_wanted = self.session.wants_point() && !self.session.wants_entity();
+        let now = self.drafting_now();
+        let ortho = now.is_on(drafting::Mode::Ortho);
+        crate::cmdline::actions::Assists {
+            osnap: snap_wanted.then(|| self.snap.is_enabled()),
+            tracking: self
+                .session
+                .tracking_base()
+                .map(|_| crate::cmdline::actions::Tracking {
+                    ortho,
+                    polar: now.is_on(drafting::Mode::Polar),
+                    shift: self.shift_flip_active(),
+                }),
+        }
     }
 
     /// オブジェクトスナップを切り替え、履歴に残す。
@@ -405,6 +434,55 @@ impl CadApp {
         self.session.cmdline.info(format!("動的入力: {state}"));
     }
 
+    /// ヒント（動的入力のそばの説明、Issue #27）を切り替え、履歴に残す。
+    fn toggle_hint(&mut self) {
+        let state = if self.session.cmdline.toggle_hint() {
+            "ON"
+        } else {
+            "OFF"
+        };
+        self.session.cmdline.info(format!("ヒント: {state}"));
+    }
+
+    /// ステータスバーの `HINT`（Issue #27、ADR-0048）。`DYN` と同じ見せ方で、クリックで切り替える。
+    ///
+    /// 動的入力がオフの間はヒントを出さないが、切り替え自体はできる（オンに戻したときに効く）。
+    /// そのあいだ `HINT` は ON の色を薄くし、ツールチップで「今は出ない」ことを伝える
+    /// （ON の色のままだと「オンなのに出ない」と迷う。PR #100 の操作レビュー）。
+    fn hint_toggle(&mut self, ui: &mut egui::Ui) {
+        let dynamic = self.session.cmdline.is_dynamic();
+        let text = if self.session.cmdline.is_hint_enabled() {
+            let color = if dynamic {
+                render::ON_COLOR
+            } else {
+                render::ON_COLOR.gamma_multiply(HINT_DORMANT_OPACITY)
+            };
+            egui::RichText::new("HINT").monospace().color(color)
+        } else {
+            egui::RichText::new("hint")
+                .monospace()
+                .color(ui.visuals().weak_text_color())
+        };
+        let clicked = ui
+            .add(
+                egui::Label::new(text)
+                    .selectable(false)
+                    .sense(egui::Sense::click()),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(if dynamic {
+                "ヒント（カーソル横の入力欄のそばに出るコマンドの説明）の ON/OFF\n\
+                 動的入力（DYN）がオンのときだけ出ます"
+            } else {
+                "ヒント（カーソル横の入力欄のそばに出るコマンドの説明）の ON/OFF\n\
+                 動的入力（DYN）がオフなので、今は出ません"
+            })
+            .clicked();
+        if clicked {
+            self.toggle_hint();
+        }
+    }
+
     /// コマンドラインで確定された操作を実行する。
     fn apply_submission(&mut self, submission: Submission) {
         if submission == Submission::None {
@@ -452,8 +530,8 @@ impl CadApp {
 
         // F3 で OSNAP を切り替える。コマンドラインより先に取る必要はないが、
         // TextEdit は F3 を消費しないのでここで拾って問題ない。
-        // モーダル（未保存確認）が出ている間はどちらも扱わない（Issue #24）。
-        let modal = self.files.is_confirming();
+        // モーダル（未保存確認・ファイルダイアログ待ち）が出ている間はどちらも扱わない（Issue #24・#98）。
+        let modal = self.files.is_modal();
         if !modal && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F3)) {
             self.toggle_osnap();
         }
@@ -760,7 +838,7 @@ impl CadApp {
 }
 
 impl CadApp {
-    /// ステータスバーの切り替え部品（OSNAP / ORTHO / POLAR / DYN）と「コマンド実行中」。
+    /// ステータスバーの切り替え部品（OSNAP / ORTHO / POLAR / DYN / HINT）と「実行中」。
     ///
     /// 座標の直後に置く。幅が足りないとステータスバーは右端から切れるので、
     /// クリックで操作する部品を情報表示より先にする（Issue #38。PR #35 で ORTHO / POLAR が
@@ -828,18 +906,29 @@ impl CadApp {
         if dyn_label.clicked() {
             self.toggle_dynamic_input();
         }
+        // HINT は動的入力のそばに出るもので、DYN がオンのときだけ効く。DYN の続きとして
+        // 区切り線を挟まずに並べる（幅を節約し、DYN に付いた切り替えに見えるように）。
+        self.hint_toggle(ui);
         ui.separator();
-        // 「コマンド実行中」の欄は待機中も空のまま幅を確保する。出たり消えたりするたびに
+        // 「実行中」の欄は待機中も空のまま幅を確保する。出たり消えたりするたびに
         // 後ろの表示が跳ねないように（PR #39）。
-        const RUNNING: &str = "コマンド実行中";
+        // 文字は「実行中」だけにする（もとは「コマンド実行中」）。HINT が増えても、幅 800px で
+        // レイヤと選択の表示を押し出さないため（Issue #27、ADR-0048 決定 6）。何の実行中かは
+        // 琥珀色・カーソル横のプロンプト・リボンのボタンの色で分かり、ツールチップでも補う。
+        const RUNNING: &str = "実行中";
         let running_width = text_width(ui, RUNNING);
         let running = self.session.has_active_tool();
         fixed_width(ui, running_width, |ui| {
             if running {
-                ui.colored_label(
-                    egui::Color32::from_rgb(0xff, 0xc1, 0x07),
-                    egui::RichText::new(RUNNING).monospace(),
-                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(RUNNING)
+                            .monospace()
+                            .color(egui::Color32::from_rgb(0xff, 0xc1, 0x07)),
+                    )
+                    .selectable(false),
+                )
+                .on_hover_text("コマンドの実行中（Esc で中断）");
             }
         });
         // 区切り線の幅はスタイルで決まるので、実際に描いた前後の位置から測る。
@@ -1070,8 +1159,12 @@ impl CadApp {
 
     /// ショートカットとウィンドウの終了要求を処理する。
     fn handle_file_input(&mut self, ctx: &egui::Context) {
-        // 確認ダイアログ表示中はショートカットを受け付けない。
-        if !self.files.is_confirming() {
+        // ファイルダイアログの結果が届いていれば、開く・保存する（Issue #98）。
+        let outcome = self.files.poll(&mut self.doc);
+        self.report_file_outcome(outcome);
+
+        // 確認ダイアログ・ファイルダイアログの最中はショートカットを受け付けない。
+        if !self.files.is_modal() {
             if let Some(action) = file_ops::shortcut(ctx) {
                 let outcome = self.files.request(action, &mut self.doc);
                 self.report_file_outcome(outcome);
@@ -1080,7 +1173,13 @@ impl CadApp {
 
         // ウィンドウの ✕ ボタン。未保存なら一旦止めて確認する。
         if ctx.input(|i| i.viewport().close_requested()) && !self.quitting {
-            if self.doc.is_dirty() {
+            if self.files.is_choosing_file() {
+                // ダイアログの結果を待っている間は終了しない。保存の途中で終わると変更を失い、
+                // 開く途中で終わると未保存確認を済ませた意味が無くなる。
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                // 理由はモーダルの中に出す（裏のコマンドラインは目に入りにくい。Issue #102）。
+                self.files.refuse_close();
+            } else if self.doc.is_dirty() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 let outcome = self
                     .files
@@ -1091,6 +1190,8 @@ impl CadApp {
             }
         }
 
+        let outcome = self.files.show_waiting(ctx);
+        self.report_file_outcome(outcome);
         let outcome = self.files.show_confirm(ctx, &mut self.doc);
         self.report_file_outcome(outcome);
 
@@ -1268,6 +1369,12 @@ impl CadApp {
         }
     }
 
+    /// ファイル操作を差し替える（スナップショットのテストがダイアログを偽物にするため）。
+    #[cfg(test)]
+    pub fn set_file_ops(&mut self, files: FileOps) {
+        self.files = files;
+    }
+
     /// 図面とセッションを直接触る（スナップショットのテストが図形を並べるため。`ui_snapshot` は別モジュール）。
     #[cfg(test)]
     pub fn parts_mut(&mut self) -> (&mut Document, &mut Session) {
@@ -1305,7 +1412,7 @@ impl CadApp {
 }
 
 impl eframe::App for CadApp {
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         // 順序に依存する: `handle_file_input` が先でなければ、このフレームで開いた
         // モーダルを `begin_frame` が知らず、1 フレーム分キーを奪ってしまう（Issue #24）。
@@ -1324,7 +1431,7 @@ impl eframe::App for CadApp {
             .set_dimension_base(dimension_base, dimension_kind);
         self.session
             .cmdline
-            .begin_frame(&ctx, allow_suggestions, self.files.is_confirming());
+            .begin_frame(&ctx, allow_suggestions, self.files.is_modal());
         // Shift の一時反転（Issue #36）。キーの持ち主と変換中が決まった後、ステータスバーと
         // キャンバスより前に 1 回だけ決める（同じフレームの表示と拘束が同じ Shift の値を見る）。
         self.shift_flip = self.shift_flip_for_frame(&ctx);
@@ -1340,6 +1447,9 @@ impl eframe::App for CadApp {
         self.properties_area(ui);
         egui::CentralPanel::no_frame().show(ui, |ui| self.canvas(ui));
         self.dynamic_input_area(&ctx);
+        // このフレームで頼まれたファイルダイアログを開く。親ウィンドウに `frame` が要るので
+        // ここで開く（ブロックしない。結果は次以降のフレームの `handle_file_input` が受け取る）。
+        self.files.launch(Some(frame), &ctx);
     }
 }
 

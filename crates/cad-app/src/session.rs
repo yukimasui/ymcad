@@ -212,6 +212,18 @@ impl Session {
         }
     }
 
+    /// ヒントの「今できること」（Issue #27 段階 2）に渡す、いまの段階。何も実行していなければ `None`。
+    #[must_use]
+    pub fn hint_stage(&self) -> Option<crate::cmdline::actions::Stage> {
+        self.tool.as_ref()?;
+        Some(crate::cmdline::actions::Stage {
+            selecting: self.awaiting_selection,
+            gripping: self.is_gripping(),
+            wants_entity: !self.awaiting_selection && self.wants_entity(),
+            has_base: !self.awaiting_selection && self.last_point().is_some(),
+        })
+    }
+
     /// 実行中のツールがあるか。
     #[must_use]
     pub fn has_active_tool(&self) -> bool {
@@ -1238,6 +1250,9 @@ fn select_all_notice(selected: usize, outside_edit: usize, excluded: usize) -> S
 
 #[cfg(test)]
 mod grip_tests;
+
+#[cfg(test)]
+mod hint_tests;
 
 #[cfg(test)]
 mod select_all_tests;

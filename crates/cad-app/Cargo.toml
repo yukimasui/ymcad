@@ -12,6 +12,9 @@ cad-core.workspace = true
 eframe.workspace = true
 egui.workspace = true
 rfd.workspace = true
+# rfd がファイルダイアログを出せなかったことを、rfd の log を拾って知るため（ADR-0047）。
+# rfd・eframe が既に使っている版で、新しいクレートは増えない。
+log = "0.4"
 # リボンのアイコン（SVG）を表示するため（ADR-0037）。cad-app だけの依存で、cad-core には入れない。
 egui_extras = { version = "0.36.2", default-features = false, features = ["svg"] }
 

@@ -54,7 +54,7 @@ use crate::properties_edit::{
 };
 use crate::selection::Selection;
 
-/// コマンド実行中の案内の色（ステータスバーの「コマンド実行中」と同じ琥珀色）。
+/// コマンド実行中の案内の色（ステータスバーの「実行中」と同じ琥珀色）。
 pub const BUSY_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
 
 /// 選択から外れた案内の色（コマンド実行中の琥珀色とは別にして、状態の案内と区別する）。

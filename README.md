@@ -41,7 +41,7 @@ ymcad ではこれを**テキストの式**に置き換えました（[ADR-0031]
 | **コンポーネント** | 定義 + インスタンス。型付きパラメータと式で駆動。インプレース編集 |
 | **入出力** | `.ymc`（ネイティブ・無損失）/ `.dxf`（R12・交換用） |
 | **リボン** | 画面上端のタブつきアイコンバー（ホーム / コンポーネント / 表示・ファイル）と、どのタブでも押せる UNDO / REDO / SAVE。押すとコマンド名を打ったのと同じく始まる。アイコンは差し替えられる SVG |
-| **その他** | Undo/Redo 256 段、コマンドライン UI、カーソル横の動的入力（`F12` で切替）、寸法入力（長さ・角度の欄と `Tab` での固定）、直接距離入力、座標直接入力、自動段階グリッド |
+| **その他** | Undo/Redo 256 段、コマンドライン UI、カーソル横の動的入力（`F12` で切替）と候補のコマンドの説明（ステータスバーの `HINT` で切替）、寸法入力（長さ・角度の欄と `Tab` での固定）、直接距離入力、座標直接入力、自動段階グリッド |
 
 操作の詳細（コマンド一覧・キーバインド・各コマンドの振る舞い）は
 **[操作マニュアル](docs/MANUAL.md)** にまとめてあります。
@@ -110,6 +110,15 @@ python3 tools/validate_ymc.py /tmp/sample.ymc --verbose
 sudo apt install build-essential pkg-config libssl-dev \
   libgtk-3-dev libxkbcommon-dev libwayland-dev
 sudo apt install fonts-noto-cjk   # 日本語 UI 用（未導入だと文字が □ になります）
+```
+
+ファイルを開く・保存するダイアログは xdg-desktop-portal（GNOME・KDE などのデスクトップには
+入っています）を使い、無ければ zenity を使います。**WSL** やデスクトップ環境の無い構成では
+どちらも無いことが多いので、zenity を入れてください（無いと、ダイアログを出せなかったことと
+対処がコマンドラインに出ます）。
+
+```bash
+sudo apt install zenity   # WSL など、xdg-desktop-portal の無い環境のファイルダイアログ用
 ```
 
 ### ビルド
