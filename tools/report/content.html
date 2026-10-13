@@ -4,11 +4,12 @@
 
 <section class="card now" id="now">
 <h2>いまの状況</h2>
-<p class="stamp">2026-10-09 朝・夜間の自律作業を終えて、今日の作業は終了</p>
+<p class="stamp">2026-10-13 22:20・承認済みの範囲をすべてマージして作業を終えた</p>
 <ul>
-<li>#31 プロパティパネル・#34 選択プレビュー・#30 グリップ編集・<b>#70 MCP サーバー段階 1</b> が完了し、develop に入った。進行中の作業は無い</li>
-<li>MCP は Claude Code から使える。開く・作図・変形・レイヤ・コンポーネント・Undo・PNG で見る・保存まで実機で確認済み（手順は <code>docs/MCP.md</code>）</li>
-<li>次に進めるには、下の「判断してほしいこと」（#36・#27 の計画の承認、#92 の不具合）が要る</li>
+<li><b>ユキの不具合報告 2 件（ファイルダイアログ中に「応答していません」・WSL でダイアログが出ない）を直して develop にマージ済み</b>（#98 / PR #101・#103）。WSL では <code>sudo apt install zenity</code> が要る（出せないときは画面にそう出る。入れた後は起動し直し不要）</li>
+<li>#36 Shift で直交を一時反転（PR #99）、#27 ヒント 段階 1・2（PR #100・#104・#107）も develop にマージ済み</li>
+<li>#27・#36 の計画は「続きに取り組んで」の指示で<b>おすすめの選択肢のまま</b>着手した。違っていたら言ってほしい</li>
+<li>次に進めるには、下の「判断してほしいこと」（#92・#93・#105 の計画の承認）が要る。<b>#92 は Redo で作業が消える不具合で、思ったより広い</b></li>
 </ul>
 </section>
 
@@ -16,16 +17,21 @@
 <h3>判断してほしいこと</h3>
 <div class="tablewrap"><table>
 <tr><th>何を</th><th>どこを見るか・中身</th></tr>
-<tr><td>#36 の計画を承認するか</td><td><a href="https://github.com/yukimasui/ymcad/issues/36#issuecomment-6063729473">Issue #36 の計画案</a>。判断 4 つ（グリップ中も効かせる・押している間のステータスバー・Shift＋ホイール・打ちかけの文字）</td></tr>
-<tr><td>#27 の計画を承認するか</td><td><a href="https://github.com/yukimasui/ymcad/issues/27#issuecomment-6063744231">Issue #27 の計画案</a>。判断 9 つ。#36 に依存しないので先に始めるのを推奨</td></tr>
-<tr><td>#92 の不具合を直してよいか</td><td>cad-core の Redo の ID。Command の挙動の変更（依存・構造は変えない見込み）</td></tr>
+<tr><td>「待つのをやめる」ボタン（#98）</td><td>ファイルダイアログを待っている間のモーダルに置いた（OS のダイアログが返ってこないとアプリが終了もできなくなるため、実装者の判断で追加）。要るか・文言</td></tr>
+<tr><td><b>#92 の計画を承認するか</b></td><td><a href="https://github.com/yukimasui/ymcad/issues/92#issuecomment-6145690068">Issue #92 の計画案</a>。作るコマンド（LINE・COPY・TRIM・FILLET・COMPONENT・レイヤ追加…）ほぼすべてで、Redo のたびに ID が変わり後のコマンドの Redo が失敗する（LINE → MOVE → U U → REDO REDO で MOVE が消える）。cad-core の Command の変更。判断 6 つ</td></tr>
+<tr><td>#93 の計画を承認するか</td><td><a href="https://github.com/yukimasui/ymcad/issues/93#issuecomment-6146182570">Issue #93 の計画案</a>。下端で 1 文字目を打つと入力欄が跳ねる（エラーの行でも同じ）。候補を入力欄とは別の Area へ。判断 6 つ</td></tr>
+<tr><td>#105 の計画を承認するか</td><td><a href="https://github.com/yukimasui/ymcad/issues/105#issuecomment-6146183188">Issue #105 の計画案</a>。名前の「ー」が「-」に変わる。COMPONENT では黙って「コンポ-ネント2」という定義ができる。判断 3 つ</td></tr>
+<tr><td>ヒントの細部（#106 の 3・4）</td><td>ヒントの改行の位置、HINT の切り替えを「候補の説明」と「今できること」で分けるか。実機で使ってみた感想しだい</td></tr>
 <tr><td>MCP の推奨 14 項目の見直し</td><td><a href="https://github.com/yukimasui/ymcad/issues/70#issuecomment-6062005870">Issue #70</a>。とくに ADR-0046 決定 9: PNG を作るとき px の値を usvg が f32 で読む（設計原則 1 の f32 の出口が 1 つ増えた）</td></tr>
-<tr><td>develop → main のマージ</td><td>10/8〜9 の分（PR 25 本ほど）がすべて develop にある。main へは確認後。Issue の多くは main に入ったときに自動で閉じる</td></tr>
+<tr><td>develop → main のマージ</td><td>10/8〜9 の分（PR 25 本ほど）と 10/13 の分（#97・#99・#100・#101・#103・#104・#107）がすべて develop にある。main へは確認後。Issue の多くは main に入ったときに自動で閉じる</td></tr>
 </table></div>
 
 <h3>実機で確かめてほしいこと</h3>
 <p class="lead">自動のテストでは確かめられない手触り・見え方。確かめたら PROGRESS か Issue に一言。</p>
 <div class="checkgrid">
+<div class="checkgroup"><h3>ファイルダイアログ（#98）</h3><ul class="checks"><li>Ctrl+O で選んでいる間に「応答していません」が出ないこと、ダイアログがアプリの上に付くこと</li><li>WSL: zenity を入れる前は理由と対処が出る → <code>sudo apt install zenity</code> の後は起動し直さずにダイアログが出る</li><li>ダイアログが他のウィンドウの後ろに隠れたとき、モーダルの案内で気づけるか</li><li>未保存確認 → 保存 → 開く の流れで迷わないか</li></ul></div>
+<div class="checkgroup"><h3>ヒント（#27）</h3><ul class="checks"><li>コマンド候補の説明・LINE の 2 点目の「今できること」（2〜3 行）の量と 11.5pt の読みやすさ</li><li>薄い F3/F8/F10 の行が役立つかうるさいか（Shift を押したときの切り替わり）</li><li>ヒントが入力欄の下と横を行き来するときのちらつき、mozc の候補ウィンドウとの重なり</li><li>ステータスバーの「実行中」で通じるか、DYN オフで薄くなる HINT</li></ul></div>
+<div class="checkgroup"><h3>Shift で直交を一時反転（#36）</h3><ul class="checks"><li>LINE の 2 点目などで Shift を押している間だけ反転し、離すと戻る手触り</li><li>ステータスバーの青い帯の上の <code>ortho</code> が読めるか</li><li>fcitx5 / ibus の「Shift 単独で入力切り替え」と干渉しないか</li><li>Shift を押したまま別ウィンドウへ移って離したとき反転が残らないか</li></ul></div>
 <div class="checkgroup"><h3>MCP（#70）</h3><ul class="checks"><li>Claude Code に <code>claude mcp add ymcad -- &lt;repo&gt;/target/release/ymcad-mcp --root &lt;図面のフォルダ&gt;</code> で登録し、「100×50 の矩形を描いて PNG で見せて」などと話しかける（手順は <code>docs/MCP.md</code>）</li></ul></div>
 <div class="checkgroup"><h3>グリップ（#30）</h3><ul class="checks"><li>乗せたときの反応と追従</li><li>実マウスで「押す → 少し動く → 離す」が掴みになる感触</li><li>HiDPI での 8px / 12px</li><li>重なった角（矩形の 2 本）を狙う感触</li></ul></div>
 <div class="checkgroup"><h3>プロパティパネル（#31）</h3><ul class="checks"><li>数値のドラッグの速さ（ズームを大きく変えたとき）</li><li>「クリックで入力・ドラッグで増減」の切り分け</li><li>IME で全角数字</li><li>1366px 前後でレイヤとプロパティの 2 枚を開いたときの作図領域</li><li>Ctrl+1 が OS・JIS 配列に取られないか</li><li>ライトテーマでの案内の色（シアン・琥珀）、パネルの横スクロールバーと Shift＋ホイール</li></ul></div>
@@ -47,8 +53,9 @@
 <tr><td>選択プレビュー（ホバー・TRIM / EXTEND のプレビュー・全選択）</td><td><a href="https://github.com/yukimasui/ymcad/issues/34">#34</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/63">#63</a> <a href="https://github.com/yukimasui/ymcad/pull/67">#67</a> <a href="https://github.com/yukimasui/ymcad/pull/72">#72</a> <a href="https://github.com/yukimasui/ymcad/pull/88">#88</a></td><td class="note"></td></tr>
 <tr><td>グリップ編集（単一・重なる角・辺の中点）</td><td><a href="https://github.com/yukimasui/ymcad/issues/30">#30</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/81">#81</a> <a href="https://github.com/yukimasui/ymcad/pull/85">#85</a></td><td class="note"></td></tr>
 <tr><td>MCP サーバー 段階 1（骨組み・編集・描画・コンポーネント）</td><td><a href="https://github.com/yukimasui/ymcad/issues/70">#70</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/84">#84</a> <a href="https://github.com/yukimasui/ymcad/pull/91">#91</a> <a href="https://github.com/yukimasui/ymcad/pull/89">#89</a> <a href="https://github.com/yukimasui/ymcad/pull/94">#94</a> <a href="https://github.com/yukimasui/ymcad/pull/95">#95</a></td><td class="note">段階 2（起動中のアプリとつなぐ）は <a href="https://github.com/yukimasui/ymcad/issues/96">#96</a>、着手前に計画の承認が要る</td></tr>
-<tr><td>Shift で直交を一時反転</td><td><a href="https://github.com/yukimasui/ymcad/issues/36">#36</a></td><td><span class="pill wait">承認待ち</span></td><td>—</td><td class="note"><a href="https://github.com/yukimasui/ymcad/issues/36#issuecomment-6063729473">計画案</a>（判断 4 つ）</td></tr>
-<tr><td>動的入力のそばのヒント</td><td><a href="https://github.com/yukimasui/ymcad/issues/27">#27</a></td><td><span class="pill wait">承認待ち</span></td><td>—</td><td class="note"><a href="https://github.com/yukimasui/ymcad/issues/27#issuecomment-6063744231">計画案</a>（判断 9 つ。#36 より先を推奨）</td></tr>
+<tr><td>Shift で直交を一時反転</td><td><a href="https://github.com/yukimasui/ymcad/issues/36">#36</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/99">#99</a></td><td class="note">計画のおすすめのまま（グリップ中も効く・一時の見た目）</td></tr>
+<tr><td>動的入力のそばのヒント</td><td><a href="https://github.com/yukimasui/ymcad/issues/27">#27</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/100">#100</a> <a href="https://github.com/yukimasui/ymcad/pull/104">#104</a> <a href="https://github.com/yukimasui/ymcad/pull/107">#107</a></td><td class="note">段階 1 候補の説明・段階 2 実行中に今できること。ステータスバーの HINT で ON/OFF</td></tr>
+<tr><td>ファイルダイアログが固まる・WSL で出ない（不具合）</td><td><a href="https://github.com/yukimasui/ymcad/issues/98">#98</a> <a href="https://github.com/yukimasui/ymcad/issues/102">#102</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/101">#101</a> <a href="https://github.com/yukimasui/ymcad/pull/103">#103</a></td><td class="note">別スレッドで開き、待つ間はモーダル。出せないときは理由と対処。案内の言い回しも改善（#102 / PR #103）</td></tr>
 <tr><td>追いかけ・不具合の修正</td><td>#37 #44 #48 #51 #55 #59 #64 #65 #68 #73 #74 #78</td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/45">#45</a> <a href="https://github.com/yukimasui/ymcad/pull/49">#49</a> <a href="https://github.com/yukimasui/ymcad/pull/53">#53</a> <a href="https://github.com/yukimasui/ymcad/pull/54">#54</a> <a href="https://github.com/yukimasui/ymcad/pull/58">#58</a> <a href="https://github.com/yukimasui/ymcad/pull/76">#76</a> <a href="https://github.com/yukimasui/ymcad/pull/77">#77</a> <a href="https://github.com/yukimasui/ymcad/pull/71">#71</a> <a href="https://github.com/yukimasui/ymcad/pull/86">#86</a></td><td class="note"></td></tr>
 </table></div>
 
@@ -73,6 +80,9 @@
 <tr><td class="num">15</td><td><span class="area">直交・極</span><br><span class="sub">#35</span></td><td>極の刻みは 15°。吸い付きは<b>画面上 10px 以内かつ角度の差 ±3° 以内</b></td><td>刻み 45° / 90°（AutoCAD の既定）、角度の上限なし</td></tr>
 <tr><td class="num">16</td><td><span class="area">直交・極</span><br><span class="sub">#35</span></td><td>RECTANGLE は直交・極の対象外（対角を直交にすると面積 0 になるため）</td><td>対象にする</td></tr>
 <tr><td class="num">17</td><td><span class="area">直交・極</span><br><span class="sub">#35</span></td><td>日本語の変換中は F8 / F10 に反応しない（IME の半角カナ・半角英数キーと重なるため）</td><td>常に反応</td></tr>
+<tr><td class="num">17b</td><td><span class="area">直交・極</span><br><span class="sub">#99</span></td><td>Shift の一時反転中は ORTHO / POLAR の下に暗い青の帯（#22324d）を敷き、文字は「いま効いている状態」。ふだんの ORTHO のツールチップにも反転の説明</td><td>帯ではなく 1px の枠線 / 表示を変えない</td></tr>
+<tr><td class="num">17c</td><td><span class="area">ヒント</span><br><span class="sub">#100</span></td><td>ステータスバーの「コマンド実行中」を<b>「実行中」</b>に縮めた（HINT を足しても 800px でレイヤ・選択数が入るように。ツールチップに「コマンドの実行中（Esc で中断）」）。DYN と HINT の間に区切り線は置かない。説明文の区切りは「 · 」</td><td>「コマンド実行中」のまま、選択数が入る幅を 840px に</td></tr>
+<tr><td class="num">17d</td><td><span class="area">ファイルダイアログ</span><br><span class="sub">#101</span></td><td>待っている間のモーダルに<b>「待つのをやめる」</b>ボタン（OS のダイアログが返ってこないとアプリが終了もできなくなるため。実装者の追加をレビュアーが妥当と判定）。Esc では抜けない</td><td>ボタンを置かない / Esc で抜ける</td></tr>
 <tr><td class="num">18</td><td><span class="area">ステータスバー</span><br><span class="sub">#39</span></td><td>切り替え部品（OSNAP / ORTHO / POLAR / DYN）を<b>座標の直後</b>へ。情報表示は <b>レイヤ / 選択 / 要素 / 倍率</b> の順にし、入らない項目は右から丸ごと省く</td><td>元の並び（倍率・要素・画層・選択の後に切り替え）</td></tr>
 <tr><td class="num">19</td><td><span class="area">ステータスバー</span><br><span class="sub">#39</span></td><td>CI に日本語フォント（<code>fonts-noto-cjk</code>）を入れ、幅のテストはフォント必須（無ければ理由つきで落ちる）</td><td>フォントの有無でテストの期待値を変える</td></tr>
 <tr><td class="num">20</td><td><span class="area">ステータスバー</span><br><span class="sub">#39</span></td><td>座標の欄は一度広がったら縮めない（図面の入れ替えで戻す）。座標の固定幅は 12 文字。長いレイヤ名は 16 文字で「…」</td><td>毎フレーム桁数に合わせる</td></tr>
@@ -104,9 +114,11 @@
 <h2 id="backlog">起票した課題（未着手）</h2>
 <div class="tablewrap"><table>
 <tr><th>Issue</th><th>種類</th><th>内容</th><th>必要なこと</th></tr>
-<tr><td><a href="https://github.com/yukimasui/ymcad/issues/92">#92</a></td><td><span class="pill bug">不具合</span></td><td>cad-core の AddEntities / AddLayer が Redo のたびに新しい ID を振り、後のコマンドの Redo が失敗する・図形が存在しないレイヤに付く（アプリでも起きる見込み）</td><td class="note">cad-core の変更。<b>直してよいか判断がほしい</b></td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/92">#92</a></td><td><span class="pill bug">不具合</span></td><td>作るコマンドが Redo のたびに新しい ID を振り、後のコマンドの Redo が失敗する（作業が消える）。アプリでも起きる</td><td class="note"><b>計画を Issue に書いた。承認待ち</b>（cad-core の変更）</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/105">#105</a></td><td><span class="pill bug">不具合</span></td><td>INSERT / BIND / COMPONENT / REDEFINE / GROUP で名前の「ー」が「-」に変わる</td><td class="note"><b>計画を Issue に書いた。承認待ち</b></td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/106">#106</a></td><td><span class="pill idea">候補</span></td><td>ヒントの改行の位置、HINT の切り替えを 2 つに分けるか（1・2 は PR #107 で済み）</td><td class="note">実機の感想しだい</td></tr>
 <tr><td><a href="https://github.com/yukimasui/ymcad/issues/96">#96</a></td><td><span class="pill idea">候補</span></td><td>MCP 段階 2: 起動中のアプリと MCP サーバーをつなぐ（LLM の変更がその場で画面に出る）</td><td class="note">計画を立てて承認をもらう。#92 を先に直すと安全</td></tr>
-<tr><td><a href="https://github.com/yukimasui/ymcad/issues/93">#93</a></td><td><span class="pill bug">不具合</span></td><td>作図領域の下端近くで 1 文字目を打つと、候補が出たフレームで入力欄が上へ跳ねる</td><td class="note">#27 の後に判断</td></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/93">#93</a></td><td><span class="pill bug">不具合</span></td><td>作図領域の下端近くで 1 文字目を打つと、候補が出たフレームで入力欄が上へ跳ねる</td><td class="note"><b>計画を Issue に書いた。承認待ち</b>（エラーの行でも同じ跳ね方をする）</td></tr>
 <tr><td><a href="https://github.com/yukimasui/ymcad/issues/60">#60</a></td><td><span class="pill core">cad-core</span></td><td>インスタンスが TRIM / EXTEND の境界にならない</td><td class="note">cad-core の変更</td></tr>
 <tr><td><a href="https://github.com/yukimasui/ymcad/issues/61">#61</a></td><td><span class="pill core">cad-core</span></td><td>作図線があると空間インデックスが分割されず、ほぼ線形探索になる（結果は正しい）</td><td class="note">cad-core の変更</td></tr>
 <tr><td><a href="https://github.com/yukimasui/ymcad/issues/69">#69</a></td><td><span class="pill idea">候補</span></td><td>TRIM / EXTEND: 理由の先出し・U オプション・Shift で切り替え・端点の交点のテスト</td><td class="note">採否を判断</td></tr>
@@ -131,6 +143,18 @@
 
 <h2 id="history">履歴</h2>
 <p class="lead">過去の報告。新しいものが上。</p>
+<details>
+<summary>2026-10-13 夜 — 不具合報告 2 件の修正と #36・#27</summary>
+<div class="detailbody">
+<p>ユーザーの不具合報告（ファイルダイアログで「応答していません」・WSL でダイアログが出ない）を #98 で直し、続けて #36・#27（段階 1・2）を進めた。PR #99・#100・#101・#103・#104・#107 をマージ。#92・#93・#105 は計画を Issue に書いて承認待ち。</p>
+</div>
+</details>
+<details>
+<summary>2026-10-09 朝 — 夜間の自律作業を終えた時点</summary>
+<div class="detailbody">
+<p>#31・#34・#30・#70 MCP 段階 1 が完了し develop に入った。次に進めるには #36・#27 の計画の承認と #92 の判断が要る状態だった（10/13 に「続きに取り組んで」の指示で #36・#27 に着手）。</p>
+</div>
+</details>
 <details>
 <summary>2026-10-08〜09 — 新しいマシンで再開、夜間の自律作業</summary>
 <div class="detailbody">
