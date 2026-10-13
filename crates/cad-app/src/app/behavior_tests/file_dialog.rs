@@ -94,7 +94,12 @@ fn lines_of(h: &Harness<'_, CadApp>, kind: LineKind) -> Vec<String> {
 }
 
 fn waiting_is_shown(h: &Harness<'_, CadApp>) -> bool {
-    h.query_by_label("ファイルを選んでいます…").is_some()
+    h.query_by_label("開く図面を選んでいます…").is_some()
+}
+
+/// 画面に、`text` を含むラベルがあるか。
+fn shows(h: &Harness<'_, CadApp>, text: &str) -> bool {
+    h.query_by_label_contains(text).is_some()
 }
 
 /// 開くのダイアログを待っている間もフレームは回り、作図・別のファイル操作・終了を受け付けない。
@@ -114,6 +119,14 @@ fn the_app_stays_modal_while_the_open_dialog_is_up_and_opens_the_pick() {
     );
     assert!(h.state().files.is_choosing_file(), "結果を待っている");
     assert!(waiting_is_shown(&h), "待っていることが画面に出る");
+    // 何をすればよいか・何を止めているか・見当たらないときどうするか（Issue #102）。
+    assert!(shows(
+        &h,
+        "「図面を開く」のダイアログで開く図面を選ぶか、キャンセルしてください。"
+    ));
+    assert!(shows(&h, "作図・ファイル操作・終了は止めています"));
+    assert!(shows(&h, "他のウィンドウの後ろに隠れていないか"));
+    assert!(!shows(&h, "終了できません"), "✕ を押すまでは出さない");
 
     // フレームは回り続ける（UI スレッドがダイアログで止まっていない）。
     for _ in 0..10 {
@@ -149,17 +162,23 @@ fn the_app_stays_modal_while_the_open_dialog_is_up_and_opens_the_pick() {
     request_close(&mut h);
     assert!(!h.state().quitting, "終了しない");
     assert!(h.state().files.is_choosing_file(), "待ち続ける");
+    // 理由はモーダルの中に出す。裏のコマンドラインは暗くて目に入りにくい（Issue #102）。
     assert!(
-        lines_of(&h, LineKind::Error)
+        shows(&h, "ダイアログを閉じるまで終了できません"),
+        "終了できない理由がモーダルの中に出る"
+    );
+    assert!(
+        !lines_of(&h, LineKind::Error)
             .iter()
             .any(|l| l.contains("終了できません")),
-        "終了できない理由が出る"
+        "コマンドラインには出さない"
     );
 
     assert!(fake.reply(DialogReply::Picked(path.clone())));
     settle(&mut h);
     assert!(!h.state().files.is_modal(), "待つのが終わる");
     assert!(!waiting_is_shown(&h));
+    assert!(!shows(&h, "終了できません"), "モーダルと一緒に消える");
     assert_eq!(lines(&h).len(), 2, "選んだ図面が開かれた");
     assert_eq!(h.state().doc.path(), Some(path.as_path()));
     assert!(lines_of(&h, LineKind::Info)
@@ -202,8 +221,15 @@ fn an_unavailable_dialog_reports_the_reason_and_the_remedy() {
     assert!(!h.state().files.is_modal(), "待ち続けない");
     let errors = lines_of(&h, LineKind::Error);
     let msg = errors.last().expect("エラーが出る");
-    assert!(msg.contains("os error 2"), "理由: {msg}");
-    assert!(msg.contains("sudo apt install zenity"), "対処: {msg}");
+    // 対処を先に、rfd の英文の詳細は最後に。バッククォートは画面にそのまま出るので使わない（Issue #102）。
+    assert_eq!(
+        msg,
+        "「図面を開く」のダイアログを出せませんでした。\
+         WSL・Ubuntu では端末で sudo apt install zenity を実行してから、もう一度お試しください\
+         （アプリの起動し直しは要りません）。\
+         ほかの環境では xdg-desktop-portal か zenity が必要です。\
+         詳細: Failed to pick file with zenity: No such file or directory (os error 2)"
+    );
 }
 
 /// 名前を付けて保存: 拡張子を省いたら `.ymc`、`.dxf` なら DXF（今までどおり）。
@@ -221,6 +247,13 @@ fn save_as_keeps_the_extension_rules() {
         }]
     );
     assert!(h.state().files.is_choosing_file());
+    // 保存では「選ぶ」ではなく保存先の言い方にする（Issue #102）。
+    assert!(shows(&h, "保存先を選んでいます…"));
+    assert!(shows(
+        &h,
+        "「名前を付けて保存」のダイアログで保存先と名前を決めるか、キャンセルしてください。"
+    ));
+    assert!(!waiting_is_shown(&h), "開くの見出しは出さない");
     assert!(fake.reply(DialogReply::Picked(dir.join("plan"))));
     settle(&mut h);
     let ymc = dir.join("plan.ymc");
@@ -369,6 +402,14 @@ fn giving_up_the_wait_ignores_a_late_pick() {
     let button = h.get_by_label("待つのをやめる").rect().center();
     click(&mut h, button);
     assert!(!h.state().files.is_modal(), "モーダルを抜ける");
+    // 自分で選んだ操作なので、エラー（赤）ではなく案内として出す（Issue #102）。
+    assert!(
+        lines_of(&h, LineKind::Info)
+            .iter()
+            .any(|l| l.contains("待つのをやめました")),
+        "案内として出る"
+    );
+    assert!(lines_of(&h, LineKind::Error).is_empty(), "エラーにはしない");
     assert!(
         !fake.reply(DialogReply::Picked(path)),
         "受け手はもう待っていない"
