@@ -947,15 +947,17 @@ impl CommandLine {
         }
         let (stage, assists) = self.hint.stage?;
         let buffer = dimension::classify(&self.input);
-        // 確定すれば送られる文字があるか。数値の打ちかけ（`-` だけ）は値にならないので数えない。
-        let typed = !matches!(
-            buffer,
-            dimension::BufferKind::Empty | dimension::BufferKind::Incomplete
-        );
-        let mut built = actions::build(prompt, stage, self.dim_hint(fields), typed, assists);
-        // 数値の打ちかけ（`-` だけ）での Enter は、空の Enter の意味（`<Enter で終了>` など）にもならず
-        // 「不明なオプション」で断られる。Tab と同じく出さない（PR #104 の操作レビュー）。
-        if buffer == dimension::BufferKind::Incomplete {
+        let dim = self.dim_hint(fields);
+        // 寸法入力のキーを扱う段階での数値の打ちかけ（`-` だけ）。値にならないので「打った」に数えない。
+        // 寸法入力に参加しない段階（名前を打つ段階など）の `-` は、名前の 1 文字目でありうるので
+        // ふつうに打った文字として数える（Issue #106 の 1）。
+        let incomplete_number = dim.is_some() && buffer == dimension::BufferKind::Incomplete;
+        // 確定すれば送られる文字があるか。
+        let typed = buffer != dimension::BufferKind::Empty && !incomplete_number;
+        let mut built = actions::build(prompt, stage, dim, typed, assists);
+        // 寸法入力の段階で数値を打ちかけているときの Enter は、空の Enter の意味（`<Enter で終了>` など）にも
+        // ならず「不明なオプション」で断られる。Tab と同じく出さない（PR #104 の操作レビュー）。
+        if incomplete_number {
             built.items.retain(|a| a.key != "Enter");
         }
         (!built.items.is_empty()).then_some(Hint::Actions(built))

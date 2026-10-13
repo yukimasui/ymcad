@@ -211,6 +211,11 @@ pub fn build(
                 _ => "入力を消す",
             };
             esc = Some(Action::new("Esc", what));
+            // 空の Enter と Esc がまとめて書かれていた（グリップの `空の Enter・Esc で取り消し`）なら、
+            // Esc は上の意味に変わったので、まとまりから Esc を外す（Issue #106 の 2）。
+            if let Some(e) = enter.as_mut().filter(|e| e.key.contains("Esc")) {
+                e.key = without_escape(&e.key);
+            }
         }
     }
     items.extend(enter);
@@ -238,6 +243,14 @@ fn dimension_items(d: DimHint) -> Vec<Action> {
     });
     items.extend(tab.map(|t| Action::new("Tab", t)));
     items
+}
+
+/// `空の Enter・Esc` のようなまとまったキーから `Esc` を外す（`空の Enter`）。
+fn without_escape(key: &str) -> String {
+    key.split('・')
+        .filter(|part| !part.contains("Esc"))
+        .collect::<Vec<_>>()
+        .join("・")
 }
 
 /// 文字を打つ段階の案内。値（`「幅」の値`）は数値・式で打てることを添える。
@@ -461,6 +474,12 @@ mod tests {
             Some("取り消し"),
             "打っている間も Esc の意味は残る"
         );
+    }
+
+    #[test]
+    fn escape_is_taken_out_of_a_combined_key() {
+        assert_eq!(without_escape("空の Enter・Esc"), "空の Enter");
+        assert_eq!(without_escape("Enter"), "Enter");
     }
 
     #[test]

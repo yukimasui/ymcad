@@ -68,7 +68,7 @@ fn assert_pt(actual: Point2, expected: Point2, what: &str) {
 }
 
 /// (100,100)-(200,100) の線分を引いてクリックで選んだ状態。
-fn selected_line() -> (Harness<'static, CadApp>, EntityId) {
+pub(super) fn selected_line() -> (Harness<'static, CadApp>, EntityId) {
     let mut h = app();
     hover(&mut h, P1);
     let id = add_line(&mut h, p(100.0, 100.0), p(200.0, 100.0));
@@ -83,7 +83,7 @@ fn selected_line() -> (Harness<'static, CadApp>, EntityId) {
 }
 
 /// 線分の終点のグリップをクリックで掴む。
-fn grab_end(h: &mut Harness<'_, CadApp>) {
+pub(super) fn grab_end(h: &mut Harness<'_, CadApp>) {
     let end = screen(h, p(200.0, 100.0));
     click(h, end);
     assert!(gripping(h), "前提: 掴んだ");
