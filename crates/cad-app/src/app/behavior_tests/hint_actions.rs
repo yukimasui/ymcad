@@ -391,3 +391,50 @@ fn input_box_never_moves_with_the_actions_hint() {
         }
     }
 }
+
+// ---- Issue #106 ------------------------------------------------------------
+
+/// 名前を打つ段階（寸法入力のキーを扱わない段階）では、`-` から始まる名前を打っても Enter が出る。
+/// 数値の打ちかけとして Enter を消すのは、寸法入力のキーを扱う段階だけ（Issue #106 の 1）。
+#[test]
+fn a_name_starting_with_a_minus_still_shows_enter() {
+    let mut h = app_with_dynamic(true);
+    start(&mut h, "I");
+    assert!(
+        h.state().session.dimension_base().is_none(),
+        "前提: 寸法入力に参加しない段階"
+    );
+    type_text(&mut h, "-");
+    let a = actions(&h);
+    assert_eq!(
+        text_of(&a, "Enter").as_deref(),
+        Some("入力を確定"),
+        "打った名前で確定する: {a:?}"
+    );
+}
+
+/// グリップで `-` を打ちかけたとき、Esc は寸法入力の「入力を消す」になる。まとまっていた
+/// 「空の Enter・Esc 取り消し」は「空の Enter 取り消し」に分け、Esc が 2 つの意味で並ばない（Issue #106 の 2）。
+#[test]
+fn grip_with_an_incomplete_number_splits_enter_and_escape() {
+    let (mut h, _) = super::grips::selected_line();
+    super::grips::grab_end(&mut h);
+    hover(&mut h, P2);
+    type_text(&mut h, "-");
+    let a = actions(&h);
+    let esc_items: Vec<&Action> = a.items.iter().filter(|i| i.key.contains("Esc")).collect();
+    assert_eq!(
+        esc_items,
+        vec![&Action {
+            key: "Esc".to_owned(),
+            text: "入力を消す".to_owned()
+        }],
+        "Esc は 1 つだけ: {a:?}"
+    );
+    assert_eq!(text_of(&a, "空の Enter").as_deref(), Some("取り消し"));
+
+    // 実際のキー: Esc は入力を消すだけで、グリップは掴んだまま。
+    press(&mut h, egui::Key::Escape);
+    assert_eq!(h.state().session.cmdline.input(), "");
+    assert!(h.state().session.is_gripping(), "取り消していない");
+}
