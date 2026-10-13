@@ -4055,3 +4055,111 @@ cad-core・cad-app は変えていない。
 わざと壊して落ちることを確かめたもの: redo で同じ ID に戻さない（単体 3 本と smoke）・`define_component` を
 `MacroCommand` に束ねない・上書きを掛けない・`set_instance_params` のロック中の検査・回転の度 → ラジアン・上書きの警告・
 名前の橋渡し（最初の定義を使う）・上書きの範囲の検査・パラメータ名の検査。
+
+---
+
+## ADR-0047: ファイルダイアログは別スレッドで開き、出せなかったことは rfd の log で知る
+
+- **状態**: 確定
+- **日付**: 2026-10-13
+- **関連**: [Issue #98](https://github.com/yukimasui/ymcad/issues/98)、[ADR-0032](#adr-0032-パラメータの操作はパネルへ寄せ文字入力は名前だけにする)（日常操作は打たせない）
+
+### 背景
+
+ユーザーの不具合報告（2026-10-13）。(1) 「開く」でファイルを選んでいる間に GNOME が「アプリが応答していません」を出す。
+(2) WSL で「開く」を実行しても何も起きない。
+
+(1) は `file_ops.rs` が `rfd::FileDialog::pick_file()` / `save_file()` を UI スレッドで同期に呼んでいたため。ダイアログが
+閉じるまで winit のイベントループが止まり、mutter の ping に応えられない。(2) は rfd 0.17 の既定のバックエンド
+（`xdg-portal`）が、portal も zenity も使えないとき `log::error!` を出して `None` を返すだけで、アプリはキャンセルと
+区別できず黙っていたため（アプリにロガーが無く、その error も捨てられていた）。
+
+### 決定 1: ダイアログは自前のスレッドで同期版を呼び、結果をチャネルで返す
+
+`crates/cad-app/src/file_dialog.rs` の `RfdDialogs::spawn` が `std::thread::spawn` の中で `FileDialog::pick_file` /
+`save_file` を呼び、`mpsc` で結果を返して `ctx.request_repaint()` で UI を起こす。UI 側（`FileOps`）はフレームの最初に
+`poll` で受け取り、今までの後半（拡張子で形式を選んで読む・拡張子を省いたら `.ymc` を補う・保存する）を流す。
+
+- **`rfd::AsyncFileDialog` は使わない。** xdg-portal バックエンドの async 版は、中で同期版を `std::thread::spawn` で
+  呼ぶだけ（`backend/xdg_desktop_portal.rs` の `async_thread`）で、得るものが無い。Future を egui のループで
+  ポーリングする仕掛けが要るうえ、決定 3 の「そのスレッドで error が出たか」を拾えなくなる
+- **親ウィンドウを付ける。** eframe 0.36 の `Frame` は `HasWindowHandle` / `HasDisplayHandle` を実装している
+  （`epi.rs`）。`FileDialog::set_parent(frame)` で付けると、portal のダイアログがアプリに対してモーダルになる
+  （Wayland は xdg-foreign で、rfd が別のイベントキューで書き出す）。`FileDialog` は rfd が `Send` を実装しているので
+  スレッドへ渡せる。`Frame` は `eframe::App::ui` の中でしか手に入らないので、**ダイアログを開くのはフレームの最後**
+  （`FileOps::launch`）。要求の時点では「開こうとしている」状態だけ作る（`cad-app` は `#![forbid(unsafe_code)]`
+  なので、生のハンドルを取っておいて後で借り直すことはしない）
+
+### 決定 2: 待っている間はアプリをモーダルにする
+
+`FileOps::is_modal()`（未保存確認かダイアログ待ち）の間は、コマンドライン（`begin_frame` の `modal_open`）・F3 / F8 /
+F10 / F12・ファイルのショートカットが効かず、`egui::Modal`（「ファイルを選んでいます…」）がクリックを止める。✕ は
+`CancelClose` で打ち消し、理由をコマンドラインに出す。開く前に未保存確認を済ませていても、待っている間に編集されると
+その変更が黙って捨てられるため。
+
+- **逃げ道として「待つのをやめる」を置く。** OS のダイアログは別のウィンドウで、こちらから閉じる API は rfd に無い。
+  見当たらない・返ってこないときにアプリごと固まると、終了もできず図面を失う。押すと受け手のチャネルを捨てるので、
+  後でダイアログで選ばれても反映されない（その旨を出す）。キーは割り当てない（誤って抜けない）
+- **未保存確認からの連鎖は状態に持つ。** 「保存する」で保存先が無いときは `SaveAs { then: Some(元の操作) }` の
+  ダイアログを開き、保存できたら元の操作（新規・開く・終了）へ進む。開くへ進むときは、保存できたことを先に出してから
+  開くのダイアログを開く。**保存をキャンセルしたら確認へ戻る**（今までの「何もしない＝確認が開いたまま」と同じ）。
+  出せなかった・保存に失敗したときは確認を閉じてエラーを出し、元の操作へは進まない（図面は残る）
+
+### 決定 3: 「出せなかった」は、ダイアログを開いたスレッドで rfd がダイアログのモジュールから error を出したかで判定する
+
+rfd 0.17.2 の振る舞い（`backend/xdg_desktop_portal.rs`・`…/portal/mod.rs`・`backend/linux/zenity.rs` を読んだ）:
+
+| 状況 | rfd の中で起きること | 戻り値 |
+|---|---|---|
+| portal で選んだ | 応答コード 0 と uris | `Some(path)` |
+| portal でキャンセル | 応答コード ≠ 0 → 空の列 | `None`（error なし） |
+| portal が使えない（libdbus が無い・セッションバスが無い・portal のサービスが無い） | `…::portal` 以下で error → `warn!("Using zenity fallback")` → zenity | zenity 次第 |
+| zenity で選んだ / キャンセル | 終了コードと標準出力を見る（キャンセルは出力が空で失敗） | `Some` / `None`（error なし） |
+| **zenity も起動できない**（PATH に無いなど） | **`rfd::backend::xdg_desktop_portal` で `error!("Failed to pick file with zenity: …")`** | `None` |
+
+戻り値は「キャンセル」と「出せなかった」で同じ `None` なので、**ロガー（`RfdFailureLog`）で target が
+`rfd::backend::xdg_desktop_portal` に完全一致する error を拾う**。このモジュールの error は表の最後の行だけで、
+`log` の target は既定で `module_path!()`。portal の失敗は `…::portal`・`…::portal::libdbus` から出て、その後 zenity で
+開けることがあるので数えない（前方一致にすると、portal が無く zenity でキャンセルしたときまで「出せなかった」になる。
+テスト `portal_errors_before_the_fallback_are_not_failures`）。記録はスレッドローカルに持つ。ダイアログは 1 回ごとに
+別スレッドで、zenity のエラーは `pick_file` を呼んだスレッドで記録される（zenity の子プロセスを待つスレッドは別だが、
+error を出すのは呼んだ側）。
+
+出せなかったら、理由（rfd の文）と対処（xdg-desktop-portal か zenity が要る。Ubuntu / WSL は `sudo apt install zenity`）を
+コマンドラインにエラーとして出す。
+
+**判定が rfd の内部（どのモジュールから error を出すか）に依存するので、ワークスペースの `Cargo.toml` で rfd を
+`=0.17.2` に固定した。** 上げるときは上の表を読み直す。
+
+**採らなかった案:**
+- **事前に zenity が PATH にあるか・portal が使えるかを調べて、無ければダイアログを開かない。** portal が使えるなら
+  zenity は要らないので、zenity の有無だけでは止められない。portal の有無を確かめるには D-Bus のクライアント
+  （libdbus の dlopen か `busctl` / `gdbus` のコマンド。後者は入っていないことがある）が要り、rfd と違う判定をすると
+  **出せるダイアログを止めてしまう**。止める側の誤りは「黙って何も起きない」より悪い。rfd 自身が最後に出す error は、
+  rfd と同じ判定そのもの
+- **戻るまでの時間で判定する**（すぐ `None` が返ったら出せなかった）。速いキャンセルと区別できない
+- **rfd の `gtk3` バックエンド**（Issue #98 のとおり。GTK3 の開発パッケージがビルドに要り、UI スレッドで待つ問題は残る）
+- **アプリ内のファイルブラウザ・パスを打たせる**（Issue #98 のとおり。範囲が大きい / ADR-0032 に反する）
+
+**限界（受け入れる）:** zenity はあるが表示先が無いなど、zenity が起動したうえで失敗したときは、終了コードが失敗で
+出力が空なので rfd はキャンセルと同じ `Ok(None)` を返す（標準エラーは捨てられる）。これはキャンセルとして扱われる。
+また、別のロガーが先に入っていると拾えない（`install_logger` が標準エラーに書く。今のアプリにロガーは無い）。
+
+### 決定 4: 依存に `log` を足す（`cad-app` だけ）
+
+ロガーを入れるために `log = "0.4"` を `cad-app` に足した。rfd・eframe・wgpu が既に使っている版（0.4.33）で、
+`Cargo.lock` に新しいクレートは増えない。`cad-core` には何も足していない。ロガーは rfd の警告以上だけを標準エラーにも
+出す（今までは捨てられていた。portal が使えず zenity にフォールバックしたことも分かる）。最大レベルは Warn にした。
+
+### 決定 5: ダイアログは差し替えられるようにし、振る舞いをテストで固定する
+
+`DialogBackend` トレイト（`spawn(request, parent, ctx) -> Receiver<DialogReply>`）で差し替える。本物の `RfdDialogs` は
+今までどおり `cfg!(test)` で panic する（テストで開くと返ってこない）。テストは `FakeDialogs`（頼まれた内容を記録し、
+結果はテストが返す）を `FileOps::with_backend` で入れる。`app/behavior_tests/file_dialog.rs` で、待っている間のモーダル
+（フレームが回り続ける・コマンド名・クリック・F8・別のファイル操作・✕ を受け付けない）、選んだら開く / 保存する
+（拡張子の規則）、キャンセル、出せないときの案内、確認 → 保存 → 開く / 終了の連鎖、保存のキャンセルで確認へ戻る、
+「待つのをやめる」の後に届いた結果を使わない、を固定した。修正前の作りではダイアログを差し替える口も「待っている」
+状態も無く、これらは書けなかった。
+
+**実機でしか確かめられないこと:** GNOME で「応答していません」が出ないこと、portal のダイアログがアプリに対して
+モーダルになること、WSL で zenity を入れる前後の振る舞い。
