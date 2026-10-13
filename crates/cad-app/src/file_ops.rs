@@ -160,6 +160,8 @@ pub struct FileOps {
     dialog: Option<OpenDialog>,
     /// ダイアログを開く仕組み（テストでは差し替える）。
     backend: Box<dyn DialogBackend>,
+    /// 待っている間に終了を求められ、断ったか（モーダルの中に理由を出す）。
+    close_refused: bool,
 }
 
 impl Default for FileOps {
@@ -186,6 +188,7 @@ impl FileOps {
             focus_save: false,
             dialog: None,
             backend,
+            close_refused: false,
         }
     }
 
@@ -247,12 +250,11 @@ impl FileOps {
             return FileOutcome::Nothing;
         };
         let reply = match rx.try_recv() {
-            Ok(reply) => reply,
+            Ok(reply) => Some(reply),
             Err(mpsc::TryRecvError::Empty) => return FileOutcome::Nothing,
-            // ダイアログのスレッドが結果を送らずに終わった（panic など）。
-            Err(mpsc::TryRecvError::Disconnected) => {
-                DialogReply::Unavailable("ダイアログのスレッドが結果を返さずに終わりました".into())
-            }
+            // ダイアログのスレッドが結果を送らずに終わった（panic など）。portal・zenity が無い
+            // せいではないので、zenity の入れ方は案内しない（Issue #102）。
+            Err(mpsc::TryRecvError::Disconnected) => None,
         };
         let Some(OpenDialog {
             purpose, request, ..
@@ -260,7 +262,14 @@ impl FileOps {
         else {
             return FileOutcome::Nothing;
         };
-        self.finish_dialog(purpose, &request, reply, doc)
+        self.close_refused = false;
+        match reply {
+            Some(reply) => self.finish_dialog(purpose, &request, reply, doc),
+            None => FileOutcome::Failed(format!(
+                "「{}」のダイアログが結果を返さずに終わりました。もう一度お試しください",
+                request.title()
+            )),
+        }
     }
 
     /// ダイアログの結果を受けて、今までの「開く」「名前を付けて保存」の後半を流す。
@@ -337,6 +346,17 @@ impl FileOps {
             request,
             reply: None,
         });
+        self.close_refused = false;
+    }
+
+    /// ダイアログを待っている間に終了を求められた（✕）。断った理由をモーダルの中に出す。
+    ///
+    /// コマンドラインはモーダルの暗い背景の下にあって目に入りにくいので、そこには出さない
+    /// （Issue #102）。
+    pub fn refuse_close(&mut self) {
+        if self.dialog.is_some() {
+            self.close_refused = true;
+        }
     }
 
     /// ファイルダイアログを待っている間のモーダルを描く。
@@ -348,6 +368,9 @@ impl FileOps {
             return FileOutcome::Nothing;
         };
         let title = dialog.request.title();
+        let heading = dialog.request.waiting_heading();
+        let instruction = dialog.request.waiting_instruction();
+        let close_refused = self.close_refused;
         // 裏の部品へキーが流れないよう、確認のモーダルと同じキーを奪う。
         ctx.input_mut(|i| {
             for key in [egui::Key::Enter, egui::Key::Space, egui::Key::Escape] {
@@ -358,13 +381,24 @@ impl FileOps {
         egui::Modal::new(egui::Id::new("choosing_file"))
             .backdrop_color(egui::Color32::from_black_alpha(150))
             .show(ctx, |ui| {
-                ui.set_width(420.0);
-                ui.heading("ファイルを選んでいます…");
+                ui.set_width(540.0); // 案内の 1 文が折り返さない幅
+                ui.heading(heading);
                 ui.add_space(6.0);
-                ui.label(format!(
-                    "「{title}」のダイアログで選ぶか、キャンセルしてください。"
-                ));
-                ui.label("選び終わるまで、作図とファイル操作は止めています。");
+                ui.label(instruction);
+                ui.label("終わるまで、作図・ファイル操作・終了は止めています。");
+                ui.add_space(6.0);
+                ui.label(
+                    "ダイアログが見当たらないときは、他のウィンドウの後ろに隠れていないか\
+                     確かめてください。それでも見つからないときは「待つのをやめる」を押してください。",
+                );
+                if close_refused {
+                    ui.add_space(6.0);
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "ダイアログを閉じるまで終了できません。ダイアログで選ぶかキャンセルしてから、\
+                         もう一度終了してください。",
+                    );
+                }
                 ui.add_space(10.0);
                 if ui
                     .button("待つのをやめる")
@@ -381,7 +415,9 @@ impl FileOps {
         ctx.request_repaint_after(WAITING_REPAINT);
         if abandon {
             self.dialog = None;
-            return FileOutcome::Failed(format!(
+            self.close_refused = false;
+            // 自分で選んだ操作なので、エラー（赤）にはしない（Issue #102）。
+            return FileOutcome::Ok(format!(
                 "「{title}」の結果を待つのをやめました。開いたままのダイアログで選んでも反映されません"
             ));
         }
@@ -864,8 +900,15 @@ mod tests {
         ops.request(FileAction::SaveAs, &mut doc);
         ops.launch(None, &egui::Context::default());
         fake.drop_all();
-        assert!(matches!(ops.poll(&mut doc), FileOutcome::Failed(_)));
+        let FileOutcome::Failed(msg) = ops.poll(&mut doc) else {
+            panic!("失敗として伝える");
+        };
         assert!(!ops.is_modal(), "待つのをやめる");
+        // portal・zenity が無いせいではないので、zenity の入れ方を案内しない（Issue #102）。
+        assert_eq!(
+            msg,
+            "「名前を付けて保存」のダイアログが結果を返さずに終わりました。もう一度お試しください"
+        );
     }
 
     /// 名前を付けて保存の既定の名前は、保存先があればそのファイル名（形式も引き継ぐ）。
