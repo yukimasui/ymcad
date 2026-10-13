@@ -67,7 +67,13 @@ fn hint_explains_the_candidate_that_enter_runs_and_follows_the_selection() {
     assert_eq!(hint_name(&h), Some("STRETCH"), "エイリアスの完全一致が ⏎");
 
     press(&mut h, egui::Key::ArrowDown);
-    assert_eq!(hint_name(&h), Some(items[0]), "↓ で先頭を選んだ");
+    // 先頭は ⏎ の行と同じ STRETCH なので、この ↓ では中身は変わらない（追従は次の ↓ から確かめる）。
+    assert_eq!(items[0], "STRETCH", "前提: 先頭は ⏎ の行と同じ");
+    assert_eq!(
+        hint_name(&h),
+        Some(items[0]),
+        "↓ で先頭を選んでも STRETCH のまま"
+    );
     press(&mut h, egui::Key::ArrowDown);
     assert_eq!(hint_name(&h), Some(items[1]), "もう一度 ↓ で 2 番目");
     press(&mut h, egui::Key::ArrowDown);
@@ -84,21 +90,70 @@ fn hint_explains_the_candidate_that_enter_runs_and_follows_the_selection() {
     assert_eq!(hint_name(&h), None, "候補を閉じたら出ない");
 }
 
-/// ヒントの中身が変わったフレームは見せずに測り、次のフレームで正しい大きさで置く。
-/// 測っている間（1 フレーム）に古い大きさで枠やカーソルに重ならない。
+/// 1 文字目を打った直後から落ち着くまで、どのフレームでも、出ていればヒントは
+/// 入力欄の枠にもカーソルにも重ならない。
 #[test]
-fn hint_is_measured_before_it_is_shown() {
+fn hint_is_clear_from_the_first_frame() {
     let mut h = app_with_dynamic(true);
     hover(&mut h, P1);
     frame(&mut h, [egui::Event::Text("L".to_owned())]);
-    // 1 文字目のフレームはまだ候補が無い（候補は次のフレームの begin_frame で作る）ので、
-    // 説明が出るまで数フレームかかる。どのフレームでも、出ていれば重ならない。
     for _ in 0..SETTLE {
         assert_hint_is_clear(&h, P1, "L を打った直後");
         h.step();
     }
     assert_eq!(hint_name(&h), Some("LINE"));
     assert_hint_is_clear(&h, P1, "落ち着いた後");
+}
+
+/// **中身が変わったフレームでも、その中身の大きさを測ってから置く**（ADR-0048 決定 3）。
+///
+/// 見せる `Area` の大きさは前フレームの実寸なので、それを使うと中身が変わったフレームに
+/// 古い大きさで置き、枠やカーソルに重なりうる。測るのは見えない別の `Area` で、
+/// **空白のフレームを挟まずに**新しい中身を出す（↑↓ を押し続けてもちらつかない）。
+///
+/// `S` の候補を ↓ でたどり、中身が変わるフレームごとに次を確かめる。
+/// - そのフレームで新しい中身が見えている（1 フレーム消えない）
+/// - 置き場所を決めた大きさが、描いた矩形の大きさと一致する（大きさを知らずに置いていない）
+/// - 測る `Area` の中は見えていない
+#[test]
+fn hint_is_placed_with_the_size_of_its_new_content_in_the_same_frame() {
+    let mut h = app_with_dynamic(true);
+    hover(&mut h, P1);
+    type_text(&mut h, "S");
+    let items: Vec<&str> = crate::tools::suggestions("S")
+        .iter()
+        .map(|c| c.name)
+        .collect();
+    press(&mut h, egui::Key::ArrowDown);
+    assert_eq!(hint_name(&h), Some(items[0]), "前提");
+
+    let mut sizes = Vec::new();
+    for expected in &items[1..] {
+        frame(&mut h, key(egui::Key::ArrowDown).to_vec());
+        let cmdline = &h.state().session.cmdline;
+        assert_eq!(
+            hint_name(&h),
+            Some(*expected),
+            "中身が変わったフレームで新しい中身が見えている"
+        );
+        let drawn = cmdline.hint_drawn().expect("描いている");
+        assert_eq!(
+            (drawn.placed_size.w, drawn.placed_size.h),
+            (drawn.rect.width(), drawn.rect.height()),
+            "{expected}: 置いた大きさと描いた大きさが一致する"
+        );
+        assert_eq!(
+            cmdline.hint_measure_visible(),
+            Some(false),
+            "{expected}: 測る Area は見えない"
+        );
+        assert_hint_is_clear(&h, P1, expected);
+        sizes.push(drawn.rect.size());
+    }
+    assert!(
+        sizes.windows(2).any(|w| w[0] != w[1]),
+        "前提: 大きさの違う中身をたどっている {sizes:?}"
+    );
 }
 
 /// 入力欄の矩形を、操作の 1 フレームごとに記録する。
@@ -270,6 +325,37 @@ fn hint_toggles_from_the_status_bar() {
         .map(|l| l.text.clone())
         .collect();
     assert_eq!(toggled, vec!["ヒント: OFF", "ヒント: ON"]);
+}
+
+/// 動的入力がオフの間、`HINT` に乗せると「今は出ない」ことがツールチップで分かる
+/// （`HINT` は ON の色を薄くして描く。PR #100 の操作レビュー）。
+#[test]
+fn hint_toggle_explains_that_it_is_dormant_while_dynamic_input_is_off() {
+    let mut h = app_with_dynamic(false);
+    assert!(
+        h.state().session.cmdline.is_hint_enabled(),
+        "前提: HINT はオン"
+    );
+    let target = h.get_by_label("HINT").rect().center();
+    hover(&mut h, target);
+    settle(&mut h);
+    assert!(
+        h.query_by_label_contains("今は出ません").is_some(),
+        "動的入力がオフなので今は出ない、と案内する"
+    );
+
+    let mut h = app_with_dynamic(true);
+    let target = h.get_by_label("HINT").rect().center();
+    hover(&mut h, target);
+    settle(&mut h);
+    assert!(
+        h.query_by_label_contains("ON/OFF").is_some(),
+        "前提: ツールチップが出ている"
+    );
+    assert!(
+        h.query_by_label_contains("今は出ません").is_none(),
+        "動的入力がオンなら言わない"
+    );
 }
 
 /// 変換中はヒントを消す。確定すると（候補が出ていれば）また出る。

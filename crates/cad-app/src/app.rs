@@ -55,6 +55,8 @@ const PROPERTIES_PANEL_MIN_WIDTH: f32 = 200.0;
 const PICK_RADIUS_PX: f32 = 6.0;
 /// この距離[px]を超えてドラッグしたら、クリックではなく矩形選択とみなす。
 const DRAG_THRESHOLD_PX: f32 = 4.0;
+/// 動的入力がオフで効いていない間の、ステータスバーの `HINT` の ON の色の濃さ（Issue #27）。
+const HINT_DORMANT_OPACITY: f32 = 0.45;
 
 /// 直近の描画時間を保持して平均と最大を出す。
 ///
@@ -418,11 +420,17 @@ impl CadApp {
     /// ステータスバーの `HINT`（Issue #27、ADR-0048）。`DYN` と同じ見せ方で、クリックで切り替える。
     ///
     /// 動的入力がオフの間はヒントを出さないが、切り替え自体はできる（オンに戻したときに効く）。
+    /// そのあいだ `HINT` は ON の色を薄くし、ツールチップで「今は出ない」ことを伝える
+    /// （ON の色のままだと「オンなのに出ない」と迷う。PR #100 の操作レビュー）。
     fn hint_toggle(&mut self, ui: &mut egui::Ui) {
+        let dynamic = self.session.cmdline.is_dynamic();
         let text = if self.session.cmdline.is_hint_enabled() {
-            egui::RichText::new("HINT")
-                .monospace()
-                .color(render::ON_COLOR)
+            let color = if dynamic {
+                render::ON_COLOR
+            } else {
+                render::ON_COLOR.gamma_multiply(HINT_DORMANT_OPACITY)
+            };
+            egui::RichText::new("HINT").monospace().color(color)
         } else {
             egui::RichText::new("hint")
                 .monospace()
@@ -435,10 +443,13 @@ impl CadApp {
                     .sense(egui::Sense::click()),
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .on_hover_text(
+            .on_hover_text(if dynamic {
                 "ヒント（カーソル横の入力欄のそばに出るコマンドの説明）の ON/OFF\n\
-                 動的入力（DYN）がオンのときだけ出ます",
-            )
+                 動的入力（DYN）がオンのときだけ出ます"
+            } else {
+                "ヒント（カーソル横の入力欄のそばに出るコマンドの説明）の ON/OFF\n\
+                 動的入力（DYN）がオフなので、今は出ません"
+            })
             .clicked();
         if clicked {
             self.toggle_hint();
@@ -800,7 +811,7 @@ impl CadApp {
 }
 
 impl CadApp {
-    /// ステータスバーの切り替え部品（OSNAP / ORTHO / POLAR / DYN）と「コマンド実行中」。
+    /// ステータスバーの切り替え部品（OSNAP / ORTHO / POLAR / DYN / HINT）と「実行中」。
     ///
     /// 座標の直後に置く。幅が足りないとステータスバーは右端から切れるので、
     /// クリックで操作する部品を情報表示より先にする（Issue #38。PR #35 で ORTHO / POLAR が
@@ -869,20 +880,28 @@ impl CadApp {
             self.toggle_dynamic_input();
         }
         // HINT は動的入力のそばに出るもので、DYN がオンのときだけ効く。DYN の続きとして
-        // 区切り線を挟まずに並べる（幅 800px でもレイヤと選択の表示を押し出さないように）。
+        // 区切り線を挟まずに並べる（幅を節約し、DYN に付いた切り替えに見えるように）。
         self.hint_toggle(ui);
         ui.separator();
-        // 「コマンド実行中」の欄は待機中も空のまま幅を確保する。出たり消えたりするたびに
+        // 「実行中」の欄は待機中も空のまま幅を確保する。出たり消えたりするたびに
         // 後ろの表示が跳ねないように（PR #39）。
-        const RUNNING: &str = "コマンド実行中";
+        // 文字は「実行中」だけにする（もとは「コマンド実行中」）。HINT が増えても、幅 800px で
+        // レイヤと選択の表示を押し出さないため（Issue #27、ADR-0048 決定 6）。何の実行中かは
+        // 琥珀色・カーソル横のプロンプト・リボンのボタンの色で分かり、ツールチップでも補う。
+        const RUNNING: &str = "実行中";
         let running_width = text_width(ui, RUNNING);
         let running = self.session.has_active_tool();
         fixed_width(ui, running_width, |ui| {
             if running {
-                ui.colored_label(
-                    egui::Color32::from_rgb(0xff, 0xc1, 0x07),
-                    egui::RichText::new(RUNNING).monospace(),
-                );
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(RUNNING)
+                            .monospace()
+                            .color(egui::Color32::from_rgb(0xff, 0xc1, 0x07)),
+                    )
+                    .selectable(false),
+                )
+                .on_hover_text("コマンドの実行中（Esc で中断）");
             }
         });
         // 区切り線の幅はスタイルで決まるので、実際に描いた前後の位置から測る。

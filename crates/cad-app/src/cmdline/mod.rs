@@ -61,6 +61,8 @@ const LOCK_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
 const LOCK_SIZE: f32 = 16.0;
 /// ヒント（Issue #27）の `Area` の ID。入力欄の `Area` とは別にする（ADR-0048）。
 const HINT_AREA_ID: &str = "ymcad_dyn_hint";
+/// ヒントの大きさを測るための、見えない `Area` の ID（ADR-0048 決定 3）。
+const HINT_MEASURE_AREA_ID: &str = "ymcad_dyn_hint_measure";
 /// ヒントの最大幅 [px]。長い説明はここで折り返す。
 const HINT_MAX_WIDTH: f32 = 380.0;
 /// ヒントの背景の不透明度。入力欄の枠（[`DYN_BACKGROUND_OPACITY`]）より薄くして、主従を分ける。
@@ -303,15 +305,29 @@ pub struct CommandLine {
 struct HintView {
     /// オンか。既定はオン（お試し）。ステータスバーの `HINT` で切り替える。
     enabled: bool,
-    /// 直前のフレームで描いた（または測った）中身。
-    ///
-    /// 中身が変わったフレームはヒントの大きさが分からない（`Area` の大きさは前フレームの実寸）。
-    /// 古い大きさで置くと、入りきらない・枠に重なるフレームが出るので、そのフレームは
-    /// 見せずに測るだけにする（[`CommandLine::show_hint`]）。
-    last: Option<Hint>,
-    /// このフレームで見せたヒントとその矩形（テスト用）。測るだけのフレームは `None`。
+    // 前のフレームの中身や大きさは持たない。大きさは毎フレーム、見えない `Area` で測り直す
+    // （[`CommandLine::show_hint`]）。なので動的入力をオフにしたフレーム（`show_floating` が
+    // 早めに戻る）にも、片付けるべき状態が残らない。段階 2 で中身の種類が増えても同じ。
+    /// このフレームで見せたヒント（テスト用）。出さなかったフレームは `None`。
     #[cfg(test)]
-    shown: Option<(Hint, egui::Rect)>,
+    shown: Option<ShownHint>,
+    /// このフレームで測った `Area` の中が見えていたか（テスト用）。測っていなければ `None`。
+    #[cfg(test)]
+    measure_visible: Option<bool>,
+}
+
+/// このフレームで見せたヒント（テスト用）。
+#[cfg(test)]
+#[derive(Clone, Debug)]
+pub struct ShownHint {
+    pub hint: Hint,
+    /// 描いた `Area` の矩形。
+    pub rect: egui::Rect,
+    /// 置き場所を決めるのに使った大きさ。描いた矩形の大きさと一致しなければ、
+    /// 大きさを知らずに置いている（枠やカーソルに重なりうる）。
+    pub placed_size: Size,
+    /// 中が実際に見えていたか（egui が初めて出す `Area` は 1 フレーム見せずに測る）。
+    pub visible: bool,
 }
 
 /// カーソル横に出す直近のエラー。
@@ -395,9 +411,10 @@ impl CommandLine {
             select_all_requested: false,
             hint: HintView {
                 enabled: true,
-                last: None,
                 #[cfg(test)]
                 shown: None,
+                #[cfg(test)]
+                measure_visible: None,
             },
             #[cfg(test)]
             input_rect: None,
@@ -584,6 +601,7 @@ impl CommandLine {
         #[cfg(test)]
         {
             self.hint.shown = None;
+            self.hint.measure_visible = None;
             self.floating_rect = None;
         }
         let now = ctx.input(|i| i.time);
@@ -919,7 +937,9 @@ impl CommandLine {
     /// - `box_visible` … 枠が見えているか（何もしていなければ見えない）
     ///
     /// **入力欄とは別の `Area`**（`interactable(false)` でクリックは素通し）。
-    /// 中身が変わったフレームは見せずに測るだけにし、次のフレームで正しい大きさで置く。
+    /// 大きさは、置く前に**このフレームの中身を見えない別の `Area` で描いて測る**。
+    /// 見せる `Area` の大きさは前フレームの実寸なので、中身が変わったフレームにそれを使うと、
+    /// 古い大きさで置いて枠やカーソルに重なりうる（ADR-0048 決定 3）。
     /// どこにも入らなければ出さない（[`hint::place_hint`]）。
     fn show_hint(
         &mut self,
@@ -936,54 +956,81 @@ impl CommandLine {
             composing: self.composing,
             modal_open: self.modal_open,
         };
-        let content = if hint::allowed(situation) {
-            self.current_hint()
-        } else {
-            None
-        };
-        let Some(content) = content else {
-            self.hint.last = None;
+        if !hint::allowed(situation) {
+            return;
+        }
+        let Some(content) = self.current_hint() else {
             return;
         };
 
-        let id = egui::Id::new(HINT_AREA_ID);
-        let measured = if self.hint.last.as_ref() == Some(&content) {
-            ctx.memory(|m| m.area_rect(id))
-        } else {
-            None
-        };
-        self.hint.last = Some(content.clone());
-        let Some(measured) = measured else {
-            // 測るだけのフレーム（egui の sizing pass。見えず、次のフレームの再描画を予約する）。
-            draw_hint(ctx, id, canvas.left_top(), &content, true);
-            return;
-        };
-
+        let measured = draw_hint(
+            ctx,
+            egui::Id::new(HINT_MEASURE_AREA_ID),
+            canvas.left_top(),
+            &content,
+            true,
+        );
+        #[cfg(test)]
+        {
+            self.hint.measure_visible = Some(measured.visible);
+        }
         let size = Size {
-            w: measured.width(),
-            h: measured.height(),
+            w: measured.rect.width(),
+            h: measured.rect.height(),
         };
         let Some(pos) = hint::place_hint(bounds_of(box_rect), cursor, size, bounds_of(canvas))
         else {
             return;
         };
-        let _rect = draw_hint(ctx, id, egui::pos2(pos.x, pos.y), &content, false);
+        let _drawn = draw_hint(
+            ctx,
+            egui::Id::new(HINT_AREA_ID),
+            egui::pos2(pos.x, pos.y),
+            &content,
+            false,
+        );
         #[cfg(test)]
         {
-            self.hint.shown = Some((content, _rect));
+            self.hint.shown = Some(ShownHint {
+                hint: content,
+                rect: _drawn.rect,
+                placed_size: size,
+                visible: _drawn.visible,
+            });
         }
     }
 
-    /// このフレームで見せたヒント（テスト用）。測るだけのフレーム・出さなかったフレームは `None`。
+    /// このフレームで見せたヒント（テスト用）。出さなかったフレーム・egui が見せずに描いた
+    /// フレームは `None`。
     #[cfg(test)]
     pub fn hint_shown(&self) -> Option<&Hint> {
-        self.hint.shown.as_ref().map(|(h, _)| h)
+        self.hint
+            .shown
+            .as_ref()
+            .filter(|s| s.visible)
+            .map(|s| &s.hint)
     }
 
     /// このフレームで見せたヒントの矩形（テスト用）。
     #[cfg(test)]
     pub fn hint_rect(&self) -> Option<egui::Rect> {
-        self.hint.shown.as_ref().map(|(_, r)| *r)
+        self.hint
+            .shown
+            .as_ref()
+            .filter(|s| s.visible)
+            .map(|s| s.rect)
+    }
+
+    /// このフレームで描いたヒントの詳細（テスト用）。
+    #[cfg(test)]
+    pub fn hint_drawn(&self) -> Option<&ShownHint> {
+        self.hint.shown.as_ref()
+    }
+
+    /// このフレームで測った `Area` の中が見えていたか（テスト用）。
+    #[cfg(test)]
+    pub fn hint_measure_visible(&self) -> Option<bool> {
+        self.hint.measure_visible
     }
 
     /// このフレームで描いたカーソル横の枠の矩形（テスト用）。
@@ -1277,11 +1324,23 @@ fn bounds_of(r: egui::Rect) -> Bounds {
     }
 }
 
-/// ヒントの `Area` を描き、その矩形を返す。
+/// [`draw_hint`] の結果。
+struct DrawnHint {
+    /// 描いた `Area` の矩形（このフレームの中身の大きさ）。
+    rect: egui::Rect,
+    /// 中が見えていたか。
+    #[cfg_attr(not(test), allow(dead_code))]
+    visible: bool,
+}
+
+/// ヒントの `Area` を描く。
 ///
-/// `measuring` … 見せずに大きさだけ測るフレーム（中身が変わったフレーム）。
+/// `measuring` … 大きさを測るだけ（中を見えなくする）。測るのは見せるのとは別の ID の `Area` で、
+/// 置く前に毎フレーム行う（ADR-0048 決定 3）。`Area` の大きさは描き終えた時点の中身から決まるので、
+/// その矩形がこのフレームの中身の大きさになる。`Area::sizing_pass` は使わない（毎フレーム再描画を
+/// 予約してしまう）。中身は軽い（ラベル数行とアイコン）ので、2 回描いても負担にならない。
 ///
-/// 入力欄の `Area` とは別の ID・別の `Area`。`interactable(false)` でクリックとホバーを
+/// 見せる `Area` は入力欄の `Area` とは別の ID。`interactable(false)` でクリックとホバーを
 /// 下（キャンバス）へ素通しする。位置は [`hint::place_hint`] がキャンバスの内側で決めて
 /// いるので、egui に押し戻させない（`constrain(false)`。押し戻されると枠に重なりうる）。
 fn draw_hint(
@@ -1290,16 +1349,21 @@ fn draw_hint(
     pos: egui::Pos2,
     content: &Hint,
     measuring: bool,
-) -> egui::Rect {
-    egui::Area::new(id)
+) -> DrawnHint {
+    let mut visible = false;
+    let rect = egui::Area::new(id)
         .order(egui::Order::Foreground)
         .fixed_pos(pos)
         .constrain(false)
         .interactable(false)
         .fade_in(false)
-        .sizing_pass(measuring)
         .show(ctx, |ui| {
+            if measuring {
+                ui.set_invisible();
+            }
+            visible = ui.is_visible();
             // Area の中身の最大幅は前フレームの大きさになっているので広げる。
+            // 測る Area と見せる Area で折り返しの幅が同じになるよう、どちらもここで決める。
             ui.set_max_width(HINT_MAX_WIDTH);
             let fill = ui
                 .visuals()
@@ -1318,7 +1382,8 @@ fn draw_hint(
                 });
         })
         .response
-        .rect
+        .rect;
+    DrawnHint { rect, visible }
 }
 
 /// コマンドの説明のヒント。左にリボンと同じアイコン、右に名前と説明。

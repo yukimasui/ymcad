@@ -808,11 +808,11 @@ fn shown_info_items(h: &Harness<'_, CadApp>) -> Vec<(&'static str, egui::Rect)> 
 /// 情報表示は文字の途中で切れない。入らない項目は右から順に省かれ、
 /// レイヤ・選択が最後まで残る。1280px ではすべて出る（PR #39）。
 ///
-/// ステータスバーに `HINT`（Issue #27）が増えたので、レイヤと選択の両方が残る幅は
-/// 800px から 840px に上がった（800px ではレイヤだけ残る。ADR-0048）。
+/// ステータスバーに `HINT`（Issue #27）が増えたぶんは、「コマンド実行中」を「実行中」に
+/// 縮めて取り返し、800px でレイヤと選択の両方が残る基準を保った（ADR-0048 決定 6）。
 #[test]
 fn status_info_items_are_dropped_whole_from_the_right() {
-    for width in [1280.0, 840.0, 800.0, 640.0] {
+    for width in [1280.0, 800.0, 640.0] {
         let h = app_with_width(width);
         let shown = shown_info_items(&h);
         let names: Vec<&str> = shown.iter().map(|(p, _)| *p).collect();
@@ -832,15 +832,10 @@ fn status_info_items_are_dropped_whole_from_the_right() {
         }
         if width >= SCREEN.x {
             assert_eq!(names.len(), INFO_ITEMS.len(), "1280px ではすべて出る");
-        } else if width >= 840.0 {
+        } else if width >= 800.0 {
             assert!(
                 names.starts_with(&["レイヤ 0", "選択 0"]),
                 "幅 {width}: レイヤと選択は残る: {names:?}"
-            );
-        } else if width >= 800.0 {
-            assert!(
-                names.starts_with(&["レイヤ 0"]),
-                "幅 {width}: レイヤは残る: {names:?}"
             );
         }
     }
@@ -884,7 +879,7 @@ fn coordinate_field_does_not_shrink_back() {
     assert_eq!(ortho_x(&h), small, "図面を入れ替えたら戻る");
 }
 
-/// 「コマンド実行中」が出ても、スナップの吸着で `OSNAP:端点` になっても、
+/// 「実行中」が出ても、スナップの吸着で `OSNAP:端点` になっても、
 /// 切り替え部品と情報表示の位置（押す位置）は動かない（PR #39）。
 #[test]
 fn status_bar_items_do_not_move_with_the_state() {
@@ -925,7 +920,7 @@ fn status_bar_items_do_not_move_with_the_state() {
         h.query_by_label("OSNAP:端点").is_some(),
         "前提: 端点に吸着して表示が伸びている"
     );
-    assert!(h.query_by_label("コマンド実行中").is_some(), "前提");
+    assert!(h.query_by_label("実行中").is_some(), "前提");
     assert_eq!(
         xs(&h),
         idle,
