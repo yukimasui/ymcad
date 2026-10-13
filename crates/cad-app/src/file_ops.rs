@@ -362,7 +362,7 @@ impl FileOps {
                 ui.heading("ファイルを選んでいます…");
                 ui.add_space(6.0);
                 ui.label(format!(
-                    "「{title}」のダイアログでファイルを選ぶか、キャンセルしてください。"
+                    "「{title}」のダイアログで選ぶか、キャンセルしてください。"
                 ));
                 ui.label("選び終わるまで、作図とファイル操作は止めています。");
                 ui.add_space(10.0);

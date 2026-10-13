@@ -1243,6 +1243,12 @@ impl CadApp {
         }
     }
 
+    /// ファイル操作を差し替える（スナップショットのテストがダイアログを偽物にするため）。
+    #[cfg(test)]
+    pub fn set_file_ops(&mut self, files: FileOps) {
+        self.files = files;
+    }
+
     /// 図面とセッションを直接触る（スナップショットのテストが図形を並べるため。`ui_snapshot` は別モジュール）。
     #[cfg(test)]
     pub fn parts_mut(&mut self) -> (&mut Document, &mut Session) {
