@@ -136,7 +136,7 @@ fn field(h: &Harness<'_, CadApp>) -> crate::cmdline::dimension::Field {
 }
 
 /// (a) `-` だけ（数値の打ちかけ）は「まだ打っていない」と同じ: Tab は固定できない（実際に断られて
-/// 欄も移らない）ので出さず、Enter に「この値で確定」と書かない。Esc は実際どおり入力を消す。
+/// 欄も移らない）ので出さず、Enter も（終了にもならず断られるので）出さない。Esc は実際どおり入力を消す。
 #[test]
 fn an_incomplete_number_is_not_offered_as_a_value() {
     use crate::cmdline::dimension::Field;
@@ -145,12 +145,21 @@ fn an_incomplete_number_is_not_offered_as_a_value() {
     type_text(&mut h, "-");
     let a = actions(&h);
     assert_eq!(text_of(&a, "Tab"), None, "Tab は断られるので出さない");
-    assert_eq!(text_of(&a, "Enter").as_deref(), Some("終了"));
+    assert_eq!(text_of(&a, "Enter"), None, "Enter も断られるので出さない");
     assert_eq!(text_of(&a, "Esc").as_deref(), Some("入力を消す"));
 
-    // 実際のキー: Tab では欄が移らない。Esc は入力を消すだけで、LINE は続く。
+    // 実際のキー: Tab では欄が移らない。Enter は「不明なオプション」で断られ、LINE は続く。
+    // Esc は入力を消すだけで、LINE は続く。
     press(&mut h, egui::Key::Tab);
     assert_eq!(field(&h), Field::Length, "Tab は断られた");
+    press(&mut h, egui::Key::Enter);
+    assert!(
+        h.state().session.has_active_tool(),
+        "Enter で終了していない"
+    );
+    if h.state().session.cmdline.input().is_empty() {
+        type_text(&mut h, "-");
+    }
     press(&mut h, egui::Key::Escape);
     assert_eq!(h.state().session.cmdline.input(), "");
     assert!(h.state().session.has_active_tool(), "中断していない");

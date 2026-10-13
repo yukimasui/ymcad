@@ -952,7 +952,12 @@ impl CommandLine {
             buffer,
             dimension::BufferKind::Empty | dimension::BufferKind::Incomplete
         );
-        let built = actions::build(prompt, stage, self.dim_hint(fields), typed, assists);
+        let mut built = actions::build(prompt, stage, self.dim_hint(fields), typed, assists);
+        // 数値の打ちかけ（`-` だけ）での Enter は、空の Enter の意味（`<Enter で終了>` など）にもならず
+        // 「不明なオプション」で断られる。Tab と同じく出さない（PR #104 の操作レビュー）。
+        if buffer == dimension::BufferKind::Incomplete {
+            built.items.retain(|a| a.key != "Enter");
+        }
         (!built.items.is_empty()).then_some(Hint::Actions(built))
     }
 
