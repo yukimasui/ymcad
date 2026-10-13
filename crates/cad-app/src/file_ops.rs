@@ -22,10 +22,27 @@
 //! `.dxf` で開いたファイルの上書き保存は **`.dxf` のまま**にする。
 //! 勝手に別の形式へ移すほうが驚きが大きい。非可逆であることは
 //! 保存のたびに出る警告で伝わり続ける。
+//!
+//! # ファイルダイアログは UI スレッドを止めない（Issue #98、ADR-0047）
+//!
+//! 開く・名前を付けて保存は、ダイアログを別スレッドで開き（[`crate::file_dialog`]）、
+//! 結果が届くまでアプリをモーダルにして待つ。1 フレームの流れは
+//! [`FileOps::poll`]（結果を受けて開く・保存する）→ 各モーダルの描画 → 操作の要求 →
+//! [`FileOps::launch`]（フレームの最後に、頼まれたダイアログを開く）。
 
 use std::path::Path;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use cad_core::{dxf, native, Document};
+
+use crate::file_dialog::{
+    unavailable_message, DialogBackend, DialogReply, DialogRequest, Filters, RfdDialogs,
+};
+
+/// ダイアログを待っている間、結果を見に起きる間隔。結果を送ったスレッドも再描画を起こすので、
+/// これは取りこぼしの保険。
+const WAITING_REPAINT: Duration = Duration::from_millis(250);
 
 /// 交換用形式の拡張子。
 const DXF_EXTENSION: &str = "dxf";
@@ -111,20 +128,65 @@ pub enum FileOutcome {
     Quit,
 }
 
+/// ダイアログで選んだ後に何をするか。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DialogPurpose {
+    /// 選んだ図面を開く。
+    Open,
+    /// 選んだ名前で保存する。保存できたら `then` を続ける（未保存確認の「保存する」から来たとき）。
+    SaveAs {
+        /// 保存できた後に続ける操作。
+        then: Option<FileAction>,
+    },
+}
+
+/// 開いているファイルダイアログ。
+#[derive(Debug)]
+struct OpenDialog {
+    purpose: DialogPurpose,
+    request: DialogRequest,
+    /// 結果の届くチャネル。`None` はまだ開いていない（次の [`FileOps::launch`] で開く）。
+    reply: Option<mpsc::Receiver<DialogReply>>,
+}
+
 /// ファイル操作の状態。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FileOps {
     /// 未保存確認の対象。
     pending: Option<PendingAction>,
     /// モーダルを開いた直後で、「保存する」にフォーカスを置く必要があるか。
     focus_save: bool,
+    /// 開いている（または開こうとしている）ファイルダイアログ。
+    dialog: Option<OpenDialog>,
+    /// ダイアログを開く仕組み（テストでは差し替える）。
+    backend: Box<dyn DialogBackend>,
+}
+
+impl Default for FileOps {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl FileOps {
-    /// 初期状態。
+    /// 初期状態。ダイアログは OS のもの（rfd）。
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_backend(Box::new(RfdDialogs::new(Filters {
+            native: NATIVE_EXTENSION,
+            exchange: DXF_EXTENSION,
+        })))
+    }
+
+    /// ダイアログを開く仕組みを指定して作る（テストで rfd の代わりを入れるため）。
+    #[must_use]
+    pub fn with_backend(backend: Box<dyn DialogBackend>) -> Self {
+        Self {
+            pending: None,
+            focus_save: false,
+            dialog: None,
+            backend,
+        }
     }
 
     /// 確認ダイアログを出している最中か。
@@ -133,14 +195,197 @@ impl FileOps {
         self.pending.is_some()
     }
 
+    /// ファイルダイアログの結果を待っている最中か。
+    #[must_use]
+    pub fn is_choosing_file(&self) -> bool {
+        self.dialog.is_some()
+    }
+
+    /// モーダル（未保存確認かファイルダイアログ待ち）の最中か。
+    ///
+    /// この間は作図・別のファイル操作・終了を受け付けない。ダイアログを待っている間に
+    /// 図面が変わると、開く前に済ませた未保存確認が無意味になる（変更が黙って捨てられる）。
+    #[must_use]
+    pub fn is_modal(&self) -> bool {
+        self.is_confirming() || self.is_choosing_file()
+    }
+
     /// 操作を要求する。未保存なら確認を挟み、そうでなければ即実行する。
+    ///
+    /// ファイルダイアログを待っている間は何もしない（二重に開かない・待っている間に図面を
+    /// 入れ替えない）。
     pub fn request(&mut self, action: FileAction, doc: &mut Document) -> FileOutcome {
+        if self.is_choosing_file() {
+            return FileOutcome::Nothing;
+        }
         if action.discards_document() && doc.is_dirty() {
             self.pending = Some(PendingAction(action));
             self.focus_save = true;
             return FileOutcome::Nothing;
         }
-        Self::execute(action, doc)
+        self.execute(action, doc)
+    }
+
+    /// 頼まれたファイルダイアログを開く。フレームの最後に呼ぶ（親ウィンドウに `frame` が要るため）。
+    ///
+    /// ブロックしない。結果は [`Self::poll`] で受け取る。
+    pub fn launch(&mut self, parent: Option<&eframe::Frame>, ctx: &egui::Context) {
+        let Some(dialog) = &mut self.dialog else {
+            return;
+        };
+        if dialog.reply.is_none() {
+            dialog.reply = Some(self.backend.spawn(dialog.request.clone(), parent, ctx));
+        }
+    }
+
+    /// ファイルダイアログの結果が届いていれば、選んだファイルを開く・保存する。
+    pub fn poll(&mut self, doc: &mut Document) -> FileOutcome {
+        let Some(OpenDialog {
+            reply: Some(rx), ..
+        }) = &self.dialog
+        else {
+            return FileOutcome::Nothing;
+        };
+        let reply = match rx.try_recv() {
+            Ok(reply) => reply,
+            Err(mpsc::TryRecvError::Empty) => return FileOutcome::Nothing,
+            // ダイアログのスレッドが結果を送らずに終わった（panic など）。
+            Err(mpsc::TryRecvError::Disconnected) => {
+                DialogReply::Unavailable("ダイアログのスレッドが結果を返さずに終わりました".into())
+            }
+        };
+        let Some(OpenDialog {
+            purpose, request, ..
+        }) = self.dialog.take()
+        else {
+            return FileOutcome::Nothing;
+        };
+        self.finish_dialog(purpose, &request, reply, doc)
+    }
+
+    /// ダイアログの結果を受けて、今までの「開く」「名前を付けて保存」の後半を流す。
+    fn finish_dialog(
+        &mut self,
+        purpose: DialogPurpose,
+        request: &DialogRequest,
+        reply: DialogReply,
+        doc: &mut Document,
+    ) -> FileOutcome {
+        let path = match reply {
+            DialogReply::Picked(path) => path,
+            DialogReply::Cancelled => {
+                if let DialogPurpose::SaveAs { then: Some(action) } = purpose {
+                    // 未保存確認の「保存する」から来た保存をキャンセルした。確認へ戻す
+                    // （今までどおり。元の操作へ進まず、「保存しない」も選び直せる）。
+                    self.pending = Some(PendingAction(action));
+                    self.focus_save = true;
+                }
+                return FileOutcome::Nothing;
+            }
+            DialogReply::Unavailable(reason) => {
+                return FileOutcome::Failed(unavailable_message(request, &reason));
+            }
+        };
+        match purpose {
+            DialogPurpose::Open => Self::open_path(doc, &path),
+            DialogPurpose::SaveAs { then } => {
+                // 拡張子を省略されたらネイティブ形式にする。
+                let path = if path.extension().is_some() {
+                    path
+                } else {
+                    path.with_extension(NATIVE_EXTENSION)
+                };
+                let saved = Self::save_to(doc, &path);
+                match (saved, then) {
+                    (FileOutcome::Ok(msg), Some(action)) => {
+                        self.continue_after_save(msg, action, doc)
+                    }
+                    (saved, _) => saved,
+                }
+            }
+        }
+    }
+
+    /// 保存できた後に元の操作（NEW / OPEN / QUIT）へ進む。
+    fn continue_after_save(
+        &mut self,
+        saved_msg: String,
+        action: FileAction,
+        doc: &mut Document,
+    ) -> FileOutcome {
+        match self.execute(action, doc) {
+            // 続きがダイアログを開いた（OPEN）ときは、保存できたことを先に伝える。
+            FileOutcome::Nothing => FileOutcome::Ok(saved_msg),
+            other => other,
+        }
+    }
+
+    /// ファイルダイアログを頼む。実際に開くのは [`Self::launch`]。
+    fn start_dialog(&mut self, purpose: DialogPurpose, doc: &Document) {
+        let request = match purpose {
+            DialogPurpose::Open => DialogRequest::Open,
+            DialogPurpose::SaveAs { .. } => DialogRequest::Save {
+                // 既に保存先があるならその名前を出す（形式も引き継がれる）。
+                default_name: doc.path().and_then(|p| p.file_name()).map_or_else(
+                    || format!("drawing.{NATIVE_EXTENSION}"),
+                    |n| n.to_string_lossy().into_owned(),
+                ),
+            },
+        };
+        self.dialog = Some(OpenDialog {
+            purpose,
+            request,
+            reply: None,
+        });
+    }
+
+    /// ファイルダイアログを待っている間のモーダルを描く。
+    ///
+    /// ダイアログは別のウィンドウ（OS のもの）なので、ここには選ぶ部品は無い。ダイアログが
+    /// 見当たらない・返ってこないときのために「待つのをやめる」だけ置く。
+    pub fn show_waiting(&mut self, ctx: &egui::Context) -> FileOutcome {
+        let Some(dialog) = &self.dialog else {
+            return FileOutcome::Nothing;
+        };
+        let title = dialog.request.title();
+        // 裏の部品へキーが流れないよう、確認のモーダルと同じキーを奪う。
+        ctx.input_mut(|i| {
+            for key in [egui::Key::Enter, egui::Key::Space, egui::Key::Escape] {
+                i.consume_key(egui::Modifiers::NONE, key);
+            }
+        });
+        let mut abandon = false;
+        egui::Modal::new(egui::Id::new("choosing_file"))
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.heading("ファイルを選んでいます…");
+                ui.add_space(6.0);
+                ui.label(format!(
+                    "「{title}」のダイアログでファイルを選ぶか、キャンセルしてください。"
+                ));
+                ui.label("選び終わるまで、作図とファイル操作は止めています。");
+                ui.add_space(10.0);
+                if ui
+                    .button("待つのをやめる")
+                    .on_hover_text(
+                        "ダイアログが見つからない・閉じないときに使います。\
+                         後からダイアログで選んでも反映されません",
+                    )
+                    .clicked()
+                {
+                    abandon = true;
+                }
+            });
+        // 待っている間も結果を受け取れるよう、ときどき起こす（結果を送ったスレッドも起こす）。
+        ctx.request_repaint_after(WAITING_REPAINT);
+        if abandon {
+            self.dialog = None;
+            return FileOutcome::Failed(format!(
+                "「{title}」の結果を待つのをやめました。開いたままのダイアログで選んでも反映されません"
+            ));
+        }
+        FileOutcome::Nothing
     }
 
     /// 未保存確認のモーダルを描画する。
@@ -176,6 +421,8 @@ impl FileOps {
             pressed
         });
         ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space));
+        let mut save = false;
+        let mut discard = false;
         egui::Modal::new(egui::Id::new("unsaved_changes"))
             // 裏のコマンドラインの文字が目に入りにくいよう、既定（alpha 100）より少し暗くする。
             .backdrop_color(egui::Color32::from_black_alpha(150))
@@ -194,18 +441,18 @@ impl FileOps {
                 ui.horizontal(|ui| {
                     // Enter = 保存する。開いたときにここへフォーカスを置く。「保存しない」には
                     // Enter も 1 文字のキーも割り当てない（変更を失う操作を誤打で起こさない）。
-                    let save = ui.button("保存する (Enter)");
+                    let save_button = ui.button("保存する (Enter)");
                     if focus_save {
-                        save.request_focus();
+                        save_button.request_focus();
                     }
                     // フォーカスの枠を「保存する」から動かさない。Enter は常に「保存する」なので、
                     // 枠が「保存しない」へ動くと、枠と Enter の結果が食い違う。Tab は egui が
                     // フレームの最初に処理するため、消費では間に合わない。TextEdit と同じ
                     // フォーカスロックのフィルタで、Tab・矢印を egui のフォーカス移動に使わせない。
-                    if save.has_focus() {
+                    if save_button.has_focus() {
                         ui.memory_mut(|m| {
                             m.set_focus_lock_filter(
-                                save.id,
+                                save_button.id,
                                 egui::EventFilter {
                                     tab: true,
                                     horizontal_arrows: true,
@@ -215,34 +462,37 @@ impl FileOps {
                             );
                         });
                     }
-                    if save.clicked() || enter {
-                        match Self::execute(FileAction::Save, doc) {
-                            FileOutcome::Ok(msg) => {
-                                // 保存できたときだけ元の操作へ進む。
-                                outcome = match Self::execute(action, doc) {
-                                    FileOutcome::Nothing => FileOutcome::Ok(msg),
-                                    other => other,
-                                };
-                                close = true;
-                            }
-                            FileOutcome::Nothing => {
-                                // 保存ダイアログがキャンセルされた。何もしない。
-                            }
-                            failed => {
-                                outcome = failed;
-                                close = true;
-                            }
-                        }
+                    if save_button.clicked() || enter {
+                        save = true;
                     }
                     if ui.button("保存しない").clicked() {
-                        outcome = Self::execute(action, doc);
-                        close = true;
+                        discard = true;
                     }
                     if ui.button("キャンセル (Esc)").clicked() {
                         close = true;
                     }
                 });
             });
+
+        if save {
+            if doc.path().is_some() {
+                match self.execute(FileAction::Save, doc) {
+                    FileOutcome::Ok(msg) => {
+                        // 保存できたときだけ元の操作へ進む。
+                        outcome = self.continue_after_save(msg, action, doc);
+                    }
+                    failed => outcome = failed,
+                }
+            } else {
+                // 保存先が無い。名前を付けて保存のダイアログを開き、保存できたら元の操作へ
+                // 進む（[`Self::finish_dialog`]）。キャンセルしたらこの確認へ戻る。
+                self.start_dialog(DialogPurpose::SaveAs { then: Some(action) }, doc);
+            }
+            close = true;
+        } else if discard {
+            outcome = self.execute(action, doc);
+            close = true;
+        }
 
         // Esc = キャンセル。`should_close()` は背景のクリックでも真になるが、誤クリックで
         // 閉じたくないので Esc だけを自分で見る（Issue #24）。
@@ -256,82 +506,48 @@ impl FileOps {
         outcome
     }
 
-    /// 確認を挟まずに実行する。
-    fn execute(action: FileAction, doc: &mut Document) -> FileOutcome {
+    /// 確認を挟まずに実行する。ダイアログが要る操作は、ダイアログを頼んで `Nothing` を返す。
+    fn execute(&mut self, action: FileAction, doc: &mut Document) -> FileOutcome {
         match action {
             FileAction::New => {
                 *doc = Document::new();
                 FileOutcome::Replaced("新規図面を作成しました".to_owned())
             }
-            FileAction::Open => Self::open(doc),
+            FileAction::Open => {
+                self.start_dialog(DialogPurpose::Open, doc);
+                FileOutcome::Nothing
+            }
             FileAction::Save => match doc.path().map(Path::to_path_buf) {
                 Some(path) => Self::save_to(doc, &path),
-                None => Self::save_as(doc),
+                None => {
+                    self.start_dialog(DialogPurpose::SaveAs { then: None }, doc);
+                    FileOutcome::Nothing
+                }
             },
-            FileAction::SaveAs => Self::save_as(doc),
+            FileAction::SaveAs => {
+                self.start_dialog(DialogPurpose::SaveAs { then: None }, doc);
+                FileOutcome::Nothing
+            }
             FileAction::Quit => FileOutcome::Quit,
         }
     }
 
-    fn open(doc: &mut Document) -> FileOutcome {
-        // テストでファイルダイアログを開くと返ってこない。理由つきで落として止める。
-        if cfg!(test) {
-            panic!("テストで rfd のダイアログを開こうとした: 図面を開く（経路を避けること）");
-        }
-        // ネイティブ形式を先に並べて既定にする。
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("ymcad 図面", &[NATIVE_EXTENSION])
-            .add_filter("DXF 図面（交換用）", &[DXF_EXTENSION])
-            .set_title("図面を開く")
-            .pick_file()
-        else {
-            return FileOutcome::Nothing;
-        };
-
-        let loaded = if is_dxf(&path) {
-            dxf::read::read_from_file(&path)
+    /// 選ばれたファイルを開く。形式は拡張子で決める。
+    fn open_path(doc: &mut Document, path: &Path) -> FileOutcome {
+        let loaded = if is_dxf(path) {
+            dxf::read::read_from_file(path)
         } else {
-            native::read::read_from_file(&path)
+            native::read::read_from_file(path)
         };
 
         match loaded {
             Ok(mut loaded) => {
-                loaded.mark_saved(Some(path.clone()));
+                loaded.mark_saved(Some(path.to_path_buf()));
                 *doc = loaded;
                 FileOutcome::Replaced(format!("開きました: {}", path.display()))
             }
             Err(e) => FileOutcome::Failed(format!("読み込みに失敗しました: {e}")),
         }
-    }
-
-    fn save_as(doc: &mut Document) -> FileOutcome {
-        // テストでファイルダイアログを開くと返ってこない。理由つきで落として止める。
-        if cfg!(test) {
-            panic!("テストで rfd のダイアログを開こうとした: 名前を付けて保存（図面に保存先を与えること）");
-        }
-        // 既に保存先があるならその名前を出す（形式も引き継がれる）。
-        let default_name = doc.path().and_then(|p| p.file_name()).map_or_else(
-            || format!("drawing.{NATIVE_EXTENSION}"),
-            |n| n.to_string_lossy().into_owned(),
-        );
-
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("ymcad 図面", &[NATIVE_EXTENSION])
-            .add_filter("DXF 図面（交換用）", &[DXF_EXTENSION])
-            .set_title("名前を付けて保存")
-            .set_file_name(default_name)
-            .save_file()
-        else {
-            return FileOutcome::Nothing;
-        };
-
-        // 拡張子を省略されたらネイティブ形式にする。
-        let path = if path.extension().is_some() {
-            path
-        } else {
-            path.with_extension(NATIVE_EXTENSION)
-        };
-        Self::save_to(doc, &path)
     }
 
     fn save_to(doc: &mut Document, path: &Path) -> FileOutcome {
@@ -590,6 +806,93 @@ mod tests {
         assert!(
             !ymc_msg.contains("警告"),
             "ネイティブ形式は無損失なので警告は出ないはず: {ymc_msg}"
+        );
+    }
+
+    // ---- ファイルダイアログ（Issue #98） --------------------------------
+
+    fn ops_with_fake() -> (FileOps, crate::file_dialog::FakeDialogs) {
+        let fake = crate::file_dialog::FakeDialogs::default();
+        (FileOps::with_backend(Box::new(fake.clone())), fake)
+    }
+
+    /// 開くはダイアログを頼むだけでブロックせず、結果が届くまで待つ。その間は別の操作を受け付けない。
+    #[test]
+    fn open_waits_for_the_dialog_without_blocking() {
+        let ctx = egui::Context::default();
+        let dir = crate::test_util::TempDir::new("fileops_open");
+        let path = dir.join("a.ymc");
+        native::write::write_to_file(&Document::new(), &path).expect("書ける");
+
+        let (mut ops, fake) = ops_with_fake();
+        let mut doc = Document::new();
+        assert_eq!(
+            ops.request(FileAction::Open, &mut doc),
+            FileOutcome::Nothing
+        );
+        assert!(ops.is_choosing_file() && ops.is_modal(), "待っている");
+        assert!(fake.opened().is_empty(), "開くのはフレームの最後（launch）");
+
+        ops.launch(None, &ctx);
+        ops.launch(None, &ctx);
+        assert_eq!(fake.opened(), vec![DialogRequest::Open], "1 回だけ開く");
+        assert_eq!(ops.poll(&mut doc), FileOutcome::Nothing, "まだ結果が無い");
+
+        assert_eq!(
+            ops.request(FileAction::New, &mut doc),
+            FileOutcome::Nothing,
+            "待っている間は新規作成しない"
+        );
+        assert_eq!(
+            ops.request(FileAction::Quit, &mut doc),
+            FileOutcome::Nothing
+        );
+        ops.launch(None, &ctx);
+        assert_eq!(fake.opened().len(), 1, "二重に開かない");
+
+        assert!(fake.reply(DialogReply::Picked(path.clone())));
+        assert!(matches!(ops.poll(&mut doc), FileOutcome::Replaced(_)));
+        assert!(!ops.is_modal());
+        assert_eq!(doc.path(), Some(path.as_path()));
+    }
+
+    /// ダイアログのスレッドが結果を送らずに終わったら、待ち続けずに失敗を伝える。
+    #[test]
+    fn a_dialog_that_never_replies_is_reported_as_a_failure() {
+        let (mut ops, fake) = ops_with_fake();
+        let mut doc = Document::new();
+        ops.request(FileAction::SaveAs, &mut doc);
+        ops.launch(None, &egui::Context::default());
+        fake.drop_all();
+        assert!(matches!(ops.poll(&mut doc), FileOutcome::Failed(_)));
+        assert!(!ops.is_modal(), "待つのをやめる");
+    }
+
+    /// 名前を付けて保存の既定の名前は、保存先があればそのファイル名（形式も引き継ぐ）。
+    #[test]
+    fn save_as_suggests_the_current_file_name() {
+        let (mut ops, fake) = ops_with_fake();
+        let mut doc = Document::new();
+        ops.request(FileAction::Save, &mut doc);
+        ops.launch(None, &egui::Context::default());
+        assert_eq!(
+            fake.opened(),
+            vec![DialogRequest::Save {
+                default_name: "drawing.ymc".into()
+            }],
+            "保存先の無い上書き保存は名前を付けて保存になる"
+        );
+        assert!(fake.reply(DialogReply::Cancelled));
+        assert_eq!(ops.poll(&mut doc), FileOutcome::Nothing);
+
+        doc.mark_saved(Some(std::path::PathBuf::from("/tmp/図面.dxf")));
+        ops.request(FileAction::SaveAs, &mut doc);
+        ops.launch(None, &egui::Context::default());
+        assert_eq!(
+            fake.opened()[1],
+            DialogRequest::Save {
+                default_name: "図面.dxf".into()
+            }
         );
     }
 }

@@ -12,6 +12,7 @@ mod command_label;
 mod component_panel;
 mod drafting;
 mod editing;
+mod file_dialog;
 mod file_ops;
 mod grips;
 mod hover;
@@ -36,6 +37,8 @@ mod ui_snapshot;
 mod viewport;
 
 fn main() -> eframe::Result<()> {
+    // rfd がファイルダイアログを出せなかったことを拾うため（ADR-0047）。
+    file_dialog::install_logger();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1280.0, 800.0])
