@@ -112,6 +112,15 @@ sudo apt install build-essential pkg-config libssl-dev \
 sudo apt install fonts-noto-cjk   # 日本語 UI 用（未導入だと文字が □ になります）
 ```
 
+ファイルを開く・保存するダイアログは xdg-desktop-portal（GNOME・KDE などのデスクトップには
+入っています）を使い、無ければ zenity を使います。**WSL** やデスクトップ環境の無い構成では
+どちらも無いことが多いので、zenity を入れてください（無いと、ダイアログを出せなかったことと
+対処がコマンドラインに出ます）。
+
+```bash
+sudo apt install zenity   # WSL など、xdg-desktop-portal の無い環境のファイルダイアログ用
+```
+
 ### ビルド
 
 ```bash
