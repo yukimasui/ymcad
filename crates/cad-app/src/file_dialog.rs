@@ -43,6 +43,28 @@ impl DialogRequest {
             Self::Save { .. } => "名前を付けて保存",
         }
     }
+
+    /// 待っている間のモーダルの見出し。
+    #[must_use]
+    pub fn waiting_heading(&self) -> &'static str {
+        match self {
+            Self::Open => "開く図面を選んでいます…",
+            Self::Save { .. } => "保存先を選んでいます…",
+        }
+    }
+
+    /// 待っている間に、ダイアログでしてもらうこと。
+    #[must_use]
+    pub fn waiting_instruction(&self) -> String {
+        let what = match self {
+            Self::Open => "開く図面を選ぶ",
+            Self::Save { .. } => "保存先と名前を決める",
+        };
+        format!(
+            "「{}」のダイアログで{what}か、キャンセルしてください。",
+            self.title()
+        )
+    }
 }
 
 /// ダイアログの結果。
@@ -145,13 +167,19 @@ fn classify(picked: Option<PathBuf>, failure: Option<String>) -> DialogReply {
     }
 }
 
-/// ダイアログを出せなかったときに出す文。理由と対処。
+/// ダイアログを出せなかったときに出す文。
+///
+/// 読む人がまず知りたいのは「次に何をすればよいか」なので、何が起きたか → 対処 → 詳細の順に
+/// 並べる。rfd の英文（`reason`）は調べる人のために最後に添える。画面ではバッククォートが
+/// そのまま出るので、コマンドは引用符で囲まない。zenity は開くたびに PATH から探すので、
+/// 入れた後にアプリを起動し直す必要は無い。
 #[must_use]
 pub fn unavailable_message(request: &DialogRequest, reason: &str) -> String {
     format!(
-        "「{}」のダイアログを出せませんでした（{reason}）。\
-         xdg-desktop-portal か zenity が必要です。\
-         Ubuntu / WSL では `sudo apt install zenity` で入ります",
+        "「{}」のダイアログを出せませんでした。\
+         WSL・Ubuntu では端末で sudo apt install zenity を実行してから、もう一度お試しください\
+         （アプリの起動し直しは要りません）。\
+         ほかの環境では xdg-desktop-portal か zenity が必要です。詳細: {reason}",
         request.title()
     )
 }
@@ -354,12 +382,32 @@ mod tests {
         );
     }
 
-    /// 出せなかったときの文に、理由と対処（zenity の入れ方）が入る。
+    /// 出せなかったときの文は、何が起きたか → 対処 → 詳細（rfd の英文）の順（Issue #102）。
+    /// バッククォートは画面にそのまま出るので使わない。
     #[test]
-    fn the_unavailable_message_gives_the_reason_and_the_remedy() {
+    fn the_unavailable_message_puts_the_remedy_before_the_details() {
         let msg = unavailable_message(&DialogRequest::Open, "os error 2");
-        assert!(msg.contains("図面を開く"), "{msg}");
-        assert!(msg.contains("os error 2"), "{msg}");
-        assert!(msg.contains("sudo apt install zenity"), "{msg}");
+        let what = msg
+            .find("「図面を開く」のダイアログを出せませんでした")
+            .expect(&msg);
+        let remedy = msg.find("sudo apt install zenity").expect(&msg);
+        let detail = msg.find("詳細: os error 2").expect(&msg);
+        assert!(what < remedy && remedy < detail, "順番: {msg}");
+        assert!(msg.ends_with("詳細: os error 2"), "英文の詳細は最後: {msg}");
+        assert!(!msg.contains('`'), "バッククォートを出さない: {msg}");
+    }
+
+    /// 待っている間の文は、開くと名前を付けて保存で言い分ける（保存で「選ぶ」と言わない）。
+    #[test]
+    fn the_waiting_text_matches_the_dialog() {
+        assert!(DialogRequest::Open
+            .waiting_instruction()
+            .contains("開く図面を選ぶ"));
+        let save = DialogRequest::Save {
+            default_name: "a.ymc".into(),
+        };
+        assert!(save.waiting_instruction().contains("保存先と名前を決める"));
+        assert!(!save.waiting_instruction().contains("選ぶ"));
+        assert_eq!(save.waiting_heading(), "保存先を選んでいます…");
     }
 }

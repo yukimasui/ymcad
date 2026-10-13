@@ -1150,9 +1150,8 @@ impl CadApp {
                 // ダイアログの結果を待っている間は終了しない。保存の途中で終わると変更を失い、
                 // 開く途中で終わると未保存確認を済ませた意味が無くなる。
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                self.session.cmdline.error(
-                    "ファイルを選んでいる間は終了できません。ダイアログを閉じてから終了してください",
-                );
+                // 理由はモーダルの中に出す（裏のコマンドラインは目に入りにくい。Issue #102）。
+                self.files.refuse_close();
             } else if self.doc.is_dirty() {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 let outcome = self
