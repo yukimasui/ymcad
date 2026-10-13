@@ -946,17 +946,56 @@ impl CommandLine {
             return hint::for_command(self.suggestions.items.get(index)?.name);
         }
         let (stage, assists) = self.hint.stage?;
-        let dim = fields.then(|| actions::DimHint {
-            kind: self.dim.kind,
-            field: self.dim.state.field,
-            locked: !self.dim.state.locks.is_empty(),
-            has_input: matches!(
-                dimension::classify(&self.input),
-                dimension::BufferKind::Number(_) | dimension::BufferKind::Incomplete
-            ),
-        });
-        let built = actions::build(prompt, stage, dim, assists);
+        let buffer = dimension::classify(&self.input);
+        // 確定すれば送られる文字があるか。数値の打ちかけ（`-` だけ）は値にならないので数えない。
+        let typed = !matches!(
+            buffer,
+            dimension::BufferKind::Empty | dimension::BufferKind::Incomplete
+        );
+        let built = actions::build(prompt, stage, self.dim_hint(fields), typed, assists);
         (!built.items.is_empty()).then_some(Hint::Actions(built))
+    }
+
+    /// 寸法入力の `Tab` / `Enter` / `Esc` の効き目。寸法入力のキーを扱う段階（[`Self::dimension_active`]）
+    /// でなければ `None`。
+    ///
+    /// **実際のキー処理（[`Self::consume_keys`] / [`Self::resolve_pending`]）が呼ぶのと同じ
+    /// `DimState::tab_in` / `enter_values` / `escape` を、状態の写しで動かした結果**を詰める。
+    /// ヒントのために判定を書き直すと、打ちかけ・座標・オプションの文字でずれる（PR #104 のレビュー）。
+    fn dim_hint(&self, fields: bool) -> Option<actions::DimHint> {
+        if !self.dimension_active() {
+            return None;
+        }
+        let buffer = dimension::classify(&self.input);
+        let state = self.dim.state;
+
+        let mut after_tab = state;
+        let tab = match after_tab.tab_in(self.dim.kind, buffer) {
+            TabOutcome::Moved { consumed } => match (consumed, after_tab.field != state.field) {
+                (true, true) => Some(actions::DimTab::LockAndMove {
+                    locked: state.field,
+                    to: after_tab.field,
+                }),
+                (true, false) => Some(actions::DimTab::Lock(state.field)),
+                (false, true) => Some(actions::DimTab::Move(after_tab.field)),
+                (false, false) => None,
+            },
+            TabOutcome::Ignored | TabOutcome::Rejected(_) => None,
+        };
+
+        let mut after_esc = state;
+        let esc = after_esc.escape(buffer).then(|| actions::EscClears {
+            locks: !state.locks.is_empty(),
+            input: !matches!(buffer, dimension::BufferKind::Empty),
+        });
+
+        Some(actions::DimHint {
+            kind: self.dim.kind,
+            field: fields.then_some(state.field),
+            tab,
+            enter_confirms: state.enter_values(buffer).is_some(),
+            esc,
+        })
     }
 
     /// 実行中のコマンドの段階と作図補助の状態を伝える（「今できること」の材料。Issue #27 段階 2）。

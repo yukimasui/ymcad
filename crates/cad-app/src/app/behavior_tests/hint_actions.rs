@@ -10,8 +10,8 @@ use egui_kittest::Harness;
 
 use super::hint::{assert_hint_is_clear, hint_actions};
 use super::{
-    app_with_dynamic, click, frame, hover, input_rect, key, preedit, press, settle, type_text,
-    CadApp, P1, P2, SETTLE,
+    app_with_dynamic, click, frame, hover, input_rect, key, lines, preedit, press, settle,
+    type_text, CadApp, P1, P2, SETTLE,
 };
 use crate::cmdline::actions::{Action, Actions};
 
@@ -85,7 +85,7 @@ fn actions_follow_the_stages_of_line() {
 }
 
 /// 寸法入力: 数字を打つと Tab は「固定して角度へ」、Enter は「この値で確定」、Esc は「固定と入力を外す」。
-/// Tab で角度の欄へ移ると「数字 角度」になり、固定があるので Esc の意味は変わったまま。
+/// Tab で角度の欄へ移ると「数字 角度」になり、固定があるので Esc は「固定を外す」。
 #[test]
 fn dimension_fields_change_the_meaning_of_tab_enter_and_escape() {
     let mut h = app_with_dynamic(true);
@@ -100,13 +100,17 @@ fn dimension_fields_change_the_meaning_of_tab_enter_and_escape() {
         Some("長さを固定して角度へ")
     );
     assert_eq!(text_of(&typed, "Enter").as_deref(), Some("この値で確定"));
-    assert_eq!(text_of(&typed, "Esc").as_deref(), Some("固定と入力を外す"));
+    assert_eq!(
+        text_of(&typed, "Esc").as_deref(),
+        Some("入力を消す"),
+        "固定はまだ無い"
+    );
 
     press(&mut h, egui::Key::Tab);
     let angle = actions(&h);
     assert_eq!(text_of(&angle, "数字").as_deref(), Some("角度"));
     assert_eq!(text_of(&angle, "Tab").as_deref(), Some("長さの欄へ"));
-    assert_eq!(text_of(&angle, "Esc").as_deref(), Some("固定と入力を外す"));
+    assert_eq!(text_of(&angle, "Esc").as_deref(), Some("固定を外す"));
 
     press(&mut h, egui::Key::Escape);
     let released = actions(&h);
@@ -116,6 +120,88 @@ fn dimension_fields_change_the_meaning_of_tab_enter_and_escape() {
         Some("中断"),
         "固定を外したら中断"
     );
+}
+
+// ---- ヒントが実際のキーの動きと一致すること（PR #104 のレビュー） ----------------
+
+/// LINE の 2 点目（寸法入力に参加）まで進める。
+fn line_second_point(h: &mut Harness<'_, CadApp>) {
+    start(h, "L");
+    click(h, P1);
+    hover(h, P2);
+}
+
+fn field(h: &Harness<'_, CadApp>) -> crate::cmdline::dimension::Field {
+    h.state().session.cmdline.dimension_field()
+}
+
+/// (a) `-` だけ（数値の打ちかけ）は「まだ打っていない」と同じ: Tab は固定できない（実際に断られて
+/// 欄も移らない）ので出さず、Enter に「この値で確定」と書かない。Esc は実際どおり入力を消す。
+#[test]
+fn an_incomplete_number_is_not_offered_as_a_value() {
+    use crate::cmdline::dimension::Field;
+    let mut h = app_with_dynamic(true);
+    line_second_point(&mut h);
+    type_text(&mut h, "-");
+    let a = actions(&h);
+    assert_eq!(text_of(&a, "Tab"), None, "Tab は断られるので出さない");
+    assert_eq!(text_of(&a, "Enter").as_deref(), Some("終了"));
+    assert_eq!(text_of(&a, "Esc").as_deref(), Some("入力を消す"));
+
+    // 実際のキー: Tab では欄が移らない。Esc は入力を消すだけで、LINE は続く。
+    press(&mut h, egui::Key::Tab);
+    assert_eq!(field(&h), Field::Length, "Tab は断られた");
+    press(&mut h, egui::Key::Escape);
+    assert_eq!(h.state().session.cmdline.input(), "");
+    assert!(h.state().session.has_active_tool(), "中断していない");
+}
+
+/// (b) 座標（`@3,4`）を打ちかけのときの Esc は入力を消すだけ（中断しない）。Tab は何もしない。
+/// Enter は打った座標で確定する。
+#[test]
+fn escape_while_typing_coordinates_only_clears_the_input() {
+    let mut h = app_with_dynamic(true);
+    line_second_point(&mut h);
+    type_text(&mut h, "@3,4");
+    let a = actions(&h);
+    assert_eq!(text_of(&a, "数字"), None, "欄は消えている");
+    assert_eq!(text_of(&a, "Tab"), None);
+    assert_eq!(text_of(&a, "Enter").as_deref(), Some("入力を確定"));
+    assert_eq!(text_of(&a, "Esc").as_deref(), Some("入力を消す"));
+
+    press(&mut h, egui::Key::Escape);
+    assert_eq!(h.state().session.cmdline.input(), "", "入力が消えた");
+    assert!(
+        h.state().session.has_active_tool(),
+        "中断していない（ヒントどおり）"
+    );
+}
+
+/// (c) 固定がある状態でオプションの文字（`C`）を打つと、Enter はオプションとして確定する
+/// （「この値で確定」ではない）。実際に C で閉じて LINE が終わる。
+#[test]
+fn an_option_letter_with_a_lock_is_entered_as_the_option() {
+    let mut h = app_with_dynamic(true);
+    line_second_point(&mut h);
+    click(&mut h, P2);
+    hover(&mut h, egui::pos2(P2.x, P1.y));
+    click(&mut h, egui::pos2(P2.x, P1.y));
+    hover(&mut h, egui::pos2(600.0, 500.0));
+    type_text(&mut h, "100");
+    press(&mut h, egui::Key::Tab);
+    assert!(
+        h.state().session.cmdline.dimension_locks().is_some(),
+        "前提: 長さを固定した"
+    );
+    type_text(&mut h, "C");
+    let a = actions(&h);
+    assert_eq!(text_of(&a, "Enter").as_deref(), Some("入力を確定"));
+    assert_eq!(text_of(&a, "Esc").as_deref(), Some("固定と入力を外す"));
+
+    let before = lines(&h).len();
+    press(&mut h, egui::Key::Enter);
+    assert!(!h.state().session.has_active_tool(), "C で閉じて終わった");
+    assert_eq!(lines(&h).len(), before + 1, "閉じる線分が足された");
 }
 
 /// 選択待ち（MOVE）→ 基点 → 目的点。選択待ちでは選び方が並び、作図補助は出ない。

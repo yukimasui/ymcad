@@ -44,17 +44,43 @@ pub struct Stage {
     pub has_base: bool,
 }
 
-/// 寸法入力の欄（Issue #20 段階 B）の状態。欄が出ているときだけ渡す。
+/// 寸法入力（Issue #20 段階 B）に参加している段階での、`Tab` / `Enter` / `Esc` の効き目。
+///
+/// **ここで判定し直さない。** コマンドラインが実際のキー処理（`DimState::tab_in` / `enter_values` /
+/// `escape`）を状態の写しで動かした結果を詰めて渡す（`CommandLine::dim_hint`）。判定を二重に書くと、
+/// `-` だけ（打ちかけ）・座標を打ちかけ・オプションの文字を打った、のような場合にずれる（PR #104 のレビュー）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DimHint {
     /// 欄の見せ方（「長さ」「角度」か「半径」だけか）。
     pub kind: DimKind,
-    /// 入力中の欄。
-    pub field: Field,
-    /// 固定した値（錠前）がある。
-    pub locked: bool,
-    /// 入力欄に打ちかけの数値がある。
-    pub has_input: bool,
+    /// 欄が出ていれば、入力中の欄（「数字 長さ」）。座標などを打って欄が消えていれば `None`。
+    pub field: Option<Field>,
+    /// `Tab` を押したら起きること。何も起きない（座標を打ちかけ・打ちかけの数値で断られる）なら `None`。
+    pub tab: Option<DimTab>,
+    /// `Enter` が欄の値で確定するか。
+    pub enter_confirms: bool,
+    /// `Esc` が固定・入力を外すか（外すなら中断はしない）。外さなければ `None`（中断）。
+    pub esc: Option<EscClears>,
+}
+
+/// 寸法入力の `Tab` の効き目。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DimTab {
+    /// 打った値で今の欄を固定して、次の欄へ移る。
+    LockAndMove { locked: Field, to: Field },
+    /// 打った値で今の欄を固定する（欄は移らない。半径の 1 欄）。
+    Lock(Field),
+    /// 固定せずに次の欄へ移る。
+    Move(Field),
+}
+
+/// 寸法入力の `Esc` が外すもの。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EscClears {
+    /// 固定（錠前）がある。
+    pub locks: bool,
+    /// 入力欄に文字がある。
+    pub input: bool,
 }
 
 /// 作図補助の、いま実際に効いている状態。効かない段階では `None`。
@@ -87,8 +113,17 @@ pub struct Actions {
 }
 
 /// プロンプトと段階から「今できること」を組み立てる。
+///
+/// `typed` … 入力欄に、確定すれば送られる文字がある（空・数値の打ちかけ `-` だけ、は含まない）。
+/// このとき `Enter` は打った内容で確定する（プロンプトの `<Enter で終了>` などは空の Enter の意味）。
 #[must_use]
-pub fn build(prompt_text: &str, stage: Stage, dim: Option<DimHint>, assists: Assists) -> Actions {
+pub fn build(
+    prompt_text: &str,
+    stage: Stage,
+    dim: Option<DimHint>,
+    typed: bool,
+    assists: Assists,
+) -> Actions {
     let p = prompt::parse(prompt_text);
     let mut items = Vec::new();
     let mut enter: Option<Action> = None;
@@ -113,7 +148,8 @@ pub fn build(prompt_text: &str, stage: Stage, dim: Option<DimHint>, assists: Ass
         if let Some(d) = dim {
             items.extend(dimension_items(d));
         }
-        items.push(Action::new("x,y / @x,y", "座標"));
+        items.push(Action::new("x,y", "座標"));
+        items.push(Action::new("@x,y", "相対"));
     } else {
         match &p.ask {
             Ask::Value(name) => {
@@ -124,7 +160,7 @@ pub fn build(prompt_text: &str, stage: Stage, dim: Option<DimHint>, assists: Ass
                 }
             }
             Ask::Text(name) => {
-                items.push(Action::new("文字", format!("{name}を打つ")));
+                items.push(Action::new("", text_to_type(name)));
                 enter = Some(Action::new("Enter", "確定"));
             }
             // 選ぶだけ（オプションを下で並べる）・読めないもの。Point / Select / Click は上で扱い済み。
@@ -155,10 +191,27 @@ pub fn build(prompt_text: &str, stage: Stage, dim: Option<DimHint>, assists: Ass
     }
     items.extend(p.notes.iter().map(|n| Action::new("", n.clone())));
 
-    // 寸法入力で固定・入力があると、Enter はその値で確定し、Esc はまず固定と入力を外す。
-    if dim.is_some_and(|d| d.locked || d.has_input) {
-        enter = Some(Action::new("Enter", "この値で確定"));
-        esc = Some(Action::new("Esc", "固定と入力を外す"));
+    // 文字を打っていれば、Enter は打った内容で確定する（空の Enter の意味ではない）。
+    // 空の Enter と Esc がまとめて書かれていた（グリップ）なら、Esc の意味は残す。
+    if typed {
+        if let Some(e) = enter.take().filter(|e| e.key.contains("Esc")) {
+            esc = Some(Action::new("Esc", e.text));
+        }
+        enter = Some(Action::new("Enter", "入力を確定"));
+    }
+    // 寸法入力: 実際のキー処理の結果どおりに、Enter・Esc の意味を変える。
+    if let Some(d) = dim {
+        if d.enter_confirms {
+            enter = Some(Action::new("Enter", "この値で確定"));
+        }
+        if let Some(e) = d.esc {
+            let what = match (e.locks, e.input) {
+                (true, true) => "固定と入力を外す",
+                (true, false) => "固定を外す",
+                _ => "入力を消す",
+            };
+            esc = Some(Action::new("Esc", what));
+        }
     }
     items.extend(enter);
     items.extend(esc);
@@ -171,23 +224,31 @@ pub fn build(prompt_text: &str, stage: Stage, dim: Option<DimHint>, assists: Ass
     Actions { items, status }
 }
 
-/// 寸法入力の欄の操作。入力中の欄と固定の有無で `Tab` の意味が変わる。
+/// 寸法入力の欄の操作（「数字 長さ」と `Tab`）。
 fn dimension_items(d: DimHint) -> Vec<Action> {
-    let name = d.kind.name(d.field);
-    let mut items = vec![Action::new("数字", name)];
-    let tab = match d.kind {
-        DimKind::Radius => "半径を固定".to_owned(),
-        DimKind::LengthAngle => {
-            let next = d.kind.name(d.field.next());
-            if d.has_input {
-                format!("{name}を固定して{next}へ")
-            } else {
-                format!("{next}の欄へ")
-            }
-        }
-    };
-    items.push(Action::new("Tab", tab));
+    let name = |f| d.kind.name(f);
+    let mut items = Vec::new();
+    if let Some(field) = d.field {
+        items.push(Action::new("数字", name(field)));
+    }
+    let tab = d.tab.map(|t| match t {
+        DimTab::LockAndMove { locked, to } => format!("{}を固定して{}へ", name(locked), name(to)),
+        DimTab::Lock(f) => format!("{}を固定", name(f)),
+        DimTab::Move(to) => format!("{}の欄へ", name(to)),
+    });
+    items.extend(tab.map(|t| Action::new("Tab", t)));
     items
+}
+
+/// 文字を打つ段階の案内。値（`「幅」の値`）は数値・式で打てることを添える。
+fn text_to_type(name: &str) -> String {
+    if name.ends_with("の既定値") {
+        format!("{name}を打つ（数値・式・真偽・選択肢）")
+    } else if name.ends_with("の値") {
+        format!("{name}を打つ（数値・式）")
+    } else {
+        format!("{name}を打つ")
+    }
 }
 
 /// 作図補助の状態（F3 / F8 / F10）。効く段階のものだけ。
@@ -244,27 +305,42 @@ mod tests {
         }),
     };
 
-    /// LINE の 3 本目: クリック・寸法入力・C 閉じる・Enter 終了・Esc 中断の順。
+    /// 長さの欄で何も打っていない（ふだんの寸法入力）。
+    const IDLE_DIM: DimHint = DimHint {
+        kind: DimKind::LengthAngle,
+        field: Some(Field::Length),
+        tab: Some(DimTab::Move(Field::Angle)),
+        enter_confirms: false,
+        esc: None,
+    };
+
+    /// LINE の 3 本目: クリック・寸法入力・座標・C 閉じる・Enter 終了・Esc 中断の順。
     #[test]
     fn line_next_point_with_dimension_input() {
-        let dim = DimHint {
-            kind: DimKind::LengthAngle,
-            field: Field::Length,
-            locked: false,
-            has_input: false,
-        };
         let a = build(
             "線分の次の点を指定 [閉じる(C)] <Enter で終了>:",
             POINT,
-            Some(dim),
+            Some(IDLE_DIM),
+            false,
             BOTH_ON,
         );
         assert_eq!(
             keys(&a),
-            vec!["クリック", "数字", "Tab", "x,y / @x,y", "C", "Enter", "Esc"]
+            vec![
+                "クリック",
+                "数字",
+                "Tab",
+                "x,y",
+                "@x,y",
+                "C",
+                "Enter",
+                "Esc"
+            ]
         );
         assert_eq!(find(&a, "数字"), Some("長さ"));
         assert_eq!(find(&a, "Tab"), Some("角度の欄へ"));
+        assert_eq!(find(&a, "x,y"), Some("座標"));
+        assert_eq!(find(&a, "@x,y"), Some("相対"));
         assert_eq!(find(&a, "C"), Some("閉じる"));
         assert_eq!(find(&a, "Enter"), Some("終了"));
         assert_eq!(find(&a, "Esc"), Some("中断"));
@@ -278,46 +354,113 @@ mod tests {
         );
     }
 
-    /// 寸法入力: 入力中の欄と固定の有無で Tab / Enter / Esc の意味が変わる。
+    /// 寸法入力: 渡されたキーの効き目どおりに Tab / Enter / Esc を書く。
     #[test]
-    fn dimension_fields_change_tab_enter_and_escape() {
+    fn dimension_keys_follow_what_the_keys_do() {
         let prompt = "線分の次の点を指定 <Enter で終了>:";
-        let d = |field, locked, has_input| DimHint {
-            kind: DimKind::LengthAngle,
-            field,
-            locked,
-            has_input,
-        };
-        let typed = build(prompt, POINT, Some(d(Field::Length, false, true)), BOTH_ON);
+        let typed = build(
+            prompt,
+            POINT,
+            Some(DimHint {
+                tab: Some(DimTab::LockAndMove {
+                    locked: Field::Length,
+                    to: Field::Angle,
+                }),
+                enter_confirms: true,
+                esc: Some(EscClears {
+                    locks: false,
+                    input: true,
+                }),
+                ..IDLE_DIM
+            }),
+            true,
+            BOTH_ON,
+        );
         assert_eq!(find(&typed, "Tab"), Some("長さを固定して角度へ"));
         assert_eq!(find(&typed, "Enter"), Some("この値で確定"));
-        assert_eq!(find(&typed, "Esc"), Some("固定と入力を外す"));
+        assert_eq!(find(&typed, "Esc"), Some("入力を消す"));
 
-        let angle = build(prompt, POINT, Some(d(Field::Angle, true, false)), BOTH_ON);
+        let angle = build(
+            prompt,
+            POINT,
+            Some(DimHint {
+                field: Some(Field::Angle),
+                tab: Some(DimTab::Move(Field::Length)),
+                enter_confirms: true,
+                esc: Some(EscClears {
+                    locks: true,
+                    input: false,
+                }),
+                ..IDLE_DIM
+            }),
+            false,
+            BOTH_ON,
+        );
         assert_eq!(find(&angle, "数字"), Some("角度"));
         assert_eq!(find(&angle, "Tab"), Some("長さの欄へ"));
-        assert_eq!(find(&angle, "Esc"), Some("固定と入力を外す"), "固定がある");
+        assert_eq!(find(&angle, "Esc"), Some("固定を外す"));
+
+        // 座標を打ちかけ: 欄は消え、Tab は何もしない。Esc は入力を消し、Enter は打った内容で確定。
+        let coords = build(
+            prompt,
+            POINT,
+            Some(DimHint {
+                field: None,
+                tab: None,
+                enter_confirms: false,
+                esc: Some(EscClears {
+                    locks: true,
+                    input: true,
+                }),
+                ..IDLE_DIM
+            }),
+            true,
+            BOTH_ON,
+        );
+        assert_eq!(find(&coords, "数字"), None);
+        assert_eq!(find(&coords, "Tab"), None);
+        assert_eq!(find(&coords, "Enter"), Some("入力を確定"));
+        assert_eq!(find(&coords, "Esc"), Some("固定と入力を外す"));
 
         let radius = DimHint {
             kind: DimKind::Radius,
-            field: Field::Length,
-            locked: false,
-            has_input: false,
+            tab: None,
+            ..IDLE_DIM
+        };
+        let grip = Stage {
+            gripping: true,
+            ..POINT
         };
         let r = build(
             "** 四分点 ** 点を指定 (空の Enter・Esc で取り消し):",
-            Stage {
-                gripping: true,
-                ..POINT
-            },
+            grip,
             Some(radius),
+            false,
             BOTH_ON,
         );
         assert_eq!(find(&r, "数字"), Some("半径"));
-        assert_eq!(find(&r, "Tab"), Some("半径を固定"));
+        assert_eq!(find(&r, "Tab"), None);
         assert_eq!(find(&r, "クリック"), Some("移動先"));
         assert_eq!(find(&r, "空の Enter・Esc"), Some("取り消し"));
         assert_eq!(find(&r, "Esc"), None, "Esc は取り消しにまとめる");
+
+        let locking = build(
+            "** 四分点 ** 点を指定 (空の Enter・Esc で取り消し):",
+            grip,
+            Some(DimHint {
+                tab: Some(DimTab::Lock(Field::Length)),
+                ..radius
+            }),
+            true,
+            BOTH_ON,
+        );
+        assert_eq!(find(&locking, "Tab"), Some("半径を固定"));
+        assert_eq!(find(&locking, "Enter"), Some("入力を確定"));
+        assert_eq!(
+            find(&locking, "Esc"),
+            Some("取り消し"),
+            "打っている間も Esc の意味は残る"
+        );
     }
 
     #[test]
@@ -329,6 +472,7 @@ mod tests {
                 ..Stage::default()
             },
             None,
+            false,
             BOTH_ON,
         );
         assert_eq!(
@@ -355,6 +499,7 @@ mod tests {
                 ..Stage::default()
             },
             None,
+            false,
             BOTH_ON,
         );
         assert_eq!(keys(&a), vec!["クリック", "R", "Esc"]);
@@ -364,7 +509,7 @@ mod tests {
 
     #[test]
     fn values_can_be_clicked_only_with_a_base() {
-        let with = build("円の半径を指定 [直径(D)]:", POINT, None, BOTH_ON);
+        let with = build("円の半径を指定 [直径(D)]:", POINT, None, false, BOTH_ON);
         assert_eq!(keys(&with), vec!["数字", "クリック", "D", "Esc"]);
         assert_eq!(find(&with, "数字"), Some("円の半径"));
         assert!(
@@ -372,7 +517,7 @@ mod tests {
             "クリックで指せるなら作図補助が効く"
         );
 
-        let without = build("半径を指定:", Stage::default(), None, BOTH_ON);
+        let without = build("半径を指定:", Stage::default(), None, false, BOTH_ON);
         assert_eq!(keys(&without), vec!["数字", "Esc"]);
         assert!(without.status.is_empty());
     }
@@ -383,16 +528,30 @@ mod tests {
             "グループ名を入力 <Enter で既定名>:",
             Stage::default(),
             None,
+            false,
             Assists::default(),
         );
-        assert_eq!(keys(&name), vec!["文字", "Enter", "Esc"]);
-        assert_eq!(find(&name, "文字"), Some("グループ名を打つ"));
+        assert_eq!(keys(&name), vec!["", "Enter", "Esc"]);
+        assert_eq!(find(&name, ""), Some("グループ名を打つ"));
+        let typed_name = build(
+            "グループ名を入力 <Enter で既定名>:",
+            Stage::default(),
+            None,
+            true,
+            Assists::default(),
+        );
+        assert_eq!(
+            find(&typed_name, "Enter"),
+            Some("入力を確定"),
+            "打ったら既定名ではない"
+        );
         assert_eq!(find(&name, "Enter"), Some("既定名"));
 
         let yn = build(
             "元のオブジェクトを消去しますか? [はい(Y)/いいえ(N)] <N>:",
             Stage::default(),
             None,
+            false,
             BOTH_ON,
         );
         assert_eq!(keys(&yn), vec!["Y", "N", "Enter", "Esc"]);
@@ -403,9 +562,11 @@ mod tests {
             "「幅」の値を入力 <R でリセット>:\n\u{3000}900",
             Stage::default(),
             None,
+            false,
             Assists::default(),
         );
-        assert_eq!(keys(&pset), vec!["文字", "R", "Enter", "Esc"]);
+        assert_eq!(keys(&pset), vec!["", "R", "Enter", "Esc"]);
+        assert_eq!(find(&pset, ""), Some("「幅」の値を打つ（数値・式）"));
     }
 
     /// 2 行目の作図補助: 実際に効いている状態に合わせる（Shift の一時反転・直交の優先）。
@@ -419,7 +580,7 @@ mod tests {
                 shift: true,
             }),
         };
-        let a = build("基点を指定:", POINT, None, shift);
+        let a = build("基点を指定:", POINT, None, false, shift);
         assert_eq!(
             a.status,
             vec![
@@ -434,6 +595,7 @@ mod tests {
             "線分の始点を指定:",
             Stage::default(),
             None,
+            false,
             Assists {
                 osnap: Some(true),
                 tracking: None,
@@ -448,9 +610,13 @@ mod tests {
             "目的点を指定 <Enter で終了> (複写 2 個):",
             POINT,
             None,
+            false,
             BOTH_ON,
         );
-        assert_eq!(keys(&a), vec!["クリック", "x,y / @x,y", "", "Enter", "Esc"]);
+        assert_eq!(
+            keys(&a),
+            vec!["クリック", "x,y", "@x,y", "", "Enter", "Esc"]
+        );
         assert_eq!(find(&a, ""), Some("複写 2 個"));
     }
 }

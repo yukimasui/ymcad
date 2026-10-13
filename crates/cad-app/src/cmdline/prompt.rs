@@ -155,9 +155,10 @@ fn parse_options(inner: &str) -> Vec<PromptOption> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|item| match next_group(item) {
-            Some((label, '(' | '（', key, _)) if is_key(key.trim()) => PromptOption {
+            // `(KEY)` の後ろに続く文字も捨てずに名前へ残す（`コピー(C)する` → `コピーする`）。
+            Some((before, '(' | '（', key, after)) if is_key(key.trim()) => PromptOption {
                 key: key.trim().to_owned(),
-                label: label.trim().to_owned(),
+                label: format!("{}{}", before.trim(), after.trim()),
             },
             _ if is_key(item) => PromptOption {
                 key: item.to_owned(),
@@ -288,6 +289,15 @@ mod tests {
         assert_eq!(p.ask, Ask::Choice);
         assert_eq!(p.options, vec![opt("Y", "はい"), opt("N", "いいえ")]);
         assert_eq!(p.default.as_deref(), Some("N"));
+    }
+
+    /// オプションの `(KEY)` より後ろの文字も捨てない（全域・何も捨てない）。
+    #[test]
+    fn text_after_the_key_is_kept() {
+        let p = parse("点を指定 [コピー(C)する/2点(2P)目]:");
+        assert_eq!(p.options, vec![opt("C", "コピーする"), opt("2P", "2点目")]);
+        let p = parse("点を指定 [(C)閉じる]:");
+        assert_eq!(p.options, vec![opt("C", "閉じる")]);
     }
 
     #[test]

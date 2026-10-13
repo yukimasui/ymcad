@@ -10,7 +10,7 @@
 //!    （走査の取りこぼしが無いこと）も確かめる
 
 use super::*;
-use crate::cmdline::actions::{self, Assists, DimHint, Tracking};
+use crate::cmdline::actions::{self, Assists, DimHint, DimTab, Tracking};
 use crate::cmdline::dimension::{DimKind, Field};
 use crate::cmdline::prompt::{self, Ask};
 use cad_core::command::AddEntities;
@@ -220,7 +220,7 @@ fn every_prompt_in_the_source_can_be_read() {
         );
         assert_buildable(
             &sample,
-            &actions::build(&sample, actions::Stage::default(), None, ASSISTS),
+            &actions::build(&sample, actions::Stage::default(), None, false, ASSISTS),
         );
     }
 }
@@ -286,15 +286,16 @@ impl Walk {
         let text = self.s.prompt();
         let dim = self.s.dimension_base().map(|_| DimHint {
             kind: DimKind::LengthAngle,
-            field: Field::Length,
-            locked: false,
-            has_input: false,
+            field: Some(Field::Length),
+            tab: Some(DimTab::Move(Field::Angle)),
+            enter_confirms: false,
+            esc: None,
         });
         let assists = Assists {
             osnap: Some(true),
             tracking: self.s.tracking_base().map(|_| Tracking::default()),
         };
-        assert_buildable(&text, &actions::build(&text, stage, dim, assists));
+        assert_buildable(&text, &actions::build(&text, stage, dim, false, assists));
         let first = text.lines().next().unwrap_or_default().trim().to_owned();
         if !self.seen.contains(&first) {
             self.seen.push(first);
