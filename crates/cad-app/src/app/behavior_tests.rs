@@ -21,6 +21,7 @@ mod properties;
 mod rename;
 mod replaced_caches;
 mod select_all;
+mod shift_ortho;
 mod trim_preview;
 
 /// 画面の大きさ [px]。

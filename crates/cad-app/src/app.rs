@@ -119,6 +119,12 @@ pub struct CadApp {
     snap: SnapState,
     /// 直交モード（F8）と極トラッキング（F10）。UI の状態なので保存しない（ADR-0038）。
     drafting: Drafting,
+    /// このフレームで Shift による直交の一時反転を受け付けるか（Issue #36、ADR-0049）。
+    ///
+    /// フレームの頭（[`Self::shift_flip_for_frame`]）で 1 回だけ決める。実際に反転するのは、
+    /// これに加えて基準点のある点の指定中（[`Self::shift_flip_active`]）だけ。
+    /// 設定（`drafting`）は書き換えない。
+    shift_flip: bool,
     /// コンポーネントインスタンスの展開結果。
     ///
     /// 派生データなので `Document` ではなくここに持ち、
@@ -169,6 +175,7 @@ impl CadApp {
             session: Session::new(),
             snap: SnapState::new(),
             drafting: Drafting::new(),
+            shift_flip: false,
             resolved: ResolvedInstances::new(),
             layer_panel: LayerPanel::new(),
             component_panel: ComponentPanel::new(),
@@ -347,11 +354,40 @@ impl CadApp {
         self.session.cmdline.info(msg);
     }
 
+    /// Shift の一時反転を受け付けるかを、フレームの頭で決める（Issue #36、ADR-0049）。
+    ///
+    /// コマンドラインがキーの持ち主で（パネルの欄の編集中・未保存確認のモーダル中でない。
+    /// ADR-0035）、変換中でないときだけ。IME の操作や名前の入力で Shift を押しても、
+    /// 作図の拘束は変えない。`begin_frame` の後に呼ぶ（持ち主と変換中はそこで決まる）。
+    fn shift_flip_for_frame(&self, ctx: &egui::Context) -> bool {
+        let cmdline = &self.session.cmdline;
+        ctx.input(|i| i.modifiers.shift) && cmdline.owns_keys() && !cmdline.is_composing()
+    }
+
+    /// Shift の一時反転がいま効いているか。基準点のある点の指定中（グリップを掴んでいる間を含む）だけ。
+    ///
+    /// 待機中・選択待ち・図形を指す段階には基準点が無いので、そこでの Shift は今までどおり
+    /// 「選択から外す」「グリップを無視する」として働き、ステータスバーも変えない。
+    fn shift_flip_active(&self) -> bool {
+        self.shift_flip && self.session.tracking_base().is_some()
+    }
+
+    /// いま拘束に使う直交・極の状態。Shift の一時反転が効いていれば直交だけを反転した写し。
+    fn drafting_now(&self) -> Drafting {
+        if self.shift_flip_active() {
+            self.drafting.with_ortho_flipped()
+        } else {
+            self.drafting
+        }
+    }
+
     /// スナップ前のカーソル（モデル座標）から、ラバーバンドとクリックに使う点を決める。
     /// スナップの吸着 → 直交 → 極の順（ADR-0038）。寸法入力の固定はこの後に `Session` がかける。
+    /// Shift の一時反転（Issue #36）もここで効かせるので、ラバーバンド・クリック・直接距離入力・
+    /// 寸法入力の欄の向きがそろう。
     fn track(&self, raw: Point2) -> drafting::Tracked {
         drafting::track_cursor(
-            self.drafting,
+            self.drafting_now(),
             &self.session,
             &self.viewport,
             self.snapped.map(|s| s.point),
@@ -766,7 +802,7 @@ impl CadApp {
             self.toggle_osnap();
         }
         ui.separator();
-        if let Some(mode) = drafting::status_toggles(ui, self.drafting) {
+        if let Some(mode) = drafting::status_toggles(ui, self.drafting, self.shift_flip_active()) {
             self.toggle_drafting(mode);
         }
         // 動的入力。OSNAP と同じ見せ方にし、クリックでも切り替えられるようにする。
@@ -972,6 +1008,8 @@ impl CadApp {
             snap,
             // 直交・極トラッキングは利用者の設定。
             drafting: _,
+            // 毎フレームの頭で決め直す。
+            shift_flip: _,
             resolved,
             layer_panel,
             // 開閉と新しいパラメータ名の下書きだけで、図面の ID を持たない。
@@ -1287,6 +1325,9 @@ impl eframe::App for CadApp {
         self.session
             .cmdline
             .begin_frame(&ctx, allow_suggestions, self.files.is_confirming());
+        // Shift の一時反転（Issue #36）。キーの持ち主と変換中が決まった後、ステータスバーと
+        // キャンバスより前に 1 回だけ決める（同じフレームの表示と拘束が食い違わない）。
+        self.shift_flip = self.shift_flip_for_frame(&ctx);
         // Ctrl+A（全選択）。効く段階か（待機中・選択待ちだけ）は `select_all` が決める。
         // 確定（Enter）より前に選ぶ。同じフレームに Ctrl+A と Enter が来たら、選んでから確定する。
         if self.session.cmdline.take_select_all() {

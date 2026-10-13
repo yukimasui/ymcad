@@ -116,6 +116,25 @@ impl Drafting {
         self.ortho && self.polar
     }
 
+    /// 直交の効き方だけを反転した状態（Shift を押している間の一時オーバーライド。Issue #36、ADR-0049）。
+    ///
+    /// 設定（`self`）は書き換えず、反転した写しを返す。極はそのままなので、優先順位
+    /// （両方オンなら直交）は [`Self::track`] のまま決まる:
+    ///
+    /// | 設定 | 反転した写し | 効くもの |
+    /// |---|---|---|
+    /// | 両方オフ | 直交 | 直交 |
+    /// | 直交だけ | なし | 自由 |
+    /// | 極だけ | 両方 | 直交（直交が優先） |
+    /// | 両方 | 極だけ | 極 |
+    #[must_use]
+    pub fn with_ortho_flipped(self) -> Self {
+        Self {
+            ortho: !self.ortho,
+            ..self
+        }
+    }
+
     /// 指定の補助だけを切り替え、履歴に出す文を返す。
     pub fn toggle(&mut self, mode: Mode) -> String {
         let flag = match mode {
@@ -382,13 +401,38 @@ pub fn take_key_toggles(ui: &egui::Ui) -> Vec<Mode> {
 /// オンだが直交に負けて効いていない極の色。オンとオフの中間に見せる。
 const OVERRIDDEN_COLOR: egui::Color32 = egui::Color32::from_rgb(0x8a, 0x9a, 0x5b);
 
+/// Shift の一時反転中に、反転で見え方が変わった部品の下に敷く帯の色（Issue #36）。
+///
+/// 文字の色は「実際に効いている状態」をそのまま表すので、帯は文字と競わない控えめな色にする。
+/// 待機中の部品（OSNAP / DYN）にも、ホバーの色にも使っていない色。
+const TEMPORARY_BAND: egui::Color32 =
+    egui::Color32::from_rgba_premultiplied(0x30, 0x48, 0x70, 0xc0);
+
+/// Shift の一時反転中に足すツールチップ。
+pub const TEMPORARY_NOTE: &str =
+    "Shift を押している間だけ直交を一時的に反転しています（F8 の設定は変わりません）";
+
 /// ステータスバーに `ORTHO` / `POLAR` を描く（`OSNAP` / `DYN` と同じ見せ方）。
 /// クリックされた補助を返す。区切り線は各項目の後ろに描く。
-pub fn status_toggles(ui: &mut egui::Ui, drafting: Drafting) -> Option<Mode> {
+///
+/// - `setting` … F8 / F10 の設定
+/// - `temporary` … Shift の一時反転（Issue #36、ADR-0049）が効いているか。効いている間は、
+///   **いま実際に効いている状態**（[`Drafting::with_ortho_flipped`]）で文字を出し、
+///   設定と見え方が違う部品の下に帯を敷く。文字の長さは大文字・小文字で同じ等幅なので、
+///   部品の幅と位置は変わらない（押す位置が逃げない。ADR-0038 の追記）
+pub fn status_toggles(ui: &mut egui::Ui, setting: Drafting, temporary: bool) -> Option<Mode> {
+    let drafting = if temporary {
+        setting.with_ortho_flipped()
+    } else {
+        setting
+    };
     let mut clicked = None;
     for mode in Mode::ALL {
         let on = drafting.is_on(mode);
         let overridden = mode == Mode::Polar && drafting.polar_overridden();
+        // 反転で見え方が変わるのは ORTHO（常に）と、オンの POLAR（直交に負ける・勝つが入れ替わる）。
+        let banded = temporary
+            && (mode == Mode::Ortho || setting.polar_overridden() != drafting.polar_overridden());
         let text = if on {
             let color = if overridden {
                 OVERRIDDEN_COLOR
@@ -410,6 +454,12 @@ pub fn status_toggles(ui: &mut egui::Ui, drafting: Drafting) -> Option<Mode> {
         if overridden {
             tooltip.push_str("\n直交モードがオンの間は直交が優先されます");
         }
+        if banded {
+            tooltip.push('\n');
+            tooltip.push_str(TEMPORARY_NOTE);
+        }
+        // 帯は文字の下に敷く。文字を描いた後に塗ると文字に重なるので、先に場所だけ取っておく。
+        let band = ui.painter().add(egui::Shape::Noop);
         // クリックで切り替える部品なので、選択を切って指のカーソルにする。
         let response = ui
             .add(
@@ -419,6 +469,12 @@ pub fn status_toggles(ui: &mut egui::Ui, drafting: Drafting) -> Option<Mode> {
             )
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(tooltip);
+        if banded {
+            ui.painter().set(
+                band,
+                egui::Shape::rect_filled(response.rect.expand(1.0), 2.0, TEMPORARY_BAND),
+            );
+        }
         if response.clicked() {
             clicked = Some(mode);
         }
@@ -631,6 +687,68 @@ mod tests {
             Some(45.0),
             "極だけなら吸い付く"
         );
+    }
+
+    /// Shift の一時反転（Issue #36）は直交だけを反転し、極の設定はそのまま。
+    /// 4 通りの設定で、効くものが表（ADR-0049）のとおりになる。設定そのものは変えない。
+    #[test]
+    fn flipping_ortho_follows_the_table() {
+        // 43° は直交なら水平、極なら 45° に吸い付く向き。
+        let c = at_deg(BASE, 43.0, 100.0);
+        let horizontal = ortho(BASE, c);
+        for (setting, expected_point, expected_polar) in [
+            (with(false, false), horizontal, None),
+            (with(true, false), c, None),
+            (with(false, true), horizontal, None),
+            (
+                with(true, true),
+                at_deg(BASE, 45.0, 100.0 * 2.0_f64.to_radians().cos()),
+                Some(45.0),
+            ),
+        ] {
+            let flipped = setting.with_ortho_flipped();
+            assert_eq!(
+                flipped.is_on(Mode::Ortho),
+                !setting.is_on(Mode::Ortho),
+                "{setting:?}"
+            );
+            assert_eq!(
+                flipped.is_on(Mode::Polar),
+                setting.is_on(Mode::Polar),
+                "{setting:?}"
+            );
+            let t = flipped.track(input(c));
+            assert_point(t.point, expected_point);
+            assert_eq!(t.polar.map(|h| h.angle_deg), expected_polar, "{setting:?}");
+            assert_eq!(
+                flipped.with_ortho_flipped(),
+                setting,
+                "2 回反転すると元に戻る"
+            );
+        }
+    }
+
+    /// 反転しても、スナップの吸着と寸法入力の角度固定が優先される（ADR-0038 の優先順位のまま）。
+    #[test]
+    fn snap_and_angle_lock_win_over_the_flip() {
+        let c = at_deg(BASE, 43.0, 100.0);
+        let free = Tracked {
+            point: c,
+            polar: None,
+        };
+        for setting in [with(false, false), with(false, true), with(true, true)] {
+            let flipped = setting.with_ortho_flipped();
+            let snapped = TrackInput {
+                snapped: true,
+                ..input(c)
+            };
+            assert_eq!(flipped.track(snapped), free, "{setting:?}");
+            let locked = TrackInput {
+                angle_locked: true,
+                ..input(c)
+            };
+            assert_eq!(flipped.track(locked), free, "{setting:?}");
+        }
     }
 
     /// スナップに吸着しているとき・角度を固定しているときは拘束しない。
