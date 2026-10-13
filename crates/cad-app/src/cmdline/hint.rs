@@ -21,7 +21,7 @@ pub const GAP_PX: f32 = 6.0;
 
 /// ヒントの中身。
 ///
-/// 段階 1 はコマンドの説明だけ。段階 2（実行中に今できること）はここに種類を足す。
+/// 候補のコマンドの説明（段階 1）と、実行中に今できること（段階 2）。
 /// 大きさは描画側が毎フレーム、見えない別の `Area` で測ってから置く（ADR-0048 決定 3）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Hint {
@@ -32,6 +32,8 @@ pub enum Hint {
         /// 説明（`cmdline/command_help.rs`）。
         description: &'static str,
     },
+    /// コマンドの実行中に、今の段階でできること（段階 2。`cmdline/actions.rs`）。
+    Actions(super::actions::Actions),
 }
 
 /// コマンドの説明のヒント。説明の無いコマンド名なら `None`（全コマンドにあることはテストで検査）。
@@ -51,7 +53,7 @@ pub struct Situation {
     pub box_visible: bool,
     /// IME で変換中。
     pub composing: bool,
-    /// モーダル（未保存確認）が出ている。
+    /// モーダル（未保存確認・ファイルダイアログ待ち）が出ている。
     pub modal_open: bool,
 }
 

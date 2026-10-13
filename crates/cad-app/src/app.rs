@@ -325,6 +325,11 @@ impl CadApp {
             self.cursor_model
                 .map(|c| crate::cmdline::dimension::live(base, c))
         });
+        let hint_stage = self
+            .session
+            .hint_stage()
+            .map(|stage| (stage, self.hint_assists()));
+        self.session.cmdline.set_hint_stage(hint_stage);
         self.session.cmdline.show_floating(
             ctx,
             &prompt,
@@ -339,6 +344,28 @@ impl CadApp {
             ctx.request_repaint();
         }
         self.apply_submission(submission);
+    }
+
+    /// ヒントの 2 行目に出す作図補助の状態（Issue #27 段階 2）。**効く段階のものだけ**、
+    /// **実際に効いている状態**（Shift の一時反転・直交の優先を反映した後）で返す。
+    ///
+    /// スナップは点の入力を待っている段階（図形を指す段階を除く。`canvas` の `snap_wanted` と同じ条件）、
+    /// 直交・極は基準点のある点の指定（`Session::tracking_base`）で効く。
+    fn hint_assists(&self) -> crate::cmdline::actions::Assists {
+        let snap_wanted = self.session.wants_point() && !self.session.wants_entity();
+        let now = self.drafting_now();
+        let ortho = now.is_on(drafting::Mode::Ortho);
+        crate::cmdline::actions::Assists {
+            osnap: snap_wanted.then(|| self.snap.is_enabled()),
+            tracking: self
+                .session
+                .tracking_base()
+                .map(|_| crate::cmdline::actions::Tracking {
+                    ortho,
+                    polar: now.is_on(drafting::Mode::Polar),
+                    shift: self.shift_flip_active(),
+                }),
+        }
     }
 
     /// オブジェクトスナップを切り替え、履歴に残す。

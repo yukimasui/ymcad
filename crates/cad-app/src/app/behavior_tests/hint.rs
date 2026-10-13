@@ -21,13 +21,26 @@ fn hint_name(h: &Harness<'_, CadApp>) -> Option<&'static str> {
         .session
         .cmdline
         .hint_shown()
-        .map(|hint| match hint {
-            Hint::Command { name, .. } => *name,
+        .and_then(|hint| match hint {
+            Hint::Command { name, .. } => Some(*name),
+            Hint::Actions(_) => None,
+        })
+}
+
+/// このフレームで見せている「今できること」（段階 2）。
+pub(super) fn hint_actions(h: &Harness<'_, CadApp>) -> Option<crate::cmdline::actions::Actions> {
+    h.state()
+        .session
+        .cmdline
+        .hint_shown()
+        .and_then(|hint| match hint {
+            Hint::Actions(a) => Some(a.clone()),
+            Hint::Command { .. } => None,
         })
 }
 
 /// ヒントがキャンバスの内側にあり、入力欄の枠にもカーソルの周りにも重ならないこと。
-fn assert_hint_is_clear(h: &Harness<'_, CadApp>, cursor: egui::Pos2, what: &str) {
+pub(super) fn assert_hint_is_clear(h: &Harness<'_, CadApp>, cursor: egui::Pos2, what: &str) {
     let cmdline = &h.state().session.cmdline;
     let Some(hint) = cmdline.hint_rect() else {
         return;
@@ -376,16 +389,18 @@ fn no_hint_while_composing() {
     assert_eq!(hint_name(&h), Some("LINE"), "変換を取り消すと戻る");
 }
 
-/// 段階 1 では、コマンドの実行中（候補を出さない段階）にはヒントを出さない。
+/// コマンドの実行中は、候補の説明ではなく「今できること」（段階 2）が出る。
+/// 詳しくは `behavior_tests/hint_actions.rs`。
 #[test]
-fn no_hint_while_a_command_runs() {
+fn a_running_command_shows_actions_instead_of_a_description() {
     let mut h = app_with_dynamic(true);
     hover(&mut h, P1);
     type_text(&mut h, "L");
     press(&mut h, egui::Key::Enter);
     assert!(h.state().session.has_active_tool(), "前提");
     hover(&mut h, P1);
-    assert_eq!(hint_name(&h), None);
+    assert_eq!(hint_name(&h), None, "説明は出ない");
+    assert!(hint_actions(&h).is_some(), "今できることが出る");
 }
 
 /// ヒントはクリックを受け取らない（`interactable(false)`）。上をクリックしても
