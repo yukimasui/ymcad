@@ -418,3 +418,25 @@ fn giving_up_the_wait_ignores_a_late_pick() {
     assert!(lines(&h).is_empty(), "遅れて届いた結果では開かない");
     assert!(h.state().doc.path().is_none());
 }
+
+/// 待っている間に ✕ で出した「終了できません」は、次のダイアログへ持ち越さない（PR #103 のレビュー）。
+#[test]
+fn the_close_refusal_does_not_carry_over_to_the_next_dialog() {
+    let (mut h, fake) = app_with_fake_dialogs();
+    ctrl(&mut h, egui::Key::O);
+    request_close(&mut h);
+    assert!(
+        shows(&h, "ダイアログを閉じるまで終了できません"),
+        "前提: ✕ の理由が出ている"
+    );
+    assert!(fake.reply(DialogReply::Cancelled));
+    settle(&mut h);
+    assert!(!h.state().files.is_modal(), "前提: 待つのが終わった");
+
+    ctrl(&mut h, egui::Key::O);
+    assert!(waiting_is_shown(&h), "前提: 次のダイアログを待っている");
+    assert!(
+        !shows(&h, "ダイアログを閉じるまで終了できません"),
+        "前のダイアログで押した ✕ の理由は出さない"
+    );
+}
