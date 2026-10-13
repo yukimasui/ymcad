@@ -405,8 +405,9 @@ const OVERRIDDEN_COLOR: egui::Color32 = egui::Color32::from_rgb(0x8a, 0x9a, 0x5b
 ///
 /// 文字の色は「実際に効いている状態」をそのまま表すので、帯は文字と競わない控えめな色にする。
 /// 待機中の部品（OSNAP / DYN）にも、ホバーの色にも使っていない色。
+/// 暗くしてあるのは、帯の上に載る弱い色の文字（オフの `ortho`、直交に負けた POLAR）を読めるようにするため。
 const TEMPORARY_BAND: egui::Color32 =
-    egui::Color32::from_rgba_premultiplied(0x30, 0x48, 0x70, 0xc0);
+    egui::Color32::from_rgba_premultiplied(0x22, 0x32, 0x4d, 0xc0);
 
 /// Shift の一時反転中に足すツールチップ。
 pub const TEMPORARY_NOTE: &str =
@@ -446,7 +447,10 @@ pub fn status_toggles(ui: &mut egui::Ui, setting: Drafting, temporary: bool) -> 
                 .color(ui.visuals().weak_text_color())
         };
         let mut tooltip = match mode {
-            Mode::Ortho => "直交モード（水平・垂直に拘束）の ON/OFF  F8".to_owned(),
+            Mode::Ortho => {
+                "直交モード（水平・垂直に拘束）の ON/OFF  F8\n点の指定中は Shift を押している間だけ反転"
+                    .to_owned()
+            }
             Mode::Polar => {
                 format!("極トラッキング（{POLAR_STEP_DEG:.0}° 刻みに吸い付く）の ON/OFF  F10")
             }

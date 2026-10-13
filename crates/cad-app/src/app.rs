@@ -1326,7 +1326,7 @@ impl eframe::App for CadApp {
             .cmdline
             .begin_frame(&ctx, allow_suggestions, self.files.is_confirming());
         // Shift の一時反転（Issue #36）。キーの持ち主と変換中が決まった後、ステータスバーと
-        // キャンバスより前に 1 回だけ決める（同じフレームの表示と拘束が食い違わない）。
+        // キャンバスより前に 1 回だけ決める（同じフレームの表示と拘束が同じ Shift の値を見る）。
         self.shift_flip = self.shift_flip_for_frame(&ctx);
         // Ctrl+A（全選択）。効く段階か（待機中・選択待ちだけ）は `select_all` が決める。
         // 確定（Enter）より前に選ぶ。同じフレームに Ctrl+A と Enter が来たら、選んでから確定する。
