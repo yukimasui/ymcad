@@ -14,9 +14,11 @@
 //! また変換を確定する `Enter` と、コマンドを確定する `Enter` は別の打鍵になる
 //! （変換中は winit がキー入力イベントを送らないため、自然にそうなる）。
 
+pub mod command_help;
 pub mod coord;
 pub mod dimension;
 pub mod dynamic;
+pub mod hint;
 
 use std::collections::VecDeque;
 use std::time::Duration;
@@ -25,6 +27,7 @@ use cad_core::geom::Point2;
 
 use self::dimension::{DimKind, DimState, DimValues, Field, Live, TabOutcome};
 use self::dynamic::{Activity, Bounds, Point, Size};
+use self::hint::Hint;
 
 use crate::tools::{self, CommandSpec};
 
@@ -56,6 +59,16 @@ const DIM_FIELD_WIDTH: f32 = 110.0;
 const LOCK_COLOR: egui::Color32 = egui::Color32::from_rgb(0xff, 0xc1, 0x07);
 /// 錠前を描く正方形の一辺 [px]。形は 16 単位の格子で定義し、この大きさへ拡大縮小する。
 const LOCK_SIZE: f32 = 16.0;
+/// ヒント（Issue #27）の `Area` の ID。入力欄の `Area` とは別にする（ADR-0048）。
+const HINT_AREA_ID: &str = "ymcad_dyn_hint";
+/// ヒントの最大幅 [px]。長い説明はここで折り返す。
+const HINT_MAX_WIDTH: f32 = 380.0;
+/// ヒントの背景の不透明度。入力欄の枠（[`DYN_BACKGROUND_OPACITY`]）より薄くして、主従を分ける。
+const HINT_BACKGROUND_OPACITY: f32 = 0.6;
+/// ヒントの文字の大きさ [pt]。入力欄の文字より一回り小さくする。
+const HINT_TEXT_SIZE: f32 = 11.5;
+/// 説明の左に出すアイコン（リボンと同じ絵）の一辺 [px]。
+const HINT_ICON_SIZE: f32 = 20.0;
 /// 動的入力オフで、寸法入力に参加中のツールの Tab を押したときの案内。
 pub const TAB_NEEDS_DYNAMIC: &str = "長さ・角度の固定は動的入力（F12）がオンのときに使えます";
 
@@ -275,9 +288,30 @@ pub struct CommandLine {
     dim: DimensionInput,
     /// [`Self::begin_frame`] で Ctrl+A を全選択として消費したか（[`Self::take_select_all`]）。
     select_all_requested: bool,
+    /// 動的入力のそばのヒント（Issue #27）。
+    hint: HintView,
     /// 直近に描いた入力欄の矩形。変換開始で入力欄が動かないことのテストに使う。
     #[cfg(test)]
     input_rect: Option<egui::Rect>,
+    /// 直近に描いたカーソル横の枠（`Area`）の矩形（テスト用）。
+    #[cfg(test)]
+    floating_rect: Option<egui::Rect>,
+}
+
+/// 動的入力のそばのヒント（Issue #27、ADR-0048）の状態。
+#[derive(Debug)]
+struct HintView {
+    /// オンか。既定はオン（お試し）。ステータスバーの `HINT` で切り替える。
+    enabled: bool,
+    /// 直前のフレームで描いた（または測った）中身。
+    ///
+    /// 中身が変わったフレームはヒントの大きさが分からない（`Area` の大きさは前フレームの実寸）。
+    /// 古い大きさで置くと、入りきらない・枠に重なるフレームが出るので、そのフレームは
+    /// 見せずに測るだけにする（[`CommandLine::show_hint`]）。
+    last: Option<Hint>,
+    /// このフレームで見せたヒントとその矩形（テスト用）。測るだけのフレームは `None`。
+    #[cfg(test)]
+    shown: Option<(Hint, egui::Rect)>,
 }
 
 /// カーソル横に出す直近のエラー。
@@ -359,8 +393,16 @@ impl CommandLine {
             recent_error: None,
             dim: DimensionInput::default(),
             select_all_requested: false,
+            hint: HintView {
+                enabled: true,
+                last: None,
+                #[cfg(test)]
+                shown: None,
+            },
             #[cfg(test)]
             input_rect: None,
+            #[cfg(test)]
+            floating_rect: None,
         }
     }
 
@@ -415,6 +457,18 @@ impl CommandLine {
     pub fn toggle_dynamic(&mut self) -> bool {
         self.dynamic.enabled = !self.dynamic.enabled;
         self.dynamic.enabled
+    }
+
+    /// ヒント（動的入力のそばの説明）がオンか。
+    #[must_use]
+    pub fn is_hint_enabled(&self) -> bool {
+        self.hint.enabled
+    }
+
+    /// ヒントのオン/オフを切り替え、切り替え後の状態を返す。
+    pub fn toggle_hint(&mut self) -> bool {
+        self.hint.enabled = !self.hint.enabled;
+        self.hint.enabled
     }
 
     /// カーソル横の基準にするマウス位置を伝える。キャンバス上にあるときだけ呼ぶ。
@@ -527,6 +581,11 @@ impl CommandLine {
     ///   フォーカスが無いと、フォーカスだけでは「誰も持っていない」に見えるため
     pub fn begin_frame(&mut self, ctx: &egui::Context, allow_suggestions: bool, modal_open: bool) {
         self.dynamic.frame_enabled = self.dynamic.enabled;
+        #[cfg(test)]
+        {
+            self.hint.shown = None;
+            self.floating_rect = None;
+        }
         let now = ctx.input(|i| i.time);
         if let Some(e) = &mut self.recent_error {
             e.shown_at.get_or_insert(now);
@@ -773,7 +832,7 @@ impl CommandLine {
         );
         self.dynamic.previous = Some(pos);
 
-        egui::Area::new(area_id)
+        let area = egui::Area::new(area_id)
             .order(egui::Order::Foreground)
             .fixed_pos(egui::pos2(pos.x, pos.y))
             .constrain_to(canvas)
@@ -834,6 +893,103 @@ impl CommandLine {
                         }
                     });
             });
+        #[cfg(test)]
+        {
+            self.floating_rect = Some(area.response.rect);
+        }
+
+        // ヒントは入力欄の枠を描き終えてから、その矩形の外側に別の `Area` で出す。
+        // 入力欄の枠の位置・大きさには一切影響しない（ADR-0048）。
+        self.show_hint(ctx, canvas, area.response.rect, anchor, visible);
+    }
+
+    /// いま出すヒントの中身。出すものが無ければ `None`。
+    ///
+    /// 段階 1 は、候補が出ていれば `Enter` で実行される候補（`⏎` の行）の説明。
+    /// 段階 2（実行中に今できること）はここに足す。
+    fn current_hint(&self) -> Option<Hint> {
+        let index = self.suggestions.effective_index(&self.input)?;
+        hint::for_command(self.suggestions.items.get(index)?.name)
+    }
+
+    /// 動的入力の枠のそばにヒントを出す（Issue #27、ADR-0048）。
+    ///
+    /// - `box_rect` … このフレームで描いた入力欄の枠（カーソル横の `Area`）の矩形
+    /// - `cursor` … 枠の基準にしたカーソル位置
+    /// - `box_visible` … 枠が見えているか（何もしていなければ見えない）
+    ///
+    /// **入力欄とは別の `Area`**（`interactable(false)` でクリックは素通し）。
+    /// 中身が変わったフレームは見せずに測るだけにし、次のフレームで正しい大きさで置く。
+    /// どこにも入らなければ出さない（[`hint::place_hint`]）。
+    fn show_hint(
+        &mut self,
+        ctx: &egui::Context,
+        canvas: egui::Rect,
+        box_rect: egui::Rect,
+        cursor: Point,
+        box_visible: bool,
+    ) {
+        let situation = hint::Situation {
+            enabled: self.hint.enabled,
+            dynamic: self.dynamic.frame_enabled,
+            box_visible,
+            composing: self.composing,
+            modal_open: self.modal_open,
+        };
+        let content = if hint::allowed(situation) {
+            self.current_hint()
+        } else {
+            None
+        };
+        let Some(content) = content else {
+            self.hint.last = None;
+            return;
+        };
+
+        let id = egui::Id::new(HINT_AREA_ID);
+        let measured = if self.hint.last.as_ref() == Some(&content) {
+            ctx.memory(|m| m.area_rect(id))
+        } else {
+            None
+        };
+        self.hint.last = Some(content.clone());
+        let Some(measured) = measured else {
+            // 測るだけのフレーム（egui の sizing pass。見えず、次のフレームの再描画を予約する）。
+            draw_hint(ctx, id, canvas.left_top(), &content, true);
+            return;
+        };
+
+        let size = Size {
+            w: measured.width(),
+            h: measured.height(),
+        };
+        let Some(pos) = hint::place_hint(bounds_of(box_rect), cursor, size, bounds_of(canvas))
+        else {
+            return;
+        };
+        let _rect = draw_hint(ctx, id, egui::pos2(pos.x, pos.y), &content, false);
+        #[cfg(test)]
+        {
+            self.hint.shown = Some((content, _rect));
+        }
+    }
+
+    /// このフレームで見せたヒント（テスト用）。測るだけのフレーム・出さなかったフレームは `None`。
+    #[cfg(test)]
+    pub fn hint_shown(&self) -> Option<&Hint> {
+        self.hint.shown.as_ref().map(|(h, _)| h)
+    }
+
+    /// このフレームで見せたヒントの矩形（テスト用）。
+    #[cfg(test)]
+    pub fn hint_rect(&self) -> Option<egui::Rect> {
+        self.hint.shown.as_ref().map(|(_, r)| *r)
+    }
+
+    /// このフレームで描いたカーソル横の枠の矩形（テスト用）。
+    #[cfg(test)]
+    pub fn floating_rect(&self) -> Option<egui::Rect> {
+        self.floating_rect
     }
 
     /// 寸法入力の「長さ」「角度」の 2 欄（円の四分点のグリップでは「半径」の 1 欄）を描く。
@@ -1109,6 +1265,87 @@ impl CommandLine {
                 }
             });
     }
+}
+
+/// egui の矩形を、配置の純粋関数が扱う領域に写す。
+fn bounds_of(r: egui::Rect) -> Bounds {
+    Bounds {
+        left: r.left(),
+        top: r.top(),
+        right: r.right(),
+        bottom: r.bottom(),
+    }
+}
+
+/// ヒントの `Area` を描き、その矩形を返す。
+///
+/// `measuring` … 見せずに大きさだけ測るフレーム（中身が変わったフレーム）。
+///
+/// 入力欄の `Area` とは別の ID・別の `Area`。`interactable(false)` でクリックとホバーを
+/// 下（キャンバス）へ素通しする。位置は [`hint::place_hint`] がキャンバスの内側で決めて
+/// いるので、egui に押し戻させない（`constrain(false)`。押し戻されると枠に重なりうる）。
+fn draw_hint(
+    ctx: &egui::Context,
+    id: egui::Id,
+    pos: egui::Pos2,
+    content: &Hint,
+    measuring: bool,
+) -> egui::Rect {
+    egui::Area::new(id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .constrain(false)
+        .interactable(false)
+        .fade_in(false)
+        .sizing_pass(measuring)
+        .show(ctx, |ui| {
+            // Area の中身の最大幅は前フレームの大きさになっているので広げる。
+            ui.set_max_width(HINT_MAX_WIDTH);
+            let fill = ui
+                .visuals()
+                .window_fill
+                .gamma_multiply(HINT_BACKGROUND_OPACITY);
+            let stroke = ui.visuals().widgets.noninteractive.bg_stroke;
+            egui::Frame::new()
+                .fill(fill)
+                .stroke(stroke)
+                .corner_radius(4)
+                .inner_margin(egui::Margin::same(5))
+                .show(ui, |ui| match content {
+                    Hint::Command { name, description } => {
+                        show_command_hint(ui, name, description);
+                    }
+                });
+        })
+        .response
+        .rect
+}
+
+/// コマンドの説明のヒント。左にリボンと同じアイコン、右に名前と説明。
+fn show_command_hint(ui: &mut egui::Ui, name: &str, description: &str) {
+    ui.horizontal_top(|ui| {
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(HINT_ICON_SIZE, HINT_ICON_SIZE),
+            egui::Sense::hover(),
+        );
+        // アイコンの無いコマンド（QUIT）は空けたままにする。
+        crate::ribbon::icons::paint(ui, name, rect, ui.visuals().text_color());
+        ui.vertical(|ui| {
+            ui.spacing_mut().item_spacing.y = 1.0;
+            ui.label(
+                egui::RichText::new(name)
+                    .monospace()
+                    .color(ui.visuals().strong_text_color()),
+            );
+            for line in description.lines() {
+                ui.label(
+                    egui::RichText::new(line)
+                        .size(HINT_TEXT_SIZE)
+                        .color(ui.visuals().text_color()),
+                );
+            }
+        });
+    });
 }
 
 /// 寸法入力の、入力中でない欄。値を描くだけ（`TextEdit` にしない）。

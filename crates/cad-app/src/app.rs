@@ -369,6 +369,46 @@ impl CadApp {
         self.session.cmdline.info(format!("動的入力: {state}"));
     }
 
+    /// ヒント（動的入力のそばの説明、Issue #27）を切り替え、履歴に残す。
+    fn toggle_hint(&mut self) {
+        let state = if self.session.cmdline.toggle_hint() {
+            "ON"
+        } else {
+            "OFF"
+        };
+        self.session.cmdline.info(format!("ヒント: {state}"));
+    }
+
+    /// ステータスバーの `HINT`（Issue #27、ADR-0048）。`DYN` と同じ見せ方で、クリックで切り替える。
+    ///
+    /// 動的入力がオフの間はヒントを出さないが、切り替え自体はできる（オンに戻したときに効く）。
+    fn hint_toggle(&mut self, ui: &mut egui::Ui) {
+        let text = if self.session.cmdline.is_hint_enabled() {
+            egui::RichText::new("HINT")
+                .monospace()
+                .color(render::ON_COLOR)
+        } else {
+            egui::RichText::new("hint")
+                .monospace()
+                .color(ui.visuals().weak_text_color())
+        };
+        let clicked = ui
+            .add(
+                egui::Label::new(text)
+                    .selectable(false)
+                    .sense(egui::Sense::click()),
+            )
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(
+                "ヒント（カーソル横の入力欄のそばに出るコマンドの説明）の ON/OFF\n\
+                 動的入力（DYN）がオンのときだけ出ます",
+            )
+            .clicked();
+        if clicked {
+            self.toggle_hint();
+        }
+    }
+
     /// コマンドラインで確定された操作を実行する。
     fn apply_submission(&mut self, submission: Submission) {
         if submission == Submission::None {
@@ -792,6 +832,9 @@ impl CadApp {
         if dyn_label.clicked() {
             self.toggle_dynamic_input();
         }
+        // HINT は動的入力のそばに出るもので、DYN がオンのときだけ効く。DYN の続きとして
+        // 区切り線を挟まずに並べる（幅 800px でもレイヤと選択の表示を押し出さないように）。
+        self.hint_toggle(ui);
         ui.separator();
         // 「コマンド実行中」の欄は待機中も空のまま幅を確保する。出たり消えたりするたびに
         // 後ろの表示が跳ねないように（PR #39）。

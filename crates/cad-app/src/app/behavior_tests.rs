@@ -16,6 +16,7 @@ use super::CadApp;
 use crate::cmdline::LineKind;
 
 mod grips;
+mod hint;
 mod hover;
 mod properties;
 mod rename;
@@ -740,7 +741,7 @@ fn app_with_width(width: f32) -> Harness<'static, CadApp> {
     h
 }
 
-/// 幅 800px・640px でも、切り替え部品（OSNAP / ORTHO / POLAR / DYN）がすべて画面内にあり、
+/// 幅 800px・640px でも、切り替え部品（OSNAP / ORTHO / POLAR / DYN / HINT）がすべて画面内にあり、
 /// クリックで切り替わる。PR #35 で ORTHO / POLAR が増え、800px で DYN が画面外になっていた。
 #[test]
 fn status_toggles_fit_and_click_in_a_narrow_window() {
@@ -749,7 +750,7 @@ fn status_toggles_fit_and_click_in_a_narrow_window() {
     for width in [800.0, 640.0] {
         let mut h = app_with_width(width);
         // (表示中のラベル, 切り替え後のラベル, 状態を読む関数)
-        let toggles: [(&str, &str, ToggleState); 4] = [
+        let toggles: [(&str, &str, ToggleState); 5] = [
             ("OSNAP", "osnap", |a| a.snap.is_enabled()),
             ("ortho", "ORTHO", |a| {
                 a.drafting.is_on(crate::drafting::Mode::Ortho)
@@ -758,6 +759,7 @@ fn status_toggles_fit_and_click_in_a_narrow_window() {
                 a.drafting.is_on(crate::drafting::Mode::Polar)
             }),
             ("DYN", "dyn", |a| a.session.cmdline.is_dynamic()),
+            ("HINT", "hint", |a| a.session.cmdline.is_hint_enabled()),
         ];
         for (label, after, state) in toggles {
             let rect = h.get_by_label(label).rect();
@@ -804,9 +806,12 @@ fn shown_info_items(h: &Harness<'_, CadApp>) -> Vec<(&'static str, egui::Rect)> 
 
 /// 情報表示は文字の途中で切れない。入らない項目は右から順に省かれ、
 /// レイヤ・選択が最後まで残る。1280px ではすべて出る（PR #39）。
+///
+/// ステータスバーに `HINT`（Issue #27）が増えたので、レイヤと選択の両方が残る幅は
+/// 800px から 840px に上がった（800px ではレイヤだけ残る。ADR-0048）。
 #[test]
 fn status_info_items_are_dropped_whole_from_the_right() {
-    for width in [1280.0, 800.0, 640.0] {
+    for width in [1280.0, 840.0, 800.0, 640.0] {
         let h = app_with_width(width);
         let shown = shown_info_items(&h);
         let names: Vec<&str> = shown.iter().map(|(p, _)| *p).collect();
@@ -826,10 +831,15 @@ fn status_info_items_are_dropped_whole_from_the_right() {
         }
         if width >= SCREEN.x {
             assert_eq!(names.len(), INFO_ITEMS.len(), "1280px ではすべて出る");
-        } else if width >= 800.0 {
+        } else if width >= 840.0 {
             assert!(
                 names.starts_with(&["レイヤ 0", "選択 0"]),
                 "幅 {width}: レイヤと選択は残る: {names:?}"
+            );
+        } else if width >= 800.0 {
+            assert!(
+                names.starts_with(&["レイヤ 0"]),
+                "幅 {width}: レイヤは残る: {names:?}"
             );
         }
     }
