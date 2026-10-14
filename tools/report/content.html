@@ -4,12 +4,12 @@
 
 <section class="card now" id="now">
 <h2>いまの状況</h2>
-<p class="stamp">2026-10-13 22:20・承認済みの範囲をすべてマージして作業を終えた</p>
+<p class="stamp">2026-10-14 夕方・#109（DXF のブロックが出ない）を修正してレビュー中</p>
 <ul>
-<li><b>ユキの不具合報告 2 件（ファイルダイアログ中に「応答していません」・WSL でダイアログが出ない）を直して develop にマージ済み</b>（#98 / PR #101・#103）。WSL では <code>sudo apt install zenity</code> が要る（出せないときは画面にそう出る。入れた後は起動し直し不要）</li>
-<li>#36 Shift で直交を一時反転（PR #99）、#27 ヒント 段階 1・2（PR #100・#104・#107）も develop にマージ済み</li>
-<li>#27・#36 の計画は「続きに取り組んで」の指示で<b>おすすめの選択肢のまま</b>着手した。違っていたら言ってほしい</li>
-<li>次に進めるには、下の「判断してほしいこと」（#92・#93・#105 の計画の承認）が要る。<b>#92 は Redo で作業が消える不具合で、思ったより広い</b></li>
+<li><b>ユキの不具合報告 #109「DXF のブロックが表示されない」を修正して PR #111 にした。いまコードレビュアー・操作レビュアーが見ている</b></li>
+<li>原因は、DXF の読み込みが BLOCKS を丸ごと読み飛ばし INSERT を捨てていたこと（ymcad 自身が書いた DXF でもブロックが消えていた）。ブロックはコンポーネントとして読み込むようにした</li>
+<li>ネットで拾った実ファイル 7 本（jscad/sample-files・LibreDWG のテスト用 DXF・実際の間取り図）で、ezdxf の描画と形が一致することを確かめた（下の「画面」に間取り図の修正前後）</li>
+<li>古い DXF（AC1018 以前）は UTF-8 でないと開けないことも分かったので、別の Issue <a href="https://github.com/yukimasui/ymcad/issues/110">#110</a> に分けた（ユキの判断）</li>
 </ul>
 </section>
 
@@ -56,6 +56,7 @@
 <tr><td>Shift で直交を一時反転</td><td><a href="https://github.com/yukimasui/ymcad/issues/36">#36</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/99">#99</a></td><td class="note">計画のおすすめのまま（グリップ中も効く・一時の見た目）</td></tr>
 <tr><td>動的入力のそばのヒント</td><td><a href="https://github.com/yukimasui/ymcad/issues/27">#27</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/100">#100</a> <a href="https://github.com/yukimasui/ymcad/pull/104">#104</a> <a href="https://github.com/yukimasui/ymcad/pull/107">#107</a></td><td class="note">段階 1 候補の説明・段階 2 実行中に今できること。ステータスバーの HINT で ON/OFF</td></tr>
 <tr><td>ファイルダイアログが固まる・WSL で出ない（不具合）</td><td><a href="https://github.com/yukimasui/ymcad/issues/98">#98</a> <a href="https://github.com/yukimasui/ymcad/issues/102">#102</a></td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/101">#101</a> <a href="https://github.com/yukimasui/ymcad/pull/103">#103</a></td><td class="note">別スレッドで開き、待つ間はモーダル。出せないときは理由と対処。案内の言い回しも改善（#102 / PR #103）</td></tr>
+<tr><td>DXF のブロック（BLOCK / INSERT）の読み込み（不具合）</td><td><a href="https://github.com/yukimasui/ymcad/issues/109">#109</a></td><td><span class="pill run">レビュー中</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/111">#111</a></td><td class="note">相似の INSERT はインスタンス、縦横の倍率が違う INSERT は普通の図形にばらす。BYBLOCK 色は BYLAYER に寄せる。読まなかった種類は警告で件数を出す（ADR-0050）</td></tr>
 <tr><td>追いかけ・不具合の修正</td><td>#37 #44 #48 #51 #55 #59 #64 #65 #68 #73 #74 #78</td><td><span class="pill done">完了</span></td><td><a href="https://github.com/yukimasui/ymcad/pull/45">#45</a> <a href="https://github.com/yukimasui/ymcad/pull/49">#49</a> <a href="https://github.com/yukimasui/ymcad/pull/53">#53</a> <a href="https://github.com/yukimasui/ymcad/pull/54">#54</a> <a href="https://github.com/yukimasui/ymcad/pull/58">#58</a> <a href="https://github.com/yukimasui/ymcad/pull/76">#76</a> <a href="https://github.com/yukimasui/ymcad/pull/77">#77</a> <a href="https://github.com/yukimasui/ymcad/pull/71">#71</a> <a href="https://github.com/yukimasui/ymcad/pull/86">#86</a></td><td class="note"></td></tr>
 </table></div>
 
@@ -114,6 +115,7 @@
 <h2 id="backlog">起票した課題（未着手）</h2>
 <div class="tablewrap"><table>
 <tr><th>Issue</th><th>種類</th><th>内容</th><th>必要なこと</th></tr>
+<tr><td><a href="https://github.com/yukimasui/ymcad/issues/110">#110</a></td><td><span class="pill bug">不具合</span></td><td>UTF-8 でない古い DXF（$DWGCODEPAGE が ANSI_1252 / シフト JIS など）が開けない</td><td class="note">#109 から切り出した。方針（cad-core の依存ゼロとシフト JIS の変換表）を決めて計画を立てる</td></tr>
 <tr><td><a href="https://github.com/yukimasui/ymcad/issues/92">#92</a></td><td><span class="pill bug">不具合</span></td><td>作るコマンドが Redo のたびに新しい ID を振り、後のコマンドの Redo が失敗する（作業が消える）。アプリでも起きる</td><td class="note"><b>計画を Issue に書いた。承認待ち</b>（cad-core の変更）</td></tr>
 <tr><td><a href="https://github.com/yukimasui/ymcad/issues/105">#105</a></td><td><span class="pill bug">不具合</span></td><td>INSERT / BIND / COMPONENT / REDEFINE / GROUP で名前の「ー」が「-」に変わる</td><td class="note"><b>計画を Issue に書いた。承認待ち</b></td></tr>
 <tr><td><a href="https://github.com/yukimasui/ymcad/issues/106">#106</a></td><td><span class="pill idea">候補</span></td><td>ヒントの改行の位置、HINT の切り替えを 2 つに分けるか（1・2 は PR #107 で済み）</td><td class="note">実機の感想しだい</td></tr>
@@ -131,6 +133,9 @@
 
 <h2 id="shots">画面</h2>
 <div class="grid">
+<figure><img src="img/dxfblk1014_before.png" alt="修正前の間取り図"><figcaption>DXF のブロック（#109）修正前: 洗面台・便器・コンロ・洗濯機などブロックで描かれた部分が抜けている</figcaption></figure>
+<figure><img src="img/dxfblk1014_after.png" alt="修正後の間取り図"><figcaption>修正後（PR #111）: ブロックの部分が出る。鏡像の INSERT も参照どおりの向き</figcaption></figure>
+<figure><img src="img/dxfblk1014_ezdxf.png" alt="ezdxf の参照"><figcaption>参照: ezdxf で同じファイルを描いたもの（ymcad が扱う種類だけに絞った）</figcaption></figure>
 <figure><img src="img/grips1009_shared.png" alt="グリップ"><figcaption>グリップ（#30）: 矩形の角は 1 つの四角で、掴むと 2 本が一緒に動く。ポリラインには辺の中点のグリップ</figcaption></figure>
 <figure><img src="img/props1009_bound.png" alt="プロパティパネルの束縛の表示"><figcaption>プロパティ（#31）: インプレース編集中、束縛された項目は表示だけで「← 式「…」」</figcaption></figure>
 <figure><img src="img/mcp1009_render.png" alt="MCP の render の出力"><figcaption>MCP（#70）: render の道具が描いた PNG（write_sample の図面）</figcaption></figure>
