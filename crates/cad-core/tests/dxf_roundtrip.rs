@@ -126,7 +126,9 @@ fn assert_geom_eq(a: &Geometry, b: &Geometry) {
 fn round_trip_all_geometry_types_multiple_layers() {
     let doc = build_sample_doc();
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).expect("読み込みに成功するはず");
+    let loaded = read::read_from_str(&text)
+        .expect("読み込みに成功するはず")
+        .document;
 
     assert_eq!(
         loaded.entities().len(),
@@ -181,7 +183,7 @@ fn round_trip_large_coordinates_precision() {
         Point2::new(mag, -mag * 0.5),
     )));
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let (_, e) = loaded.entities().iter().next().unwrap();
     let Geometry::Line(l) = &e.geom else {
         panic!("LINE のはず")
@@ -199,7 +201,7 @@ fn round_trip_small_coordinates_precision() {
     let mag = 0.000_001;
     let doc = one_entity_doc(Geometry::Circle(Circle::new(Point2::new(mag, -mag), mag)));
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let (_, e) = loaded.entities().iter().next().unwrap();
     let Geometry::Circle(c) = &e.geom else {
         panic!("CIRCLE のはず")
@@ -216,7 +218,7 @@ fn round_trip_small_coordinates_precision() {
 fn arc_ninety_degrees_roundtrips_to_frac_pi_2() {
     let doc = one_entity_doc(Geometry::Arc(Arc::new(Point2::ORIGIN, 1.0, 0.0, FRAC_PI_2)));
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let (_, e) = loaded.entities().iter().next().unwrap();
     let Geometry::Arc(a) = &e.geom else {
         panic!("ARC のはず")
@@ -232,7 +234,7 @@ fn arc_crossing_zero_degrees_survives_roundtrip() {
     let end = cad_core::dxf::deg_to_rad(30.0);
     let doc = one_entity_doc(Geometry::Arc(Arc::new(Point2::ORIGIN, 5.0, start, end)));
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let (_, e) = loaded.entities().iter().next().unwrap();
     let Geometry::Arc(a) = &e.geom else {
         panic!("ARC のはず")
@@ -250,7 +252,7 @@ fn arc_full_circle_start_equals_end_roundtrips() {
         0.0,
     )));
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let (_, e) = loaded.entities().iter().next().unwrap();
     let Geometry::Arc(a) = &e.geom else {
         panic!("ARC のはず")
@@ -270,7 +272,7 @@ fn closed_polyline_roundtrip_vertex_count_and_flag() {
     ];
     let doc = one_entity_doc(Geometry::Polyline(Polyline::new(verts.clone(), true)));
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let (_, e) = loaded.entities().iter().next().unwrap();
     let Geometry::Polyline(p) = &e.geom else {
         panic!("Polyline のはず")
@@ -291,7 +293,7 @@ fn open_polyline_roundtrip_vertex_count_and_flag() {
     ];
     let doc = one_entity_doc(Geometry::Polyline(Polyline::new(verts.clone(), false)));
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let (_, e) = loaded.entities().iter().next().unwrap();
     let Geometry::Polyline(p) = &e.geom else {
         panic!("Polyline のはず")
@@ -309,7 +311,7 @@ fn line_roundtrip_endpoints() {
         Point2::new(12.0, -8.75),
     )));
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let (_, e) = loaded.entities().iter().next().unwrap();
     let Geometry::Line(l) = &e.geom else {
         panic!("LINE のはず")
@@ -322,7 +324,7 @@ fn line_roundtrip_endpoints() {
 fn circle_roundtrip_center_and_radius() {
     let doc = one_entity_doc(Geometry::Circle(Circle::new(Point2::new(4.0, -6.0), 7.5)));
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let (_, e) = loaded.entities().iter().next().unwrap();
     let Geometry::Circle(c) = &e.geom else {
         panic!("CIRCLE のはず")
@@ -344,7 +346,7 @@ fn entity_explicit_color_roundtrip() {
     doc.apply(Box::new(AddEntities::one("LINE", e))).unwrap();
 
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let (_, le) = loaded.entities().iter().next().unwrap();
     assert_eq!(le.color, ColorSpec::Aci(AciColor(5)));
 }
@@ -356,7 +358,7 @@ fn entity_bylayer_color_stays_bylayer_after_roundtrip() {
         Point2::new(1.0, 1.0),
     )));
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let (_, le) = loaded.entities().iter().next().unwrap();
     assert_eq!(le.color, ColorSpec::ByLayer);
 }
@@ -378,7 +380,7 @@ fn layer_visibility_roundtrips_via_negative_color() {
         "非表示レイヤは負の色で書かれるはず:\n{text}"
     );
 
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let loaded_id = loaded.layers().by_name("HIDDEN").unwrap();
     let loaded_layer = loaded.layers().get(loaded_id).unwrap();
     assert!(!loaded_layer.visible);
@@ -395,7 +397,7 @@ fn layer_locked_flag_roundtrips() {
         .unwrap();
 
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let loaded_id = loaded.layers().by_name("LOCKED").unwrap();
     assert!(loaded.layers().get(loaded_id).unwrap().locked);
 }
@@ -412,7 +414,7 @@ fn layer_linetype_roundtrips() {
     .unwrap();
 
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     let loaded_id = loaded.layers().by_name("CENTERLINE").unwrap();
     assert_eq!(
         loaded.layers().get(loaded_id).unwrap().linetype,
@@ -459,7 +461,7 @@ fn entities_reference_sanitized_layer_name_after_roundtrip() {
     .unwrap();
 
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
 
     let sanitized_id = loaded
         .layers()
@@ -483,7 +485,7 @@ fn colliding_sanitized_layer_names_get_unique_suffix_and_stay_distinct() {
     assert_eq!(doc.layers().len(), 3, "\"0\" + \"Wall\" + \"WALL\"");
 
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     assert_eq!(
         loaded.layers().len(),
         3,
@@ -545,7 +547,7 @@ ENDSEC
 0
 EOF
 ";
-    let doc = read::read_from_str(text).unwrap();
+    let doc = read::read_from_str(text).unwrap().document;
     assert_eq!(
         doc.entities().len(),
         1,
@@ -557,14 +559,14 @@ EOF
 fn reader_tolerates_crlf_line_endings() {
     let lf = "0\nSECTION\n2\nENTITIES\n0\nLINE\n8\n0\n10\n0.0\n20\n0.0\n11\n1.0\n21\n1.0\n0\nENDSEC\n0\nEOF\n";
     let crlf = lf.replace('\n', "\r\n");
-    let doc = read::read_from_str(&crlf).unwrap();
+    let doc = read::read_from_str(&crlf).unwrap().document;
     assert_eq!(doc.entities().len(), 1);
 }
 
 #[test]
 fn reader_loads_file_with_no_layer_table() {
     let text = "0\nSECTION\n2\nENTITIES\n0\nLINE\n8\nCUSTOM\n10\n0.0\n20\n0.0\n11\n1.0\n21\n1.0\n0\nENDSEC\n0\nEOF\n";
-    let doc = read::read_from_str(text).unwrap();
+    let doc = read::read_from_str(text).unwrap().document;
     assert_eq!(doc.entities().len(), 1);
     assert!(
         doc.layers().by_name("CUSTOM").is_some(),
@@ -575,7 +577,7 @@ fn reader_loads_file_with_no_layer_table() {
 #[test]
 fn undeclared_layer_referenced_by_entity_is_created_on_read() {
     let text = "0\nSECTION\n2\nTABLES\n0\nTABLE\n2\nLAYER\n70\n1\n0\nENDTAB\n0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nLINE\n8\nGHOST\n10\n0.0\n20\n0.0\n11\n1.0\n21\n1.0\n0\nENDSEC\n0\nEOF\n";
-    let doc = read::read_from_str(text).unwrap();
+    let doc = read::read_from_str(text).unwrap().document;
     assert!(doc.layers().by_name("GHOST").is_some());
     assert_eq!(doc.entities().len(), 1);
 }
@@ -583,7 +585,7 @@ fn undeclared_layer_referenced_by_entity_is_created_on_read() {
 #[test]
 fn lwpolyline_from_other_software_is_read_as_polyline() {
     let text = "0\nSECTION\n2\nENTITIES\n0\nLWPOLYLINE\n8\n0\n90\n3\n70\n1\n10\n0.0\n20\n0.0\n10\n5.0\n20\n0.0\n10\n5.0\n20\n5.0\n0\nENDSEC\n0\nEOF\n";
-    let doc = read::read_from_str(text).unwrap();
+    let doc = read::read_from_str(text).unwrap().document;
     assert_eq!(doc.entities().len(), 1);
     let (_, e) = doc.entities().iter().next().unwrap();
     let Geometry::Polyline(p) = &e.geom else {
@@ -623,7 +625,7 @@ fn reader_error_on_unparseable_number() {
 fn loaded_document_has_no_undo_history_and_is_not_dirty() {
     let doc = build_sample_doc();
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
 
     assert!(!loaded.history().can_undo());
     assert!(!loaded.history().can_redo());
@@ -635,7 +637,7 @@ fn loaded_document_has_no_undo_history_and_is_not_dirty() {
 fn empty_document_roundtrips() {
     let doc = Document::new();
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
     assert_eq!(loaded.entities().len(), 0);
     assert_eq!(loaded.layers().len(), 1, "\"0\" レイヤだけ残るはず");
     assert!(!loaded.is_dirty());
@@ -662,7 +664,7 @@ fn multiple_entities_preserve_insertion_order() {
         .unwrap();
 
     let text = write::write_to_string(&doc).text;
-    let loaded = read::read_from_str(&text).unwrap();
+    let loaded = read::read_from_str(&text).unwrap().document;
 
     let radii: Vec<f64> = loaded
         .entities()
@@ -689,7 +691,7 @@ fn write_to_file_and_read_from_file_roundtrip() {
     ));
 
     write::write_to_file(&doc, &path).unwrap();
-    let loaded = read::read_from_file(&path).unwrap();
+    let loaded = read::read_from_file(&path).unwrap().document;
 
     assert_eq!(loaded.entities().len(), doc.entities().len());
     assert_eq!(loaded.path(), Some(path.as_path()));
@@ -783,7 +785,7 @@ fn xline_is_written_as_a_line_with_one_warning() {
     assert!(!report.text.contains("XLINE"), "R12 に XLINE は書けない");
 
     // 読み戻すと 3 本とも線分になる（作図線であることは失われる = 想定どおり）。
-    let loaded = read::read_from_str(&report.text).unwrap();
+    let loaded = read::read_from_str(&report.text).unwrap().document;
     assert_eq!(loaded.entities().len(), 3);
     for (_, e) in loaded.entities().iter() {
         assert!(

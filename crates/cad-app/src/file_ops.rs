@@ -570,17 +570,24 @@ impl FileOps {
 
     /// 選ばれたファイルを開く。形式は拡張子で決める。
     fn open_path(doc: &mut Document, path: &Path) -> FileOutcome {
+        // DXF だけが警告を返す（ymcad で表せず近似・欠落したもの。ADR-0050）。
         let loaded = if is_dxf(path) {
-            dxf::read::read_from_file(path)
+            dxf::read::read_from_file(path).map(|r| (r.document, r.warnings))
         } else {
-            native::read::read_from_file(path)
+            native::read::read_from_file(path).map(|d| (d, Vec::new()))
         };
 
         match loaded {
-            Ok(mut loaded) => {
+            Ok((mut loaded, warnings)) => {
                 loaded.mark_saved(Some(path.to_path_buf()));
                 *doc = loaded;
-                FileOutcome::Replaced(format!("開きました: {}", path.display()))
+                let mut msg = format!("開きました: {}", path.display());
+                // 書き出しの警告と同じく、黙って落とさず必ず伝える (ADR-0021)。
+                for w in warnings {
+                    msg.push_str("\n  警告: ");
+                    msg.push_str(&w);
+                }
+                FileOutcome::Replaced(msg)
             }
             Err(e) => FileOutcome::Failed(format!("読み込みに失敗しました: {e}")),
         }
@@ -843,6 +850,27 @@ mod tests {
             !ymc_msg.contains("警告"),
             "ネイティブ形式は無損失なので警告は出ないはず: {ymc_msg}"
         );
+    }
+
+    /// **DXF を開いたとき、読み込みの警告がコマンドラインへ出る文面に入ること**（Issue #109）。
+    ///
+    /// 書き出しの警告と同じく、表せず近似・欠落したものを黙って落とさない。
+    #[test]
+    fn opening_dxf_reports_read_warnings() {
+        let dir = crate::test_util::TempDir::new("open_warn");
+        let path = dir.join("text.dxf");
+        std::fs::write(
+            &path,
+            "0\nSECTION\n2\nENTITIES\n0\nTEXT\n8\n0\n1\nhello\n0\nENDSEC\n0\nEOF\n",
+        )
+        .unwrap();
+
+        let mut doc = Document::new();
+        let FileOutcome::Replaced(msg) = FileOps::open_path(&mut doc, &path) else {
+            panic!("開けるはず");
+        };
+        assert!(msg.contains("警告"), "{msg}");
+        assert!(msg.contains("TEXT 1 件"), "{msg}");
     }
 
     // ---- ファイルダイアログ（Issue #98） --------------------------------
