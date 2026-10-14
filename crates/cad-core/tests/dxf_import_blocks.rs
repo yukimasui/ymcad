@@ -644,3 +644,66 @@ fn polylines_inside_blocks_are_read_too() {
     let i = instances(&doc);
     assert!(eq_angle(i[0].placement.rotation, PI));
 }
+
+// ---- 警告の件数はファイル上の件数（展開のたびに数え直さない） ----------------------
+
+/// 縦横別倍率の展開を通る循環でも、ファイル上で落ちる参照 1 本は「1 件」。
+#[test]
+fn cycle_through_an_expansion_is_counted_once() {
+    let blocks = block(
+        "A",
+        (0.0, 0.0),
+        &(line((0.0, 0.0), (1.0, 0.0)) + &insert("B", (0.0, 1.0), &(g(41, 2.0) + &g(42, 1.0)))),
+    ) + &block(
+        "B",
+        (0.0, 0.0),
+        &(line((0.0, 0.0), (0.0, 1.0)) + &insert("A", (1.0, 0.0), &g(42, 3.0))),
+    );
+    let report = read_ok(&dxf(&blocks, &insert("A", (0.0, 0.0), &g(41, 2.0))));
+    let w = warning_with(&report, "循環");
+    assert!(w.contains("参照 1 件"), "{w}");
+}
+
+/// MINSERT のマスが全部潰れても、INSERT 1 件なら「1 件」。
+#[test]
+fn degenerate_minsert_is_counted_once_per_insert() {
+    let blocks = block("M", (0.0, 0.0), &line((0.0, 0.0), (1.0, 0.0)));
+    let ins = insert(
+        "M",
+        (0.0, 0.0),
+        &(g(70, 3) + &g(71, 3) + &g(44, "NaN") + &g(45, "NaN")),
+    );
+    let report = read_ok(&dxf(&blocks, &ins));
+    let w = warning_with(&report, "形が潰れる");
+    assert!(w.contains("参照 1 件"), "{w}");
+}
+
+/// 展開されるブロックの中の未定義・外部参照は、何回展開されてもファイル上の 1 件。
+#[test]
+fn problems_inside_expanded_blocks_are_counted_once() {
+    let blocks = block_with_flags("X", 4, (0.0, 0.0), "")
+        + &block(
+            "E",
+            (0.0, 0.0),
+            &(line((0.0, 0.0), (1.0, 0.0))
+                + &insert("NOPE", (0.0, 0.0), "")
+                + &insert("X", (0.0, 0.0), "")),
+        );
+    let stretched = g(41, 2.0) + &g(42, 1.0);
+    let ents = insert("E", (0.0, 0.0), &stretched)
+        + &insert("E", (10.0, 0.0), &stretched)
+        + &insert("E", (20.0, 0.0), "");
+    let report = read_ok(&dxf(&blocks, &ents));
+    assert!(
+        warning_with(&report, "定義の無い").contains("参照 1 件"),
+        "{:?}",
+        report.warnings
+    );
+    assert!(
+        warning_with(&report, "外部参照").contains("外部参照 1 件"),
+        "{:?}",
+        report.warnings
+    );
+    // 展開は 2 件（3 個目は相似なのでインスタンス）。
+    assert!(warning_with(&report, "展開しました").contains("参照 2 件"));
+}

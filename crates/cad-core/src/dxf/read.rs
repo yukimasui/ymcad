@@ -829,6 +829,11 @@ fn parse_block(reader: &mut Reader<'_>) -> Result<(BlockRecord, bool)> {
 /// 行数が奇数、`EOF` が無い、数値としてパースできない値がある等、
 /// 構文として成立しない入力の場合 [`CadError::Parse`]。
 pub fn read_from_str(text: &str) -> Result<ReadReport> {
+    read_with_limits(text, build::Limits::DEFAULT)
+}
+
+/// [`read_from_str`] の本体。上限をテストから差し込めるように分けてある。
+fn read_with_limits(text: &str, limits: build::Limits) -> Result<ReadReport> {
     let mut reader = Reader::new(text)?;
     let mut layer_records = Vec::new();
     let mut entity_records = Vec::new();
@@ -867,7 +872,13 @@ pub fn read_from_str(text: &str) -> Result<ReadReport> {
         });
     }
 
-    build::build_document(layer_records, entity_records, entity_tally, block_records)
+    build::build_document(
+        layer_records,
+        entity_records,
+        entity_tally,
+        block_records,
+        limits,
+    )
 }
 
 /// DXF ファイルを読み、新しい [`Document`] を組み立てて返す。

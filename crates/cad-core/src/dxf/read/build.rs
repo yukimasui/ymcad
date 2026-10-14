@@ -54,6 +54,29 @@ const ANONYMOUS_FLAG: i32 = 1;
 /// メモリを使い果たさないための歯止め。天井の格子のような実用の配列（数百 × 数百）は収まる。
 const MAX_MINSERT_ITEMS: u64 = 100_000;
 
+/// 縦横別倍率の展開で作る図形の数の上限（図面全体で）。
+///
+/// 展開は入れ子の段ごとに掛け算で増える。縦横別倍率の INSERT が 1 段に 10 個 × 8 段入れ子になった
+/// 24 KB ほどの DXF から 1,100 万図形・4.2 GB・8.6 秒（9 段ならメモリが尽きる）になった（PR #111 の
+/// レビューで実測）。1 図形あたり約 400 バイト・1 秒あたり 130 万図形ほどなので、100 万なら
+/// 400 MB・1 秒弱で止まる。実務の図面は大きくても数十万図形で、展開はその一部なので、
+/// まともなファイルがこの上限に当たることはまず無い。超えたぶんは読まずに警告する。
+const MAX_EXPANDED_ENTITIES: usize = 1_000_000;
+
+/// 読み込みの上限。テストで小さな値を差し込めるように引数で渡す。
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Limits {
+    /// 縦横別倍率の展開で作る図形の数の上限（図面全体で）。
+    pub max_expanded: usize,
+}
+
+impl Limits {
+    /// 実際の読み込みで使う上限。
+    pub(super) const DEFAULT: Self = Self {
+        max_expanded: MAX_EXPANDED_ENTITIES,
+    };
+}
+
 /// 警告に並べるブロック名の最大数。残りは「ほか N 件」にまとめる。
 const MAX_LISTED_NAMES: usize = 5;
 
@@ -117,7 +140,25 @@ impl Names {
     }
 }
 
+/// 展開の中で起きたことの通し番号。
+///
+/// 展開の中の出来事は、外側の `INSERT`（ファイル上の 1 件）ごとに 1 回だけ警告に数える。
+/// 外側の `INSERT` を変換する前後で比べ、増えていればその `INSERT` で起きたとみなす。
+#[derive(Clone, Copy, Default, PartialEq)]
+struct ExpansionHits {
+    /// 形が潰れた（行列が退化した、近似できない図形があった）。
+    degenerate: usize,
+    /// 入れ子が深すぎた。
+    too_deep: usize,
+    /// 展開で作る図形の上限に達した。
+    budget: usize,
+}
+
 /// 組み立て中に数える、警告のもと。
+///
+/// **件数はファイル上の件数**（`Tally` と同じ意味）。縦横別倍率で展開されるブロックは必ず定義にも
+/// なり、その中身の問題（循環・未定義の参照など）は定義の中身を入れるときに 1 回数えているので、
+/// 展開の中では数えない。展開でしか起きないこと（[`ExpansionHits`]）は外側の `INSERT` ごとに 1 回。
 #[derive(Default)]
 struct Log {
     /// 読むときに数えたもの（`ENTITIES` と、定義にしたブロックのぶん）。
@@ -126,8 +167,14 @@ struct Log {
     expanded: usize,
     /// 倍率 0 などで潰れるので読まなかった `INSERT` の数。
     degenerate_inserts: usize,
-    /// 展開で形が潰れて表せなかった図形の数。
-    degenerate_shapes: usize,
+    /// 展開の中で形が潰れて表せない図形があった `INSERT` の数。
+    expansion_degenerate: usize,
+    /// 展開で作る図形が上限に達して、展開を途中で打ち切った `INSERT` の数。
+    expansion_truncated: usize,
+    /// 展開で作った図形の数（図面全体。[`Limits::max_expanded`] と比べる）。
+    expanded_entities: usize,
+    /// 展開の中で起きたこと。外側の `INSERT` 1 件ごとに 1 回だけ数えるための通し番号。
+    hits: ExpansionHits,
     /// 循環する参照になるので読まなかった `INSERT`。
     cycles: Names,
     /// 定義の無いブロックへの参照。
@@ -138,7 +185,7 @@ struct Log {
     layout_refs: usize,
     /// MINSERT の個数が多すぎて読まなかった数。
     too_many_items: usize,
-    /// 展開の入れ子が深すぎて打ち切った数。
+    /// 展開の入れ子が深すぎて打ち切った `INSERT` の数。
     too_deep_expansion: usize,
     /// 名前の無いブロックの数。
     nameless_blocks: usize,
@@ -146,6 +193,8 @@ struct Log {
     duplicate_blocks: Names,
     /// 入れ子が [`MAX_NESTING_DEPTH`] 段を超える定義の数。
     deep_definitions: usize,
+    /// 警告に出す展開の上限（[`Limits::max_expanded`]）。
+    expansion_limit: usize,
 }
 
 impl Log {
@@ -213,10 +262,16 @@ impl Log {
                 self.degenerate_inserts
             ));
         }
-        if self.degenerate_shapes > 0 {
+        if self.expansion_degenerate > 0 {
             w.push(format!(
-                "展開で形が潰れた図形 {} 件を読み込みませんでした",
-                self.degenerate_shapes
+                "縦横の倍率が違うブロック参照 {} 件は、展開すると形が潰れる図形を含むため、その図形を読み込みませんでした",
+                self.expansion_degenerate
+            ));
+        }
+        if self.expansion_truncated > 0 {
+            w.push(format!(
+                "展開で作る図形が上限の {} 個に達したため、縦横の倍率が違うブロック参照 {} 件の展開を途中で打ち切りました（その先の図形は読み込んでいません）",
+                self.expansion_limit, self.expansion_truncated
             ));
         }
         if self.too_many_items > 0 {
@@ -483,6 +538,7 @@ struct Converter<'a> {
     back_edges: &'a BackEdges,
     layers: &'a HashMap<String, LayerId>,
     defs: &'a DefinitionTable,
+    limits: Limits,
     log: &'a mut Log,
 }
 
@@ -493,7 +549,7 @@ impl Converter<'_> {
     /// `raws` を `m`（ブロック座標 → 出力先の座標）で写して `out` に積む。
     ///
     /// `stack` は展開中のブロックのキー（循環の検出用）。`in_expansion` は
-    /// 縦横別倍率の展開の内側か（展開した数を外側の `INSERT` 1 件として数えるため）。
+    /// 縦横別倍率の展開の内側か（警告をファイル上の件数で数えるため。[`Log`]）。
     fn convert_all(
         &mut self,
         raws: &[RawEntity],
@@ -506,6 +562,9 @@ impl Converter<'_> {
         for raw in raws {
             match &raw.kind {
                 RawKind::Geom(g) => {
+                    if in_expansion && !self.take_expansion_budget() {
+                        continue;
+                    }
                     let geom = if m == Affine::IDENTITY {
                         Some(g.clone())
                     } else {
@@ -513,7 +572,8 @@ impl Converter<'_> {
                     };
                     match geom {
                         Some(geom) => out.push(self.entity(geom, raw)),
-                        None => self.log.degenerate_shapes += 1,
+                        // 写さない（恒等の）ときは必ず `Some` なので、ここは展開の中だけ。
+                        None => self.log.hits.degenerate += 1,
                     }
                 }
                 RawKind::Insert(rec) => {
@@ -521,6 +581,16 @@ impl Converter<'_> {
                 }
             }
         }
+    }
+
+    /// 展開で図形を 1 つ作ってよいか。上限に達していれば記録して `false`。
+    fn take_expansion_budget(&mut self) -> bool {
+        if self.log.expanded_entities >= self.limits.max_expanded {
+            self.log.hits.budget += 1;
+            return false;
+        }
+        self.log.expanded_entities += 1;
+        true
     }
 
     fn entity(&self, geom: Geometry, raw: &RawEntity) -> Entity {
@@ -546,33 +616,46 @@ impl Converter<'_> {
         in_expansion: bool,
         out: &mut Vec<Entity>,
     ) {
+        // ファイル上の問題（参照先・倍率・個数）は、定義の中身を入れるときか図面の図形を
+        // 読むときに 1 回だけ数える。展開の中で同じ INSERT に出会っても数えない（[`Log`]）。
+        let count = !in_expansion;
         let key = block_key(&rec.block);
         let Some(block) = self.table.blocks.get(&key).copied() else {
-            if self.table.layouts.contains(&key) {
-                self.log.layout_refs += 1;
-            } else {
-                self.log.undefined.add(&rec.block);
+            if count {
+                if self.table.layouts.contains(&key) {
+                    self.log.layout_refs += 1;
+                } else {
+                    self.log.undefined.add(&rec.block);
+                }
             }
             return;
         };
         if is_xref(block) {
-            self.log.xrefs.add(&block.name);
+            if count {
+                self.log.xrefs.add(&block.name);
+            }
             return;
         }
         // 循環を作る参照（`dependency_order` が見つけた後退辺）。いま中身を読んでいる
         // ブロック（定義の中身でも展開の中でも、スタックの一番上）からの参照で判定する。
         if let Some(current) = stack.last() {
             if self.back_edges.contains(&(current.clone(), key.clone())) {
-                self.log.cycles.add(&block.name);
+                if count {
+                    self.log.cycles.add(&block.name);
+                }
                 return;
             }
         }
         if is_zero_len(rec.sx) || is_zero_len(rec.sy) {
-            self.log.degenerate_inserts += 1;
+            if count {
+                self.log.degenerate_inserts += 1;
+            }
             return;
         }
         if u64::from(rec.cols) * u64::from(rec.rows) > MAX_MINSERT_ITEMS {
-            self.log.too_many_items += 1;
+            if count {
+                self.log.too_many_items += 1;
+            }
             return;
         }
 
@@ -585,7 +668,11 @@ impl Converter<'_> {
             mirror_ocs: rec.mirror_ocs,
         };
         let def_id = self.def_ids.get(&key).copied();
+        let hits_before = self.log.hits;
+        // MINSERT のマスごとではなく、INSERT 1 件につき 1 回だけ数えるための印。
         let mut expanded = false;
+        let mut degenerate = false;
+        let mut cyclic = false;
 
         for row in 0..rec.rows {
             for col in 0..rec.cols {
@@ -595,27 +682,35 @@ impl Converter<'_> {
                 );
                 let total = m * xform.matrix(offset);
                 match (total.shape(), def_id) {
-                    (Shape::Degenerate, _) => self.log.degenerate_inserts += 1,
+                    (Shape::Degenerate, _) => degenerate = true,
                     (Shape::Similar { .. }, Some(id)) => {
                         if target.is_some_and(|t| would_create_cycle(t, id, self.defs)) {
-                            self.log.cycles.add(&block.name);
+                            cyclic = true;
                             continue;
                         }
                         let Some(placement) = total.placement(block.base) else {
-                            self.log.degenerate_inserts += 1;
+                            degenerate = true;
                             continue;
                         };
+                        if in_expansion && !self.take_expansion_budget() {
+                            continue;
+                        }
                         let inst = Geometry::Instance(Instance::new(id, placement));
                         out.push(self.entity(inst, raw));
                     }
                     // 縦横の倍率が違う（または定義にしていない）。中身を写して展開する。
                     _ => {
                         if stack.contains(&key) {
-                            self.log.cycles.add(&block.name);
+                            cyclic = true;
                             continue;
                         }
                         if stack.len() >= MAX_NESTING_DEPTH {
-                            self.log.too_deep_expansion += 1;
+                            self.log.hits.too_deep += 1;
+                            continue;
+                        }
+                        // 上限に達していたら中へ降りない（指数的に増える入れ子を早く止める）。
+                        if self.log.expanded_entities >= self.limits.max_expanded {
+                            self.log.hits.budget += 1;
                             continue;
                         }
                         stack.push(key.clone());
@@ -626,8 +721,33 @@ impl Converter<'_> {
                 }
             }
         }
-        if expanded && !in_expansion {
+
+        if in_expansion {
+            // 展開の中で行列が潰れたのは、展開でしか起きないこと（外側の INSERT で 1 回数える）。
+            if degenerate {
+                self.log.hits.degenerate += 1;
+            }
+            return;
+        }
+        if degenerate {
+            self.log.degenerate_inserts += 1;
+        }
+        if cyclic {
+            self.log.cycles.add(&block.name);
+        }
+        if expanded {
             self.log.expanded += 1;
+        }
+        // 展開の中で起きたことを、この INSERT 1 件として数える。
+        let hits = self.log.hits;
+        if hits.degenerate > hits_before.degenerate {
+            self.log.expansion_degenerate += 1;
+        }
+        if hits.too_deep > hits_before.too_deep {
+            self.log.too_deep_expansion += 1;
+        }
+        if hits.budget > hits_before.budget {
+            self.log.expansion_truncated += 1;
         }
     }
 }
@@ -668,9 +788,13 @@ pub(super) fn build_document(
     entity_records: Vec<RawEntity>,
     entity_tally: Tally,
     block_records: Vec<BlockRecord>,
+    limits: Limits,
 ) -> Result<ReadReport> {
     let mut doc = Document::new();
-    let mut log = Log::default();
+    let mut log = Log {
+        expansion_limit: limits.max_expanded,
+        ..Log::default()
+    };
     log.tally.absorb(&entity_tally);
 
     let table = BlockTable::new(&block_records, &mut log);
@@ -716,6 +840,7 @@ pub(super) fn build_document(
             back_edges: &back_edges,
             layers: &layers.ids,
             defs: doc.definitions(),
+            limits,
             log: &mut log,
         }
         .convert_all(
@@ -743,6 +868,7 @@ pub(super) fn build_document(
         back_edges: &back_edges,
         layers: &layers.ids,
         defs: doc.definitions(),
+        limits,
         log: &mut log,
     }
     .convert_all(
@@ -767,4 +893,116 @@ pub(super) fn build_document(
         document: doc,
         warnings: log.into_warnings(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::read_with_limits;
+    use super::Limits;
+
+    fn g(code: i32, v: impl std::fmt::Display) -> String {
+        format!("{code}\n{v}\n")
+    }
+
+    fn line(x: f64) -> String {
+        g(0, "LINE") + &g(8, "0") + &g(10, x) + &g(20, 0.0) + &g(11, x) + &g(21, 1.0)
+    }
+
+    /// 縦横別倍率（2, 1）の INSERT。
+    fn stretched_insert(name: &str, x: f64) -> String {
+        g(0, "INSERT")
+            + &g(8, "0")
+            + &g(2, name)
+            + &g(10, x)
+            + &g(20, 0.0)
+            + &g(41, 2.0)
+            + &g(42, 1.0)
+    }
+
+    fn block(name: &str, body: &str) -> String {
+        g(0, "BLOCK")
+            + &g(8, "0")
+            + &g(2, name)
+            + &g(10, 0.0)
+            + &g(20, 0.0)
+            + body
+            + &g(0, "ENDBLK")
+    }
+
+    fn dxf(blocks: &str, entities: &str) -> String {
+        g(0, "SECTION")
+            + &g(2, "BLOCKS")
+            + blocks
+            + &g(0, "ENDSEC")
+            + &g(0, "SECTION")
+            + &g(2, "ENTITIES")
+            + entities
+            + &g(0, "ENDSEC")
+            + &g(0, "EOF")
+    }
+
+    /// 展開で作る図形は上限で止まり、打ち切った INSERT の数を警告する。
+    #[test]
+    fn expansion_stops_at_the_limit_and_warns() {
+        let body: String = (0..5).map(|i| line(f64::from(i))).collect();
+        let ents: String = (0..3)
+            .map(|i| stretched_insert("E", 10.0 * f64::from(i)))
+            .collect();
+        let report = read_with_limits(&dxf(&block("E", &body), &ents), Limits { max_expanded: 7 })
+            .expect("読める");
+        assert_eq!(report.document.entities().len(), 7, "上限ちょうどで止まる");
+        let w = report
+            .warnings
+            .iter()
+            .find(|w| w.contains("打ち切り"))
+            .unwrap_or_else(|| panic!("警告が無い: {:?}", report.warnings));
+        // 2 個目は途中まで、3 個目は全部打ち切り。上限の値も出す。
+        assert!(w.contains("2 件") && w.contains('7'), "{w}");
+    }
+
+    /// 段ごとに掛け算で増える入れ子も、上限で早く止まる（中へ降りない）。
+    #[test]
+    fn nested_expansion_explosion_is_bounded() {
+        // L0 は線分 1 本、Ln は L(n-1) を縦横別倍率で 3 個。L6 を 3 個置くと 3^7 = 2187 本になる。
+        let mut blocks = block("L0", &line(0.0));
+        for n in 1..=6 {
+            let inner = format!("L{}", n - 1);
+            let body: String = (0..3)
+                .map(|i| stretched_insert(&inner, f64::from(i)))
+                .collect();
+            blocks += &block(&format!("L{n}"), &body);
+        }
+        let ents: String = (0..3)
+            .map(|i| stretched_insert("L6", f64::from(i)))
+            .collect();
+        let limit = 50;
+        let report = read_with_limits(
+            &dxf(&blocks, &ents),
+            Limits {
+                max_expanded: limit,
+            },
+        )
+        .expect("読める");
+        // 定義の中身の展開も同じ上限を分け合うので、図面の図形は上限以下。
+        assert!(report.document.entities().len() <= limit);
+        assert!(
+            report.warnings.iter().any(|w| w.contains("打ち切り")),
+            "{:?}",
+            report.warnings
+        );
+    }
+
+    /// 既定の上限は実際の読み込みで使われ、普通の展開には当たらない。
+    #[test]
+    fn default_limit_is_large_enough_for_ordinary_files() {
+        assert_eq!(Limits::DEFAULT.max_expanded, super::MAX_EXPANDED_ENTITIES);
+        let body: String = (0..5).map(|i| line(f64::from(i))).collect();
+        let report = read_with_limits(
+            &dxf(&block("E", &body), &stretched_insert("E", 0.0)),
+            Limits::DEFAULT,
+        )
+        .expect("読める");
+        assert_eq!(report.document.entities().len(), 5);
+        assert!(!report.warnings.iter().any(|w| w.contains("打ち切り")));
+    }
 }
