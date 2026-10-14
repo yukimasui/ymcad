@@ -571,7 +571,8 @@ impl FileOps {
     /// 選ばれたファイルを開く。形式は拡張子で決める。
     fn open_path(doc: &mut Document, path: &Path) -> FileOutcome {
         // DXF だけが警告を返す（ymcad で表せず近似・欠落したもの。ADR-0050）。
-        let loaded = if is_dxf(path) {
+        let dxf = is_dxf(path);
+        let loaded = if dxf {
             dxf::read::read_from_file(path).map(|r| (r.document, r.warnings))
         } else {
             native::read::read_from_file(path).map(|d| (d, Vec::new()))
@@ -583,9 +584,15 @@ impl FileOps {
                 *doc = loaded;
                 let mut msg = format!("開きました: {}", path.display());
                 // 書き出しの警告と同じく、黙って落とさず必ず伝える (ADR-0021)。
-                for w in warnings {
+                for w in &warnings {
                     msg.push_str("\n  警告: ");
-                    msg.push_str(&w);
+                    msg.push_str(w);
+                }
+                // 上書き保存は確認なしで元の .dxf に書き戻し、注意は書いた後にしか出ない。
+                // 開いた時点で伝える（MCP の open_drawing と同じ趣旨。PR #111 の操作レビュー）。
+                if dxf {
+                    msg.push_str("\n  注意: ");
+                    msg.push_str(dxf_open_notice(!warnings.is_empty()));
                 }
                 FileOutcome::Replaced(msg)
             }
@@ -615,6 +622,20 @@ impl FileOps {
             }
             Err(e) => FileOutcome::Failed(format!("保存に失敗しました: {e}")),
         }
+    }
+}
+
+/// DXF を開いたときの案内。
+///
+/// 読まなかった図形があるとき（警告が出たとき）は、上書き保存でそれが元のファイルからも
+/// 消えることを、警告を指して伝える。
+fn dxf_open_notice(has_warnings: bool) -> &'static str {
+    if has_warnings {
+        "DXF R12 は交換用の形式です。このまま .dxf に上書き保存すると、上の警告で読み込まなかった図形は\
+         元のファイルからも失われます。ymcad の図面として残すなら .ymc で保存してください（Ctrl+Shift+S）"
+    } else {
+        "DXF R12 は交換用の形式です（.dxf への保存は非可逆）。ymcad の図面として残すなら .ymc で保存してください\
+         （Ctrl+Shift+S）"
     }
 }
 
@@ -871,6 +892,37 @@ mod tests {
         };
         assert!(msg.contains("警告"), "{msg}");
         assert!(msg.contains("TEXT 1 件"), "{msg}");
+        // 上書き保存で読まなかった図形が消えることを、開いた時点で伝える。
+        let notice = msg.lines().last().unwrap();
+        assert!(notice.contains("注意"), "案内は警告の後: {msg}");
+        assert!(notice.contains("読み込まなかった図形"), "{msg}");
+        assert!(notice.contains(".ymc"), "{msg}");
+    }
+
+    /// 警告の無い DXF でも交換用である旨は伝える。ネイティブ形式では出さない。
+    #[test]
+    fn opening_dxf_without_warnings_still_notes_the_exchange_format() {
+        let dir = crate::test_util::TempDir::new("open_notice");
+        let dxf_path = dir.join("line.dxf");
+        std::fs::write(
+            &dxf_path,
+            "0\nSECTION\n2\nENTITIES\n0\nLINE\n8\n0\n10\n0\n20\n0\n11\n1\n21\n0\n0\nENDSEC\n0\nEOF\n",
+        )
+        .unwrap();
+        let mut doc = Document::new();
+        let FileOutcome::Replaced(msg) = FileOps::open_path(&mut doc, &dxf_path) else {
+            panic!("開けるはず");
+        };
+        assert!(!msg.contains("警告"), "{msg}");
+        assert!(msg.contains("注意") && msg.contains("交換用"), "{msg}");
+        assert!(!msg.contains("上の警告"), "警告が無いのに指さない: {msg}");
+
+        let ymc = dir.join("line.ymc");
+        native::write::write_to_file(&doc, &ymc).unwrap();
+        let FileOutcome::Replaced(msg) = FileOps::open_path(&mut doc, &ymc) else {
+            panic!("開けるはず");
+        };
+        assert!(!msg.contains("注意"), "ネイティブ形式では出さない: {msg}");
     }
 
     // ---- ファイルダイアログ（Issue #98） --------------------------------
