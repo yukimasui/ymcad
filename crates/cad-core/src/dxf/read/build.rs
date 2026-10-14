@@ -827,8 +827,32 @@ pub(super) fn build_document(
         def_ids.insert(block_key(&b.name), id);
     }
 
-    // 2. 内側が先の順に中身を入れる。循環になる参照は Converter が飛ばす。
     let (order, back_edges) = dependency_order(&defined, &entity_records);
+
+    // 2. 図面の図形を先に変換する。展開の上限（`Limits::max_expanded`）を図面全体で分け合うので、
+    //    **目に見える図面の図形に先に回す**（定義の中身を先にすると、入れ子の深いファイルで
+    //    上限を定義が使い切り、図面に何も出なくなる）。図面の図形の変換は定義の ID だけを使い、
+    //    中身は見ない（循環の検査は定義の中身を入れるときだけ）ので、この順で問題ない。
+    let mut entities = Vec::with_capacity(entity_records.len());
+    Converter {
+        table: &table,
+        def_ids: &def_ids,
+        back_edges: &back_edges,
+        layers: &layers.ids,
+        defs: doc.definitions(),
+        limits,
+        log: &mut log,
+    }
+    .convert_all(
+        &entity_records,
+        Affine::IDENTITY,
+        None,
+        &mut Vec::new(),
+        false,
+        &mut entities,
+    );
+
+    // 3. 内側が先の順に中身を入れる。循環になる参照は Converter が飛ばす。
     let mut order_ids = Vec::with_capacity(order.len());
     for b in order {
         let key = block_key(&b.name);
@@ -860,25 +884,7 @@ pub(super) fn build_document(
         order_ids.push(id);
     }
 
-    // 3. 図面の図形。
-    let mut entities = Vec::with_capacity(entity_records.len());
-    Converter {
-        table: &table,
-        def_ids: &def_ids,
-        back_edges: &back_edges,
-        layers: &layers.ids,
-        defs: doc.definitions(),
-        limits,
-        log: &mut log,
-    }
-    .convert_all(
-        &entity_records,
-        Affine::IDENTITY,
-        None,
-        &mut Vec::new(),
-        false,
-        &mut entities,
-    );
+    // 4. 図面の図形を入れる（定義の中身が揃った後）。
     if !entities.is_empty() {
         doc.apply(Box::new(AddEntities::many(COMMAND_NAME, entities)))?;
     }
@@ -983,8 +989,9 @@ mod tests {
             },
         )
         .expect("読める");
-        // 定義の中身の展開も同じ上限を分け合うので、図面の図形は上限以下。
-        assert!(report.document.entities().len() <= limit);
+        // 図面の図形に先に回すので、図面には上限ちょうどの図形が出る
+        // （定義の中身を先にすると、定義が上限を使い切って図面が空になる）。
+        assert_eq!(report.document.entities().len(), limit);
         assert!(
             report.warnings.iter().any(|w| w.contains("打ち切り")),
             "{:?}",
