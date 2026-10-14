@@ -51,7 +51,8 @@ pub(super) const OPEN_DRAWING: Tool = Tool {
     title: "図面を開く",
     description: "root の配下の .ymc（ネイティブ）か .dxf（R12・交換用）を開く。形式は拡張子だけで決まり、\
 拡張子が無ければ .ymc を付ける。相対パスは最初の root から解決する。.. を含むパス・root の外・シンボリックリンクは拒む。\
-図面の通し番号が進み、前の図面の図形 ID は使えなくなる。いまの図面に未保存の変更があるときは discard_changes: true が要る。",
+図面の通し番号が進み、前の図面の図形 ID は使えなくなる。いまの図面に未保存の変更があるときは discard_changes: true が要る。\
+DXF のブロックはコンポーネントとして読む。表せず近似・欠落したもの（縦横の倍率が違うブロック参照の展開、読まなかった図形の種類と件数など）は warnings に出る。",
     schema: || {
         (
             json!({
@@ -131,7 +132,7 @@ fn open_drawing(s: &mut Server, a: &Args) -> ToolResult {
     let discard = a.bool_or("discard_changes", false)?;
     ensure_can_discard(s, discard, "別の図面を開く")?;
     let (path, format) = s.roots.resolve_for_read(raw)?;
-    let (doc, stamp) = read_document(&path, format)?;
+    let (doc, stamp, read_warnings) = read_document(&path, format)?;
 
     let mut warnings = Vec::new();
     if format == Format::Dxf {
@@ -140,6 +141,8 @@ fn open_drawing(s: &mut Server, a: &Args) -> ToolResult {
                 .to_owned(),
         );
     }
+    // 読み込みで近似・欠落したもの（ブロックの展開、読まなかった種類など。ADR-0050）。
+    warnings.extend(read_warnings);
     let discarded = s.doc.is_dirty();
     s.replace_document(
         doc,
@@ -165,7 +168,10 @@ fn open_drawing(s: &mut Server, a: &Args) -> ToolResult {
 ///
 /// 更新時刻と大きさは**読む前に**開いたファイルから取る。読んでいる間に書き換えられたら、
 /// 記録が古いほうへずれるので、次の保存で上書きの確認が出る（安全な側）。
-fn read_document(path: &Path, format: Format) -> Result<(Document, FileStamp), String> {
+fn read_document(
+    path: &Path,
+    format: Format,
+) -> Result<(Document, FileStamp, Vec<String>), String> {
     let cannot = |e: &dyn std::fmt::Display| format!("{} を読めません: {e}", path.display());
     let file = File::open(path).map_err(|e| cannot(&e))?;
     let meta = file.metadata().map_err(|e| cannot(&e))?;
@@ -188,16 +194,17 @@ fn read_document(path: &Path, format: Format) -> Result<(Document, FileStamp), S
     }
 
     let loaded = match format {
-        Format::Native => native::read::read_from_bytes(&bytes),
+        Format::Native => native::read::read_from_bytes(&bytes).map(|d| (d, Vec::new())),
         Format::Dxf => {
             let text = String::from_utf8(bytes)
                 .map_err(|_| format!("{} は UTF-8 のテキストではありません", path.display()))?;
-            dxf::read::read_from_str(&text)
+            dxf::read::read_from_str(&text).map(|r| (r.document, r.warnings))
         }
     };
-    let mut doc = loaded.map_err(|e| format!("{} を図面として読めません: {e}", path.display()))?;
+    let (mut doc, warnings) =
+        loaded.map_err(|e| format!("{} を図面として読めません: {e}", path.display()))?;
     doc.mark_saved(Some(path.to_path_buf()));
-    Ok((doc, FileStamp::from_metadata(&meta)))
+    Ok((doc, FileStamp::from_metadata(&meta), warnings))
 }
 
 fn save_drawing(s: &mut Server, a: &Args) -> ToolResult {
@@ -406,6 +413,33 @@ mod tests {
         assert_eq!(r["format"], "dxf");
         assert_eq!(r["entity_count"], 1);
         assert!(r["warnings"][0].as_str().unwrap().contains("交換用"));
+    }
+
+    /// DXF の読み込みで近似・欠落したもの（ブロックの展開・読まなかった種類）が warnings に載る。
+    #[test]
+    fn open_dxf_reports_read_warnings() {
+        let dir = TempDir::new("file-open-warn");
+        let text = "0\nSECTION\n2\nBLOCKS\n0\nBLOCK\n2\nB\n10\n0\n20\n0\n\
+                    0\nLINE\n8\n0\n10\n0\n20\n0\n11\n1\n21\n0\n0\nENDBLK\n0\nENDSEC\n\
+                    0\nSECTION\n2\nENTITIES\n0\nINSERT\n8\n0\n2\nB\n10\n0\n20\n0\n41\n2\n\
+                    0\nTEXT\n8\n0\n1\nhello\n0\nENDSEC\n0\nEOF\n";
+        std::fs::write(dir.path().join("w.dxf"), text).unwrap();
+        let mut s = server(&dir);
+
+        let r = ok(&mut s, "open_drawing", json!({"path": "w.dxf"}));
+        assert_eq!(r["component_count"], 1);
+        let warnings: Vec<&str> = r["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|w| w.as_str().unwrap())
+            .collect();
+        assert!(warnings[0].contains("交換用"), "{warnings:?}");
+        assert!(
+            warnings.iter().any(|w| w.contains("TEXT 1 件")),
+            "{warnings:?}"
+        );
+        assert!(warnings.iter().any(|w| w.contains("展開")), "{warnings:?}");
     }
 
     #[test]

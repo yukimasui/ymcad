@@ -3,26 +3,47 @@
 //! # 方針
 //!
 //! - 知らないセクション・知らないエンティティ種別は **エラーにせず読み飛ばす**。
-//!   現実の DXF ファイルには本プロトタイプが書き出さない要素（`BLOCKS`, `TEXT`, …）が
-//!   大量に含まれるため。
-//! - `LINE` / `CIRCLE` / `ARC` / `POLYLINE`+`VERTEX`+`SEQEND` / `LWPOLYLINE` は理解する。
-//!   後者 2 つはどちらもポリラインとして読み込む（自分では `POLYLINE` 形式でしか
+//!   現実の DXF ファイルには本プロトタイプが扱わない要素（`TEXT`, `DIMENSION`, …）が
+//!   大量に含まれるため。読まなかった種類と件数は警告で返す（[`ReadReport`]）。
+//! - `LINE` / `CIRCLE` / `ARC` / `POLYLINE`+`VERTEX`+`SEQEND` / `LWPOLYLINE` / `INSERT` は理解する。
+//!   ポリラインは 2 形式ともポリラインとして読み込む（自分では `POLYLINE` 形式でしか
 //!   書き出さないが、他アプリが吐いた `LWPOLYLINE` も受け付ける）。
+//! - `BLOCKS` セクションのブロックはコンポーネント定義に、`INSERT` はインスタンスにする
+//!   （Issue #109、ADR-0050）。組み立ては [`build`] を参照。
+//! - 押し出し方向（210/220/230）が `(0, 0, -1)` の図形は OCS の X が反転しているので、
+//!   ワールドへ移すときに Y 軸で鏡像にする。Z 軸から傾いた押し出しは 2D に落とせないので
+//!   読まずに警告する。`LINE` の座標はワールド座標（WCS）なので押し出し方向に関係しない。
 //! - `LAYER` テーブルを読み、レイヤの色・表示・ロック・線種を復元する。
 //!   テーブルに無いレイヤ名をエンティティが参照している場合は、その場で作る。
 //! - 数値としてパースできない値やファイルの途中切れは [`CadError::Parse`] として
 //!   はっきり報告する。
 
-use std::collections::HashMap;
+mod build;
+mod xform;
+
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use super::deg_to_rad;
-use crate::command::{AddEntities, AddLayer, SetLayerProperties};
 use crate::document::Document;
-use crate::entity::{Entity, Geometry};
+use crate::entity::Geometry;
 use crate::error::{CadError, Result};
+use crate::geom::tolerance::is_zero_len;
 use crate::geom::{Arc, Circle, Line, Point2, Polyline};
-use crate::layer::{AciColor, ColorSpec, LayerId, LineType};
+use crate::layer::{AciColor, ColorSpec, LineType};
+
+/// 読み込みの結果。
+///
+/// `warnings` には、ymcad で表せずに近似したもの・読まなかったものの説明が入る。
+/// 呼び出し側はこれをユーザーへ見せること。書き出しの [`super::write::WriteReport`] と同じ約束で、
+/// 黙って情報を落とさないための仕組み（ADR-0021 / ADR-0050）。
+#[derive(Debug)]
+pub struct ReadReport {
+    /// 組み立てた図面。Undo 履歴は空で、未保存の変更も無い。
+    pub document: Document,
+    /// 近似・欠落の警告。
+    pub warnings: Vec<String>,
+}
 
 /// 1 組のグループコード・値。デバッグ用にソース上の行番号（1 始まり、値行の行番号）も持つ。
 #[derive(Debug, Clone, Copy)]
@@ -92,6 +113,11 @@ impl<'a> Reader<'a> {
         self.lines.get(self.pos)?.parse::<i32>().ok()
     }
 
+    /// 次のペアの値だけを覗き見る（消費しない）。
+    fn peek_value(&self) -> Option<&'a str> {
+        self.lines.get(self.pos + 1).copied()
+    }
+
     /// 次の「グループコード 0」の手前まで（= 1 レコード分の属性）を読み進める。
     fn read_attrs(&mut self) -> Result<Vec<Pair<'a>>> {
         let mut out = Vec::new();
@@ -122,12 +148,6 @@ fn parse_i32_pair(p: Pair<'_>) -> Result<i32> {
     })
 }
 
-fn color_from_pair(p: Pair<'_>) -> Result<ColorSpec> {
-    let raw = parse_i32_pair(p)?;
-    let byte = u8::try_from(raw.unsigned_abs()).unwrap_or(u8::MAX);
-    Ok(ColorSpec::Aci(AciColor(byte)))
-}
-
 fn linetype_from_dxf_name(name: &str) -> LineType {
     match name.trim().to_ascii_uppercase().as_str() {
         "DASHED" => LineType::Dashed,
@@ -144,13 +164,6 @@ struct LayerRecord {
     visible: bool,
     locked: bool,
     linetype: LineType,
-}
-
-/// エンティティ 1 つぶんの中間表現。レイヤは名前のまま持ち、`Document` 構築時に解決する。
-struct EntityRecord {
-    geom: Geometry,
-    layer: String,
-    color: ColorSpec,
 }
 
 // ---- セクション読み飛ばし --------------------------------------------------
@@ -252,37 +265,211 @@ fn parse_tables(reader: &mut Reader<'_>, out: &mut Vec<LayerRecord>) -> Result<(
     }
 }
 
-// ---- ENTITIES セクション -----------------------------------------------------
+// ---- 色・押し出し方向 -------------------------------------------------------
 
-/// `LINE` / `CIRCLE` / `ARC` に共通する、単純な属性ペアの集合を読む。
-struct CommonAttrs {
+/// エンティティの色（62）を読む。
+///
+/// - `256` は BYLAYER（`ColorSpec::ByLayer`）
+/// - `0` は BYBLOCK。`ColorSpec` に BYBLOCK が無いので BYLAYER に寄せ、件数を数えて警告する
+///   （変種を足すのはエンティティモデルの変更になる。ADR-0050）
+/// - `1..=255` は ACI。負の値（エンティティでは本来使わない）は絶対値を取る
+/// - それ以外（`257` = BYOBJECT など）は BYLAYER
+fn color_from_pair(p: Pair<'_>, tally: &mut Tally) -> Result<ColorSpec> {
+    let raw = parse_i32_pair(p)?.unsigned_abs();
+    Ok(match raw {
+        0 => {
+            tally.byblock += 1;
+            ColorSpec::ByLayer
+        }
+        1..=255 => ColorSpec::Aci(AciColor(u8::try_from(raw).unwrap_or(u8::MAX))),
+        _ => ColorSpec::ByLayer,
+    })
+}
+
+/// 押し出し方向（210/220/230）から決まる、OCS → ワールドの扱い。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ocs {
+    /// `(0, 0, 1)`。OCS がそのままワールド。
+    Identity,
+    /// `(0, 0, -1)`。arbitrary axis algorithm で OCS の X 軸が `(-1, 0, 0)`、
+    /// Y 軸が `(0, 1, 0)` になるので、ワールドでは Y 軸に関する鏡像。
+    MirrorX,
+    /// Z 軸から傾いている。2D に落とせない。
+    Oblique,
+}
+
+impl Ocs {
+    fn from_extrusion(e: [f64; 3]) -> Self {
+        let len = (e[0] * e[0] + e[1] * e[1] + e[2] * e[2]).sqrt();
+        if !len.is_finite() || is_zero_len(len) {
+            // 零ベクトルは不正。既定の向きとして扱う。
+            return Self::Identity;
+        }
+        if is_zero_len(e[0] / len) && is_zero_len(e[1] / len) {
+            if e[2] > 0.0 {
+                Self::Identity
+            } else {
+                Self::MirrorX
+            }
+        } else {
+            Self::Oblique
+        }
+    }
+}
+
+/// 押し出し方向 Z<0 のときにかける鏡像の軸（原点を通る垂直線）。
+const Y_AXIS: Line = Line {
+    a: Point2 { x: 0.0, y: 0.0 },
+    b: Point2 { x: 0.0, y: 1.0 },
+};
+
+/// OCS の図形をワールドへ移す。傾いた押し出しなら数えて `None`。
+///
+/// 鏡像に `Geometry::mirrored` を使うのは、円弧の開始角・終了角の入れ替え
+/// （ADR-0020）を再実装しないため。
+fn ocs_to_world(geom: Geometry, ocs: Ocs, tally: &mut Tally) -> Option<Geometry> {
+    match ocs {
+        Ocs::Identity => Some(geom),
+        Ocs::MirrorX => Some(geom.mirrored(&Y_AXIS)),
+        Ocs::Oblique => {
+            tally.oblique += 1;
+            None
+        }
+    }
+}
+
+// ---- 中間表現 ---------------------------------------------------------------
+
+/// 読んだ図形 1 つ。レイヤは名前のまま持ち、`Document` の組み立てで解決する。
+struct RawEntity {
+    kind: RawKind,
     layer: String,
     color: ColorSpec,
 }
 
-fn take_common(p: Pair<'_>, common: &mut CommonAttrs) -> Result<bool> {
-    match p.code {
-        8 => {
-            common.layer = p.value.to_string();
-            Ok(true)
+/// 図形の中身。`INSERT` は参照先のブロックが揃ってから解決するので別に持つ。
+enum RawKind {
+    /// 線分・円・円弧・ポリライン（ワールド座標、またはブロック座標）。
+    Geom(Geometry),
+    /// ブロック参照。
+    Insert(InsertRecord),
+}
+
+/// `INSERT` 1 件ぶんの中間表現。
+struct InsertRecord {
+    /// 参照するブロック名（2）。
+    block: String,
+    /// 挿入点（10/20、OCS）。
+    insert: Point2,
+    /// X / Y 倍率（41/42、既定 1）。43（Z）は 2D なので使わない。
+    sx: f64,
+    sy: f64,
+    /// 回転角 [rad]（50 は度）。
+    rotation: f64,
+    /// 押し出し方向が Z<0。
+    mirror_ocs: bool,
+    /// MINSERT の列数（70）・行数（71）。0 以下は 1 とみなす。
+    cols: u32,
+    rows: u32,
+    /// MINSERT の列の間隔（44）・行の間隔（45）。
+    col_spacing: f64,
+    row_spacing: f64,
+}
+
+/// `BLOCK` … `ENDBLK` 1 つぶんの中間表現。
+struct BlockRecord {
+    /// ブロック名（2）。
+    name: String,
+    /// フラグ（70）。1 = 匿名、4 = 外部参照、8 = 外部参照のオーバーレイ。
+    flags: i32,
+    /// 基点（10/20）。
+    base: Point2,
+    /// 中身。
+    entities: Vec<RawEntity>,
+    /// 中身を読むときに数えたもの。定義にしたブロックのぶんだけ警告に足す。
+    tally: Tally,
+}
+
+/// 読むときに数えるもの。ブロックごとと `ENTITIES` ごとに持ち、使ったぶんだけ警告に足す
+/// （寸法の匿名ブロック `*D…` のように定義にしないブロックの中身まで数えないため）。
+#[derive(Default)]
+struct Tally {
+    /// 読まなかった種類と件数。
+    unread: BTreeMap<String, usize>,
+    /// BYBLOCK を BYLAYER に寄せた件数。
+    byblock: usize,
+    /// 押し出し方向が傾いていて読まなかった件数。
+    oblique: usize,
+}
+
+impl Tally {
+    fn skip(&mut self, kind: &str) {
+        *self.unread.entry(kind.to_owned()).or_default() += 1;
+    }
+
+    fn absorb(&mut self, other: &Self) {
+        for (k, n) in &other.unread {
+            *self.unread.entry(k.clone()).or_default() += n;
         }
-        62 => {
-            common.color = color_from_pair(p)?;
-            Ok(true)
-        }
-        _ => Ok(false),
+        self.byblock += other.byblock;
+        self.oblique += other.oblique;
     }
 }
 
-fn parse_line(reader: &mut Reader<'_>) -> Result<EntityRecord> {
-    let attrs = reader.read_attrs()?;
-    let mut common = CommonAttrs {
-        layer: "0".to_string(),
-        color: ColorSpec::ByLayer,
-    };
+// ---- エンティティ（ENTITIES と BLOCKS で共通） --------------------------------
+
+/// 図形に共通する属性（レイヤ・色・押し出し方向）。
+struct CommonAttrs {
+    layer: String,
+    color: ColorSpec,
+    extrusion: [f64; 3],
+}
+
+impl CommonAttrs {
+    fn new() -> Self {
+        Self {
+            layer: "0".to_string(),
+            color: ColorSpec::ByLayer,
+            extrusion: [0.0, 0.0, 1.0],
+        }
+    }
+
+    /// 共通の属性なら取り込んで `true`。
+    fn take(&mut self, p: Pair<'_>, tally: &mut Tally) -> Result<bool> {
+        match p.code {
+            8 => self.layer = p.value.to_string(),
+            62 => self.color = color_from_pair(p, tally)?,
+            210 => self.extrusion[0] = parse_f64_pair(p)?,
+            220 => self.extrusion[1] = parse_f64_pair(p)?,
+            230 => self.extrusion[2] = parse_f64_pair(p)?,
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn ocs(&self) -> Ocs {
+        Ocs::from_extrusion(self.extrusion)
+    }
+
+    fn into_raw(self, kind: RawKind) -> RawEntity {
+        RawEntity {
+            kind,
+            layer: self.layer,
+            color: self.color,
+        }
+    }
+
+    fn into_geom(self, geom: Geometry) -> RawEntity {
+        self.into_raw(RawKind::Geom(geom))
+    }
+}
+
+/// `LINE`。座標はワールド座標（WCS）なので、押し出し方向は形に関係しない。
+fn parse_line(reader: &mut Reader<'_>, tally: &mut Tally) -> Result<Option<RawEntity>> {
+    let mut common = CommonAttrs::new();
     let (mut ax, mut ay, mut bx, mut by) = (0.0, 0.0, 0.0, 0.0);
-    for p in attrs {
-        if take_common(p, &mut common)? {
+    for p in reader.read_attrs()? {
+        if common.take(p, tally)? {
             continue;
         }
         match p.code {
@@ -293,22 +480,15 @@ fn parse_line(reader: &mut Reader<'_>) -> Result<EntityRecord> {
             _ => {}
         }
     }
-    Ok(EntityRecord {
-        geom: Geometry::Line(Line::new(Point2::new(ax, ay), Point2::new(bx, by))),
-        layer: common.layer,
-        color: common.color,
-    })
+    let geom = Geometry::Line(Line::new(Point2::new(ax, ay), Point2::new(bx, by)));
+    Ok(Some(common.into_geom(geom)))
 }
 
-fn parse_circle(reader: &mut Reader<'_>) -> Result<EntityRecord> {
-    let attrs = reader.read_attrs()?;
-    let mut common = CommonAttrs {
-        layer: "0".to_string(),
-        color: ColorSpec::ByLayer,
-    };
+fn parse_circle(reader: &mut Reader<'_>, tally: &mut Tally) -> Result<Option<RawEntity>> {
+    let mut common = CommonAttrs::new();
     let (mut cx, mut cy, mut radius) = (0.0, 0.0, 0.0);
-    for p in attrs {
-        if take_common(p, &mut common)? {
+    for p in reader.read_attrs()? {
+        if common.take(p, tally)? {
             continue;
         }
         match p.code {
@@ -318,22 +498,16 @@ fn parse_circle(reader: &mut Reader<'_>) -> Result<EntityRecord> {
             _ => {}
         }
     }
-    Ok(EntityRecord {
-        geom: Geometry::Circle(Circle::new(Point2::new(cx, cy), radius)),
-        layer: common.layer,
-        color: common.color,
-    })
+    let geom = Geometry::Circle(Circle::new(Point2::new(cx, cy), radius));
+    let ocs = common.ocs();
+    Ok(ocs_to_world(geom, ocs, tally).map(|g| common.into_geom(g)))
 }
 
-fn parse_arc(reader: &mut Reader<'_>) -> Result<EntityRecord> {
-    let attrs = reader.read_attrs()?;
-    let mut common = CommonAttrs {
-        layer: "0".to_string(),
-        color: ColorSpec::ByLayer,
-    };
+fn parse_arc(reader: &mut Reader<'_>, tally: &mut Tally) -> Result<Option<RawEntity>> {
+    let mut common = CommonAttrs::new();
     let (mut cx, mut cy, mut radius, mut start_deg, mut end_deg) = (0.0, 0.0, 0.0, 0.0, 0.0);
-    for p in attrs {
-        if take_common(p, &mut common)? {
+    for p in reader.read_attrs()? {
+        if common.take(p, tally)? {
             continue;
         }
         match p.code {
@@ -346,32 +520,31 @@ fn parse_arc(reader: &mut Reader<'_>) -> Result<EntityRecord> {
             _ => {}
         }
     }
-    Ok(EntityRecord {
-        geom: Geometry::Arc(Arc::new(
-            Point2::new(cx, cy),
-            radius,
-            deg_to_rad(start_deg),
-            deg_to_rad(end_deg),
-        )),
-        layer: common.layer,
-        color: common.color,
-    })
+    let geom = Geometry::Arc(Arc::new(
+        Point2::new(cx, cy),
+        radius,
+        deg_to_rad(start_deg),
+        deg_to_rad(end_deg),
+    ));
+    let ocs = common.ocs();
+    Ok(ocs_to_world(geom, ocs, tally).map(|g| common.into_geom(g)))
 }
 
+/// `POLYLINE` のフラグ（70）のうち、頂点がワールド座標になるもの
+/// （8 = 3D ポリライン、16 = 3D メッシュ、64 = ポリフェースメッシュ）。
+/// それ以外（2D ポリライン）の頂点は OCS。
+const POLYLINE_WCS_FLAGS: i32 = 8 | 16 | 64;
+
 /// `POLYLINE` + `VERTEX`* + `SEQEND`（R12 の伝統的な形式）を読む。
-fn parse_polyline(reader: &mut Reader<'_>) -> Result<EntityRecord> {
-    let attrs = reader.read_attrs()?;
-    let mut common = CommonAttrs {
-        layer: "0".to_string(),
-        color: ColorSpec::ByLayer,
-    };
-    let mut closed = false;
-    for p in attrs {
-        if take_common(p, &mut common)? {
+fn parse_polyline(reader: &mut Reader<'_>, tally: &mut Tally) -> Result<Option<RawEntity>> {
+    let mut common = CommonAttrs::new();
+    let mut flags = 0;
+    for p in reader.read_attrs()? {
+        if common.take(p, tally)? {
             continue;
         }
         if p.code == 70 {
-            closed = parse_i32_pair(p)? & 1 != 0;
+            flags = parse_i32_pair(p)?;
         }
     }
 
@@ -384,9 +557,8 @@ fn parse_polyline(reader: &mut Reader<'_>) -> Result<EntityRecord> {
         }
         match p.value {
             "VERTEX" => {
-                let vattrs = reader.read_attrs()?;
                 let (mut vx, mut vy) = (0.0, 0.0);
-                for vp in vattrs {
+                for vp in reader.read_attrs()? {
                     match vp.code {
                         10 => vx = parse_f64_pair(vp)?,
                         20 => vy = parse_f64_pair(vp)?,
@@ -406,29 +578,27 @@ fn parse_polyline(reader: &mut Reader<'_>) -> Result<EntityRecord> {
         }
     }
 
-    Ok(EntityRecord {
-        geom: Geometry::Polyline(Polyline::new(vertices, closed)),
-        layer: common.layer,
-        color: common.color,
-    })
+    let geom = Geometry::Polyline(Polyline::new(vertices, flags & 1 != 0));
+    let ocs = if flags & POLYLINE_WCS_FLAGS != 0 {
+        Ocs::Identity
+    } else {
+        common.ocs()
+    };
+    Ok(ocs_to_world(geom, ocs, tally).map(|g| common.into_geom(g)))
 }
 
 /// `LWPOLYLINE`（R12 には無いが、新しいアプリが吐いたファイル用に読めるようにする）を読む。
 ///
 /// 頂点は `VERTEX` サブエンティティではなく、10/20 の組が並ぶだけの単純な属性列として
 /// 埋め込まれている。DXF の慣習どおり 10 の直後に対応する 20 が来る前提で読む。
-fn parse_lwpolyline(reader: &mut Reader<'_>) -> Result<EntityRecord> {
-    let attrs = reader.read_attrs()?;
-    let mut common = CommonAttrs {
-        layer: "0".to_string(),
-        color: ColorSpec::ByLayer,
-    };
+fn parse_lwpolyline(reader: &mut Reader<'_>, tally: &mut Tally) -> Result<Option<RawEntity>> {
+    let mut common = CommonAttrs::new();
     let mut closed = false;
     let mut vertices = Vec::new();
     let mut pending_x: Option<f64> = None;
 
-    for p in attrs {
-        if take_common(p, &mut common)? {
+    for p in reader.read_attrs()? {
+        if common.take(p, tally)? {
             continue;
         }
         match p.code {
@@ -443,14 +613,145 @@ fn parse_lwpolyline(reader: &mut Reader<'_>) -> Result<EntityRecord> {
         }
     }
 
-    Ok(EntityRecord {
-        geom: Geometry::Polyline(Polyline::new(vertices, closed)),
-        layer: common.layer,
-        color: common.color,
-    })
+    let geom = Geometry::Polyline(Polyline::new(vertices, closed));
+    let ocs = common.ocs();
+    Ok(ocs_to_world(geom, ocs, tally).map(|g| common.into_geom(g)))
 }
 
-fn parse_entities(reader: &mut Reader<'_>, out: &mut Vec<EntityRecord>) -> Result<()> {
+/// `INSERT`（と MINSERT）を読む。
+///
+/// 66 = 1 なら後ろに `ATTRIB` … `SEQEND` が続くので、ここでまとめて読み飛ばす
+/// （属性の中身は文字なので非スコープ。件数は「読まなかった種類」に数える）。
+fn parse_insert(reader: &mut Reader<'_>, tally: &mut Tally) -> Result<Option<RawEntity>> {
+    let mut common = CommonAttrs::new();
+    let mut block = String::new();
+    let (mut ix, mut iy) = (0.0, 0.0);
+    let (mut sx, mut sy, mut rot_deg) = (1.0, 1.0, 0.0);
+    let (mut cols, mut rows) = (1, 1);
+    let (mut col_spacing, mut row_spacing) = (0.0, 0.0);
+    let mut attribs_follow = false;
+    for p in reader.read_attrs()? {
+        if common.take(p, tally)? {
+            continue;
+        }
+        match p.code {
+            2 => block = p.value.to_string(),
+            10 => ix = parse_f64_pair(p)?,
+            20 => iy = parse_f64_pair(p)?,
+            41 => sx = parse_f64_pair(p)?,
+            42 => sy = parse_f64_pair(p)?,
+            50 => rot_deg = parse_f64_pair(p)?,
+            70 => cols = parse_i32_pair(p)?,
+            71 => rows = parse_i32_pair(p)?,
+            44 => col_spacing = parse_f64_pair(p)?,
+            45 => row_spacing = parse_f64_pair(p)?,
+            66 => attribs_follow = parse_i32_pair(p)? == 1,
+            _ => {}
+        }
+    }
+
+    if attribs_follow {
+        skip_attribs(reader, tally)?;
+    }
+
+    let mirror_ocs = match common.ocs() {
+        Ocs::Identity => false,
+        Ocs::MirrorX => true,
+        Ocs::Oblique => {
+            tally.oblique += 1;
+            return Ok(None);
+        }
+    };
+    let count = |n: i32| u32::try_from(n).unwrap_or(0).max(1);
+    let record = InsertRecord {
+        block,
+        insert: Point2::new(ix, iy),
+        sx,
+        sy,
+        rotation: deg_to_rad(rot_deg),
+        mirror_ocs,
+        cols: count(cols),
+        rows: count(rows),
+        col_spacing,
+        row_spacing,
+    };
+    Ok(Some(common.into_raw(RawKind::Insert(record))))
+}
+
+/// `INSERT` の後ろの `ATTRIB`* `SEQEND` を読み飛ばす。
+///
+/// `SEQEND` が無いまま次の図形が来た壊れたファイルでは、そこで止める（次の図形を食べない）。
+fn skip_attribs(reader: &mut Reader<'_>, tally: &mut Tally) -> Result<()> {
+    while reader.peek_code() == Some(0) {
+        match reader.peek_value() {
+            Some("ATTRIB") => {
+                reader.require_pair()?;
+                let _ = reader.read_attrs()?;
+                tally.skip("ATTRIB");
+            }
+            Some("SEQEND") => {
+                reader.require_pair()?;
+                let _ = reader.read_attrs()?;
+                break;
+            }
+            _ => break,
+        }
+    }
+    Ok(())
+}
+
+/// 図形 1 つを読む（直前に `0` / `kind` のペアを読んだところから）。
+///
+/// `ENTITIES` とブロックの中身で**同じ関数**を使う。読めない種類は数えて読み飛ばす。
+fn parse_entity(
+    reader: &mut Reader<'_>,
+    kind: &str,
+    tally: &mut Tally,
+) -> Result<Option<RawEntity>> {
+    match kind {
+        "LINE" => parse_line(reader, tally),
+        "CIRCLE" => parse_circle(reader, tally),
+        "ARC" => parse_arc(reader, tally),
+        "POLYLINE" => parse_polyline(reader, tally),
+        "LWPOLYLINE" => parse_lwpolyline(reader, tally),
+        "INSERT" => parse_insert(reader, tally),
+        // 対になる相手の無い SEQEND は中身が無いので数えない。
+        "SEQEND" => {
+            let _ = reader.read_attrs()?;
+            Ok(None)
+        }
+        _ => {
+            // 知らないエンティティ種別は読み飛ばし、種類ごとに数える。
+            let _ = reader.read_attrs()?;
+            tally.skip(kind);
+            Ok(None)
+        }
+    }
+}
+
+fn parse_entities(
+    reader: &mut Reader<'_>,
+    out: &mut Vec<RawEntity>,
+    tally: &mut Tally,
+) -> Result<()> {
+    loop {
+        let p = reader.require_pair()?;
+        if p.code != 0 {
+            continue;
+        }
+        if p.value == "ENDSEC" {
+            return Ok(());
+        }
+        if let Some(e) = parse_entity(reader, p.value, tally)? {
+            out.push(e);
+        }
+    }
+}
+
+// ---- BLOCKS セクション --------------------------------------------------------
+
+/// `BLOCKS` セクションを読む。
+fn parse_blocks(reader: &mut Reader<'_>, out: &mut Vec<BlockRecord>) -> Result<()> {
     loop {
         let p = reader.require_pair()?;
         if p.code != 0 {
@@ -458,89 +759,68 @@ fn parse_entities(reader: &mut Reader<'_>, out: &mut Vec<EntityRecord>) -> Resul
         }
         match p.value {
             "ENDSEC" => return Ok(()),
-            "LINE" => out.push(parse_line(reader)?),
-            "CIRCLE" => out.push(parse_circle(reader)?),
-            "ARC" => out.push(parse_arc(reader)?),
-            "POLYLINE" => out.push(parse_polyline(reader)?),
-            "LWPOLYLINE" => out.push(parse_lwpolyline(reader)?),
+            "BLOCK" => {
+                let (block, section_ended) = parse_block(reader)?;
+                out.push(block);
+                if section_ended {
+                    return Ok(());
+                }
+            }
             _ => {
-                // 知らないエンティティ種別は読み飛ばす。
                 let _ = reader.read_attrs()?;
             }
         }
     }
 }
 
-// ---- Document の組み立て -----------------------------------------------------
-
-/// レイヤレコードの属性（色・表示・ロック・線種）を対象レイヤへ適用する。
-fn apply_layer_props(doc: &mut Document, id: LayerId, rec: &LayerRecord) -> Result<()> {
-    doc.apply(Box::new(
-        SetLayerProperties::new(id)
-            .color(rec.color)
-            .visible(rec.visible)
-            .locked(rec.locked)
-            .linetype(rec.linetype),
-    ))
-}
-
-/// パース結果から実際の [`Document`] を、コマンド経由でのみ組み立てる。
+/// `BLOCK` の見出しから `ENDBLK` までを読む。
 ///
-/// `Document` のフィールドは private で、変更経路は [`Command`](crate::Command) しかない
-/// （`cad-core` 全体の不変条件）。読み込みも例外ではなく、`AddLayer` /
-/// `SetLayerProperties` / `AddEntities` を順に適用してから [`Document::clear_history`] で
-/// Undo 履歴を消し、まっさらな「開いた直後」の状態に整える。
-fn build_document(
-    layer_records: Vec<LayerRecord>,
-    entity_records: Vec<EntityRecord>,
-) -> Result<Document> {
-    let mut doc = Document::new();
-    let mut name_to_id: HashMap<String, LayerId> = HashMap::new();
-    name_to_id.insert("0".to_string(), LayerId::ZERO);
+/// `ENDBLK` が無いまま `ENDSEC` に着いた壊れたファイルでは、そこまでを中身とし、
+/// セクションも終わったことを `true` で返す。
+fn parse_block(reader: &mut Reader<'_>) -> Result<(BlockRecord, bool)> {
+    let mut name = None;
+    let mut alt_name = None;
+    let mut flags = 0;
+    let (mut bx, mut by) = (0.0, 0.0);
+    for p in reader.read_attrs()? {
+        match p.code {
+            2 => name = Some(p.value.to_string()),
+            3 => alt_name = Some(p.value.to_string()),
+            70 => flags = parse_i32_pair(p)?,
+            10 => bx = parse_f64_pair(p)?,
+            20 => by = parse_f64_pair(p)?,
+            _ => {}
+        }
+    }
+    let mut block = BlockRecord {
+        name: name.or(alt_name).unwrap_or_default(),
+        flags,
+        base: Point2::new(bx, by),
+        entities: Vec::new(),
+        tally: Tally::default(),
+    };
 
-    for rec in &layer_records {
-        if rec.name == "0" {
-            apply_layer_props(&mut doc, LayerId::ZERO, rec)?;
+    loop {
+        let p = reader.require_pair()?;
+        if p.code != 0 {
             continue;
         }
-        doc.apply(Box::new(AddLayer::new(rec.name.clone(), rec.color)))?;
-        let id = doc
-            .layers()
-            .by_name(&rec.name)
-            .ok_or(CadError::LayerNotFound)?;
-        apply_layer_props(&mut doc, id, rec)?;
-        name_to_id.insert(rec.name.clone(), id);
+        match p.value {
+            "ENDBLK" => {
+                let _ = reader.read_attrs()?;
+                return Ok((block, false));
+            }
+            "ENDSEC" => return Ok((block, true)),
+            kind => {
+                if let Some(e) = parse_entity(reader, kind, &mut block.tally)? {
+                    block.entities.push(e);
+                }
+            }
+        }
     }
-
-    let mut entities = Vec::with_capacity(entity_records.len());
-    for rec in entity_records {
-        let layer_id = if let Some(&id) = name_to_id.get(&rec.layer) {
-            id
-        } else {
-            // テーブルに無いレイヤをエンティティが参照している場合は、その場で作る。
-            doc.apply(Box::new(AddLayer::new(rec.layer.clone(), AciColor::WHITE)))?;
-            let id = doc
-                .layers()
-                .by_name(&rec.layer)
-                .ok_or(CadError::LayerNotFound)?;
-            name_to_id.insert(rec.layer.clone(), id);
-            id
-        };
-        let mut entity = Entity::new(rec.geom, layer_id);
-        entity.color = rec.color;
-        entities.push(entity);
-    }
-
-    if !entities.is_empty() {
-        doc.apply(Box::new(AddEntities::many("DXF_IMPORT", entities)))?;
-    }
-
-    // 開いた直後のファイルは Undo 履歴を持たず、未保存扱いにもしない。
-    doc.clear_history();
-    doc.mark_saved(None);
-
-    Ok(doc)
 }
+
+// ---- 公開 API ---------------------------------------------------------------
 
 /// DXF テキストを読み、新しい [`Document`] を組み立てて返す。
 ///
@@ -548,10 +828,17 @@ fn build_document(
 ///
 /// 行数が奇数、`EOF` が無い、数値としてパースできない値がある等、
 /// 構文として成立しない入力の場合 [`CadError::Parse`]。
-pub fn read_from_str(text: &str) -> Result<Document> {
+pub fn read_from_str(text: &str) -> Result<ReadReport> {
+    read_with_limits(text, build::Limits::DEFAULT)
+}
+
+/// [`read_from_str`] の本体。上限をテストから差し込めるように分けてある。
+fn read_with_limits(text: &str, limits: build::Limits) -> Result<ReadReport> {
     let mut reader = Reader::new(text)?;
     let mut layer_records = Vec::new();
     let mut entity_records = Vec::new();
+    let mut entity_tally = Tally::default();
+    let mut block_records = Vec::new();
     let mut saw_eof = false;
 
     while let Some(p) = reader.next_pair()? {
@@ -567,7 +854,10 @@ pub fn read_from_str(text: &str) -> Result<Document> {
                 let name_pair = reader.require_pair()?;
                 match name_pair.value {
                     "TABLES" => parse_tables(&mut reader, &mut layer_records)?,
-                    "ENTITIES" => parse_entities(&mut reader, &mut entity_records)?,
+                    "BLOCKS" => parse_blocks(&mut reader, &mut block_records)?,
+                    "ENTITIES" => {
+                        parse_entities(&mut reader, &mut entity_records, &mut entity_tally)?;
+                    }
                     _ => skip_section(&mut reader)?,
                 }
             }
@@ -582,7 +872,13 @@ pub fn read_from_str(text: &str) -> Result<Document> {
         });
     }
 
-    build_document(layer_records, entity_records)
+    build::build_document(
+        layer_records,
+        entity_records,
+        entity_tally,
+        block_records,
+        limits,
+    )
 }
 
 /// DXF ファイルを読み、新しい [`Document`] を組み立てて返す。
@@ -591,9 +887,9 @@ pub fn read_from_str(text: &str) -> Result<Document> {
 ///
 /// ファイルが読めない場合 [`CadError::Io`]、内容が構文として成立しない場合
 /// [`CadError::Parse`]。
-pub fn read_from_file(path: &Path) -> Result<Document> {
+pub fn read_from_file(path: &Path) -> Result<ReadReport> {
     let text = std::fs::read_to_string(path).map_err(|e| CadError::Io(e.to_string()))?;
-    let mut doc = read_from_str(&text)?;
-    doc.mark_saved(Some(path.to_path_buf()));
-    Ok(doc)
+    let mut report = read_from_str(&text)?;
+    report.document.mark_saved(Some(path.to_path_buf()));
+    Ok(report)
 }
