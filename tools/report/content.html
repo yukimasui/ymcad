@@ -8,8 +8,8 @@
 <ul>
 <li><b>ユキの不具合報告 #109「DXF のブロックが表示されない」を直して develop にマージした</b>（PR #111。コード・操作レビューとも OK、CI 緑）</li>
 <li>原因は、DXF の読み込みが BLOCKS を丸ごと読み飛ばし INSERT を捨てていたこと（ymcad 自身が書いた DXF でもブロックが消えていた）。ブロックはコンポーネントとして読み込む</li>
-<li>ネットで拾った実ファイル 7 本（jscad/sample-files・LibreDWG のテスト用 DXF・実際の間取り図）で、ezdxf の描画と形が一致することを確かめた（下の「画面」に間取り図の修正前後）</li>
-<li><b>お願い: Issue を立てたきっかけの、ijcad で表示できた DXF を ymcad で開いてみてほしい</b>（develop を pull してビルド）。古い DXF（AC1018 以前）で「UTF-8 のテキストではありません」と出たら <a href="https://github.com/yukimasui/ymcad/issues/110">#110</a> の件</li>
+<li>ネットで拾った実ファイル 7 本（jscad/sample-files・LibreDWG のテスト用 DXF・サンプルの間取り図）で、ezdxf の描画と形が一致することを確かめた（下の「画面」に間取り図の修正前後）</li>
+<li><b>お願い: Issue を立てたきっかけの、ijcad で表示できた DXF を ymcad で開いてみてほしい</b>（develop を pull してビルド）。古い DXF（AC1018 以前）で「読み込みに失敗しました: 入出力エラー: stream did not contain valid UTF-8」と出たら <a href="https://github.com/yukimasui/ymcad/issues/110">#110</a> の件</li>
 </ul>
 </section>
 
@@ -160,7 +160,7 @@
 <details>
 <summary>2026-10-14 — 不具合報告 #109（DXF のブロック）の修正</summary>
 <div class="detailbody">
-<p>DXF の読み込みが BLOCKS を読み飛ばしていたのを、コンポーネントとして読むように直した（PR #111）。ネットの DXF 7 本を ezdxf の描画と比べて確かめた。レビューは 3 往復とも両レビュアー OK（2・3 回目は非ブロッキング指摘の反映）。文字コードは #110、追いかけは #112〜#114 に起票。</p>
+<p>DXF の読み込みが BLOCKS を読み飛ばしていたのを、コンポーネントとして読むように直した（PR #111）。ネットの DXF 7 本を ezdxf の描画と比べて確かめた。レビューは 3 回とも両レビュアー OK（2・3 回目は非ブロッキング指摘を反映した後の再レビュー）。文字コードは #110、追いかけは #112〜#114 に起票。</p>
 </div>
 </details>
 <details>
